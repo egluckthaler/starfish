@@ -52,8 +52,6 @@ fi
 </pre>
 ```
 
-time to go fishin'
-
 ### additional dependencies
 
 The R package `gggenomes` is used in some visualization commands and can be installed by visiting [the gggenomes github page](https://github.com/thackl/gggenomes)
