@@ -9,7 +9,7 @@ $|=1;
 sub usage {
 	my $message = shift;
 	my $usage = qq/
-STARship FInder SHell v1.0: a modular workflow for large mobile element discovery
+starfish v1.0: a computational workflow for large mobile element discovery
 
 usage: starfish <command> [args]
 
