@@ -2,13 +2,17 @@
 
 starfish is a computational workflow for large mobile element discovery. Built primarily for annotating [giant *Starship* elements](https://academic.oup.com/mbe/article/39/5/msac109/6588634) in fungal genomes, it can be easily adapted to find any large mobile element (≥6kb) that shares the same basic architecture as a fungal *Starship* or a bacterial integrative and conjugative element: a "captain" gene with zero or more "cargo" genes downstream of its 3' end.
 
+<img
+  src="/data/element_logo_color.png"
+  title="Starship architecture"
+  style="display: left; margin: 0 auto; max-width: 400px">
+
 ## overview
 
 starfish is organized into three main modules: Gene finder, Element finder, and Region finder. Each has dedicated commands that are typically run sequentially. Many auxiliary commands that provide additional utilities and generate visualizations are also available through the commandline. Several useful stand-alone scripts are located in the `/scripts` directory. 
 
 <img
   src="/data/starfishWorkflow.png"
-  alt="starfish workflow and commands"
   title="starfish workflow and commands"
   style="display: center; margin: 0 auto; max-width: 400px">
 
