@@ -3,7 +3,7 @@
 <img
   src="/data/element_logo_color.png"
   align = "right"
-  style="margin: 0 auto; width: 182.4px; height: 200.8px">
+  style="margin: 0 auto; width: 182px; height: 200px">
 
 starfish is a computational workflow for large mobile element discovery. Built primarily for annotating [giant *Starship* elements](https://academic.oup.com/mbe/article/39/5/msac109/6588634) in fungal genomes, it can be easily adapted to find any large mobile element (≥6kb) that shares the same basic architecture as a fungal *Starship* or a bacterial integrative and conjugative element: a "captain" gene with zero or more "cargo" genes downstream of its 3' end.
 
