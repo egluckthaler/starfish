@@ -7,7 +7,7 @@ starfish is a computational workflow for large mobile element discovery. Built p
 starfish is organized into three main modules: gene finder, element finder, and region finder. Each has several dedicated commands that are typically run sequentially. Many auxiliary commands that provide additional analyses and generate visualizations are also available through the commandline. Several useful stand-alone scripts are located in the `/scripts` directory. 
 
 <img
-  src="data/starfishWorkflow.jpg"
+  src="/data/starfishWorkflow.png"
   alt="starfish workflow and commands"
   title="starfish workflow and commands"
   style="display: center; margin: 0 auto; max-width: 300px">
