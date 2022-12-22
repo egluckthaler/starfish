@@ -48,9 +48,11 @@ Some starfish commands have dependencies that are stand-alone programs in their 
 |`annotate`, `augment`| `metaeuk`, `hmmer`, `bedtools` | TBD |
 |`insert`, `extend`| `blastn`,`mummer4` | TBD |
 |`flank`| `cnef` | TBD |
-|`*-viz`|`circos`,`gggenomes`,`mummer4`,`mafft`, `minimap2`| TBD |
 |`sim`| `sourmash` | TBD |
 |`group`| `mcl` | TBD |
+|`*-viz`|`circos`,`gggenomes`,`mummer4`,
+`mafft`, `minimap2`| TBD |
 
 ## license
 
+starfish is an open source tool available under the GNU Affero General Public License version 3.0 or greater.
