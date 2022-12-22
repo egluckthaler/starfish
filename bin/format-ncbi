@@ -1,0 +1,190 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use Data::Dumper;
+use File::Basename;
+use Getopt::Long qw(:config auto_abbrev no_ignore_case);
+use Sort::Naturally;
+use FileHandle;
+$|=1;
+# glofish lib
+use Fishtank::Utils qw(Fasta_hash_nospace dim_0_hash dim_1_hash Open_FH Format_check_fasta Format_name);
+
+sub usage {
+	my $message = shift;
+	my $usage = qq/
+usage: starfish format-ncbi [args]
+
+format ncbi assemblies and assign genomeIDs.
+ 
+Required:
+-r, --report      FILE   an ncbi genome report file.
+-a, --assemblies  FILE   1 column tsv: paths to assemblies.
+
+Required, with defaults:
+-s, --separator   STR    the character separating genomeID from featureID.
+                         (default: '_')
+
+Optional:
+-c, --codes       FILE   1 column file listing existing genome codes.
+-h, --help               print more details and exit.
+
+/;
+	if (not defined $message) {
+		$message = $usage;
+	} else {
+		$message = "$message\nuse -h for more details\n\n" ;
+	}	
+	die($message);
+}
+
+main: {
+
+	# parse and check options
+	my %opts;
+	GetOptions(\%opts, 
+		'report|r=s',
+		'assemblies|a=s',
+		'separator|s=s',
+		'codes|c=s',
+		'h|help');
+	Opts_check(\%opts);
+
+
+	######################
+	#### READ IN DATA ####
+	######################
+
+	my ($reports) = dim_1_hash($opts{'report'}, "\t", "8:0"); # structured: {assembly accession} = genus species isolate
+	my ($assemblies) = dim_0_hash($opts{'assemblies'}, "\t", "0");
+	my ($existingCodes, $highestCount);
+	if (defined $opts{'codes'}) {
+		($existingCodes) = dim_0_hash($opts{'codes'}, "\t", "0");
+		($highestCount) = Parse_highest_count($existingCodes);
+	}
+	
+	#######################
+	#### REFORMAT DATA ####
+	#######################
+
+	# assign genome codes and print out formatted files
+	my $datestring = localtime();
+	print "[$datestring] reformatting assembly fasta headers..\n";
+
+	my %foundAssemblies;
+	foreach my $report (nsort keys %{$reports}) { # use n sort to ensure reproducibility of genome code assignments
+		my $foundAssembly = 0;
+		foreach my $assembly (nsort keys %{$assemblies}) { # use n sort to ensure reproducibility of genome code assignments
+			my ($oldName, $OUTDIR) = fileparse($assembly);
+			my $genomeID;
+			if ($oldName =~ m/^${report}_/) { # all assembly files should have their accession as a prefix (default ncbi download parameters)
+				$foundAssembly = 1;
+				$foundAssemblies{$assembly} = 1;
+				($genomeID, $existingCodes, $highestCount) = Assign_genomeID($reports->{$report}, $existingCodes, $highestCount);
+				print "$genomeID\t$report\t$reports->{$report}\n";
+				my ($OUT) = Open_FH("$OUTDIR/$genomeID.fishtank_format.fna");
+				my ($seqs) = Fasta_hash_nospace($assembly);
+				foreach my $header (keys %{$seqs}) {
+					my ($newHeader) = Format_name($header, $genomeID, $opts{'separator'});
+					print $OUT ">$newHeader\n$seqs->{$header}\n";
+				}
+				close($OUT);
+				# sanity check to confirm that fasta is indeed properly formatted
+				Format_check_fasta("$OUTDIR/$genomeID.fishtank_format.fna", $opts{'separator'});
+			}
+		}
+		if ($foundAssembly == 0) {
+			$datestring = localtime();
+			print "[$datestring] warning: could not find the assembly file for $report $reports->{$report}\n";
+		}
+	}
+	foreach my $assembly (keys %{$assemblies}) {
+		$datestring = localtime();
+		print "[$datestring] warning: could not find the report info for assembly $assembly\n" if (not exists $foundAssemblies{$assembly});
+	}
+
+	$datestring = localtime();
+	print "[$datestring] done\n";
+
+}
+
+
+
+sub Assign_genomeID {
+	my ($latinBinomial, $existingCodes, $highestCount) = @_;
+	my ($genus, $species) = split/ /, $latinBinomial;
+	$genus =~ m/^(\w{3})/;
+	my $gen = $1;
+	$species =~ m/^(\w{3})/;
+	my $spe = $1;
+	my $genSpe = lc("$gen$spe");
+	my $count = 1;
+	
+	# increase count
+	if (defined $highestCount) {
+		if (exists $highestCount->{$genSpe}) {
+			$count = $highestCount->{$genSpe};
+			$count++;
+		}
+	}
+
+	# check genome code does not conflict with existing codes, and if it does, find one that doesn't
+	my $genomeID = "$genSpe$count";
+	if (defined $existingCodes) {
+		if (exists $existingCodes->{$genomeID}) {
+			my $existingFound = 1;
+			while ($existingFound == 1) {
+				$count++;
+				$genomeID = "$genSpe$count";
+				$existingFound = 0 if (not exists $existingCodes->{$genomeID});
+			}
+		}
+	}
+
+	# update hashes
+	$existingCodes->{$genomeID} = 1;
+	$highestCount->{$genSpe} = $count;
+	return($genomeID, $existingCodes, $highestCount);
+}
+
+sub Parse_highest_count {
+	my ($existingCodes) = @_;
+	my %highestCount;
+	foreach my $code (keys %{$existingCodes}) {	
+		$code =~ m/^(.+?)(\d+)$/;
+		my ($genSpe, $count) = ($1, $2);
+		if (defined $count) { # if a number can be parsed from suffix of genomeID
+			if (exists $highestCount{$genSpe}) {
+				$highestCount{$genSpe} = $count if ($count > $highestCount{$genSpe});
+			} else {
+				$highestCount{$genSpe} = $count;
+			}
+		}
+	}
+	return(\%highestCount);	
+}
+
+sub Opts_check {
+	my ($opts) = @_;
+	usage() if (exists $opts->{'h'});
+	usage("\nError: no arguments provided\n") if (scalar keys %{$opts} == 0);
+	usage("\nError: please provide a file to --report\n") if (not defined $opts->{'report'});
+	usage("\nError: the file provided to --report does not exist\n") if (! -f $opts->{'report'});
+	usage("\nError: please provide a file to --assemblies\n") if (not defined $opts->{'assemblies'});
+	usage("\nError: the file provided to --assemblies does not exist\n") if (! -f $opts->{'assemblies'});
+	if (defined $opts->{'codes'}) {
+		usage("\nError: the file provided to --codes does not exist\n") if (! -f $opts->{'codes'});
+	}
+	if (not defined $opts->{'separator'}) {
+		$opts->{'separator'} = '_';
+	} elsif ($opts->{'separator'} eq ':') {
+		usage("\nError: the separator character cannot be ':'\n");
+	} elsif ($opts->{'separator'} eq ';') {
+		usage("\nError: the separator character cannot be ';'\n");
+	} elsif ($opts->{'separator'} eq '|') {
+		usage("\nError: the separator character cannot be '|'\n");
+	}
+	if (defined $opts->{'separator'}) {
+		$opts->{'separator'} = quotemeta($opts->{'separator'});	# to allow splitting on special characters, like '.'
+	}
+}

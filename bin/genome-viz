@@ -1,0 +1,655 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use Data::Dumper;
+use File::Basename;
+use Getopt::Long qw(:config auto_abbrev no_ignore_case);
+use Sort::Naturally;
+use Storable;
+use FileHandle;
+use POSIX;
+$|=1;
+# Fishtank lib
+use Fishtank::Utils qw(dim_2_hash Parse_known_elements Commandline_check Calculate_pairwise_mashdist Add_genome_to_sequence Sort_bed_hash_by_coordinate Filter_out_first_key Parse_upstream_region_from_gene Reverse_gene_hash Filter_in_first_key Parse_duf3435_from_regions Reverse_complement Fasta_hash Fasta_hash_nospace Fasta_hash_many_files Gff_gene_hash Glofish_bed_hash dim_0_hash dim_1_hash Open_FH Format_check_fasta Format_check_gff);
+
+sub usage {
+	my $message = shift;
+	my $usage = qq/
+usage: starfish genome-viz [args]
+
+visualize elements and sites in a genome with circos.
+
+Required:
+-m, --mode        STR    genomes to visualize, either 'all' or 'single'.
+-a, --assembly    FILE   2 column tsv: genome code, path to assembly FASTA.
+-b, --bed         FILE   BED file with feature coordinates of mobile elements. 
+-o, --outdir      DIR    output directory.
+
+At most one of the following:
+-S, --stats       FILE   named.stats file.
+                         (output by starfish summarize)
+-r, --regions     FILE   regions.txt file.
+                         (output by starfish dereplicate)
+
+Required, if --mode single:
+-q, --que         STR    query genomeID.
+
+Required, with defaults:
+-s, --separator   STR    character separating genomeID from featureID.
+                         (default: '_')
+-l, --length      INT    min length of contigs to visualize, in bp.
+                         (default: 50000)
+-e, --empty       INT    max number of elementIDs to show a given insertion site.
+                         (default: 3)
+--color1          HEX    hexcode of genome contigs.
+                         (without leading '#'; default: b3b1b2)
+--color2          HEX    hexcode of insert and flank elements.
+                         (without leading '#'; default: ff264e)
+--color3          HEX    hexcode of extend elements.
+                         (without leading '#'; default: ff264e)
+
+Optional:
+--force                  force all steps even if output already exists.
+-h, --help               print more details and exit.
+
+/;
+	if (not defined $message) {
+		$message = $usage;
+	} else {
+		$message = "$message\nuse -h for more details\n\n" ;
+	}	
+	die($message);
+}
+
+main: {
+
+	# parse and check options
+	my %opts;
+	GetOptions(\%opts, 
+		'mode|m=s',
+		'assembly|a=s',
+		'bed|b=s',
+		'outdir|o=s',
+		'stats|S=s',
+		'regions|r=s',
+		'separator|s=s',
+		'que|q=s',
+		'length|l=i',
+		'empty|e=i',
+		'color1=s',
+		'color2=s',
+		'color3=s',
+		'force',
+		'h|help');
+	Opts_check(\%opts);
+
+	# check dependencies
+	my @commandlines = ("circos");
+	Commandline_check(\@commandlines);
+
+	print "Key parameters:
+--length   $opts{'length'}
+--empty    $opts{'empty'}\n\n";
+
+	#######################################
+	#### FORMAT CHECK AND READ IN DATA ####
+	#######################################
+
+		my $datestring = localtime();
+		print "[$datestring] reading in data..\n";
+	
+		# Parse info from Starship regions
+		# structured: {contigID}{regionID}{featureID} = [begin, end, strand, tag, annotation]
+		my ($starshipFeatures) = Glofish_bed_hash($opts{'bed'});
+
+		# Parse the coordinates of any elements with 'cap' DUF3435 genes
+		# elementBegin and elementEnd are the upmost and downmost coordinates associated with this captain
+		# structured: starshipCoords{contigID}{regionID}{capID} = [elementBegin, elementEnd, strand, tag, ann]
+		my ($starshipCoordsTemp) = Parse_known_elements($starshipFeatures);
+
+		# Parse empty sites for elements with flank boundaries (located in singleDR.stats file)
+		# structured: {capID} = emptyContigID
+		my ($flankCoords) = Parse_flank_empty($opts{'flank'}) if (defined $opts{'flank'});
+
+		# Load up all assembly sequences into a single hash
+		# Structured: {sequenceID} = sequence
+		my ($sequencePaths) = dim_0_hash($opts{'assembly'}, "\t", "1");
+		my ($id2sequence) = Fasta_hash_many_files($sequencePaths);
+		
+	#############################################################
+	#### PARSE STARSHIP AND EMPTY SITE COORDINATES BY GENOME ####
+	#############################################################
+	
+		$datestring = localtime();
+		print "[$datestring] parsing element coordinates and insertion sites by genome..\n";
+		
+		my $queID = $opts{'que'} if ((defined $opts{'que'}) && ($opts{'mode'} eq 'single'));
+
+		# Parse the coordinates for insert and extend elements (insert elements consist of elements with either flank or insert boundaries)
+		# Empty sites for elements with insert boundaries are located in the .bed file as part of the feature name
+		# structured: {genomeID}{contigID}{regionID/emptyID} = [begin, end, strang, tag]
+		my ($allStarshipCoords) = Parse_element_coords($starshipFeatures, $starshipCoordsTemp, $flankCoords, $opts{'separator'}, $queID);
+
+		# Parse the coordinates of all empty sites associated with Starship insertions
+		# structured: {genomeID}{contigID}{regionID/emptyID} = [begin, end, strang, tag]
+		# insertion site IDs are the name of the elementID that inserted there
+		# if >3 regions per empty site, count them instead of naming them
+		my ($emptyCoords) = Parse_empty_sites($opts{'stats'}, $queID, $opts{'separator'}, $opts{'empty'}) if (defined $opts{'stats'});
+		
+		# if regions provided, override info from stats file if it was provided
+		($emptyCoords) = Parse_empty_regions($opts{'regions'}, $queID, $opts{'separator'}, $opts{'empty'}) if (defined $opts{'regions'});
+
+		# Combine all coordinates into a single hash
+		my ($allCoords) = Combine_coordinates($allStarshipCoords, $emptyCoords);
+		
+		usage("\n[$datestring] could not find any element or empty site coordinates in any genomes.. if you provided a query, are you sure it's in the provided --stats and --bed files?\n") if (scalar keys %{$allCoords} == 0);
+			
+	##############################
+	#### EXECUTE CIRCOS FILES ####
+	##############################
+
+		$datestring = localtime();
+		print "[$datestring] executing circos..\n";
+		
+		# print .kar, .config and .coords files
+		Circos_wrapper($allCoords, $id2sequence, $opts{'length'}, $opts{'color1'}, $opts{'color2'}, $opts{'color3'}, $opts{'outdir'}, $opts{'force'});
+
+		$datestring = localtime();
+		print "[$datestring] done\n";
+
+
+}
+
+sub Circos_wrapper {
+	my ($allCoords, $id2sequence, $MINLENGTH, $color1, $color2, $color3, $OUTDIR, $FORCE) = @_;
+
+	foreach my $genomeID (nsort keys %{$allCoords}) {
+		my $datestring = localtime();
+		
+		# outputprefix
+		my $outprefix = "$OUTDIR/$genomeID";
+		# skip if .png exists
+		if (-f -f "$outprefix.png" && $FORCE != 1) {
+			print "[$datestring] $outprefix.png exists, skipping circos plotting\n";
+			next;
+		}
+
+		# .kar file describing contigs to visualize
+		# chr - mp102.cc10-1 mp102.cc10-1 2661008 3841204 a6cee3
+		# chr - mp053.cc2-3 mp053.cc2-3 3456950 4545745 a6cee3
+		my $karFile = "$outprefix.kar";
+		my ($karOUT) = Open_FH($karFile);
+
+		# .coordinates file to visualize starship regions
+		my $insertCoordsFile = "$outprefix.insert.coords";
+		my ($insertCoordOUT) = Open_FH($insertCoordsFile);
+		my $extendCoordsFile = "$outprefix.extend.coords";
+		my ($extendCoordOUT) = Open_FH($extendCoordsFile);
+		
+		# .label files for labeling regions and insertion sites
+		my $insertLabelFile =  "$outprefix.insert.labels";
+		my ($insertLabelOUT) = Open_FH($insertLabelFile);
+		my $extendLabelFile =  "$outprefix.extend.labels";
+		my ($extendLabelOUT) = Open_FH($extendLabelFile);
+		my $emptyLabelFile =  "$outprefix.empty.labels";
+		my ($emptyLabelOUT) = Open_FH($emptyLabelFile);
+		
+		my ($emptyCount, $insertCount, $extendCount) = (0,0,0);
+
+		foreach my $contigID (nsort keys %{$allCoords->{$genomeID}}) {
+			
+			# skip if contig length < $MINLENGTH
+			my $contigLength = length($id2sequence->{$contigID});
+			next if ($contigLength < $MINLENGTH);
+			
+			print $karOUT "chr - $contigID $contigID 1 $contigLength $color1\n";
+
+			foreach my $regionID (nsort keys %{$allCoords->{$genomeID}->{$contigID}}) {
+		
+				my ($begin, $end, $strand, $tag) = @{$allCoords->{$genomeID}->{$contigID}->{$regionID}};
+				my $labelCoord = $begin + floor(($end - $begin) / 2);
+				
+				if ($tag eq 'empty') {
+					print $emptyLabelOUT "$contigID\t$labelCoord\t$labelCoord\t$regionID\n";
+					$emptyCount++;
+				} elsif ($tag eq 'insert') {
+					print $insertCoordOUT "$contigID\t$begin\t$end\n";
+					print $insertLabelOUT "$contigID\t$begin\t$end\t$regionID\n";
+					$insertCount++;
+				} elsif ($tag eq 'extend') {
+					print $extendCoordOUT "$contigID\t$begin\t$end\n";
+					print $extendLabelOUT "$contigID\t$begin\t$end\t$regionID\n";
+					$extendCount++;			
+				}
+			}
+		}
+			
+		
+		# .config file for everything else
+		# print insert, extend and empty features on a case-by-case basis
+		my $configFile = "$outprefix.config";
+		my ($configOUT) = Open_FH($configFile);
+		print $configOUT "karyotype = $karFile
+chromosomes_units = 100000
+
+<<include colors_fonts_patterns.conf>>
+<<include housekeeping.conf>>
+
+# IMAGE
+<image>
+<<include image.conf>>
+radius*             = 1800p
+</image>
+
+# IDEOGRAM
+# IDEOGRAM
+<ideogram>
+	<spacing>
+	default = 2u
+	break = 2u
+	</spacing>
+
+	# thickness and color of ideograms
+	thickness          = 300p
+	stroke_thickness   = 1
+	stroke_color       = black
+
+	# the default chromosome color is set here and any value
+	# defined in the karyotype file overrides it
+	fill               = yes
+	fill_color         = $color1
+
+
+	# fractional radius position of chromosome ideogram within image
+	radius             = 0.6r
+	show_label         = yes
+	label_font         = default
+	label_parallel   = no
+	label_radius       = dims(ideogram,radius) - 0.8r
+	label_size         = 26
+ 
+	# show_bands determines whether the outline of cytogenetic bands will be seen
+	show_bands         = yes
+	band_stroke_thickness = 1
+
+	# in order to fill the bands with the color defined in the karyotype file you must set fill_bands
+	fill_bands         = no
+	band_transparency  = 1
+</ideogram>
+
+show_ticks         = yes
+show_tick_labels   = yes
+ 
+<ticks>
+tick_label_font    = light
+radius             = dims(ideogram,radius_outer)
+label_offset       = 8p
+label_size         = 24p
+color              = black
+thickness          = 2p
+
+	<tick>
+	# every 250kb
+	show_ticks         = yes
+	skip_first_label = no
+	spacing           = 2.5u
+	size              = 10p
+	show_label        = no
+	label_size        = 24
+	thickness         = 6p
+	color             = greys-5-seq-3
+	</tick>
+
+	<tick>
+	# every 1mb
+	show_ticks         = yes
+	skip_first_label = no
+	spacing           = 10u
+	size              = 10p
+	show_label        = yes
+	multiplier        = 0.1/1u
+	format            = %d mb
+	label_size        = 18
+	thickness         = 6p
+	color             = greys-5-seq-3
+	</tick>
+
+</ticks>
+\n";
+		
+		# highlight block
+		print $configOUT "<highlights>\n";
+		
+		if ($insertCount > 0) {
+			print $configOUT "
+# insert highlights
+ <highlight>
+ file       = $insertCoordsFile
+ fill_color = $color2
+ stroke_color = black
+ stroke_thickness = 6
+ ideogram   = yes
+ </highlight>\n";
+		}
+		if ($extendCount > 0) {
+			print $configOUT "
+# extend highlights
+ <highlight>
+ file       = $extendCoordsFile
+ fill_color = $color3
+ stroke_color = black
+ stroke_thickness = 6
+ ideogram   = yes
+ </highlight>\n";
+		}
+		print $configOUT "</highlights>\n";
+
+		# plots block
+		print $configOUT "<plots>\n";
+		
+		if ($emptyCount > 0) {
+			print $configOUT "
+# empty labels
+ <plot>
+	type             = text
+	color            = black
+	file             = $emptyLabelFile
+	r0 = 1r
+ 	r1 = 1r + 2000p
+	fill_color         = black
+	thickness          = 5p
+	label_snuggle             = yes
+	max_snuggle_distance            = 20r
+	show_links     = yes
+	link_dims      = 10p,30p,8p,4p,4p
+	link_thickness = 5p
+	link_color     = black
+	label_size   = 22p
+	label_font   = normal
+	padding  = 5p
+	rpadding = 5p
+ </plot>\n";
+		}
+
+		if ($insertCount > 0) {
+			print $configOUT "
+# insert labels
+ <plot>
+	type             = text
+	color            = $color2
+	file             = $insertLabelFile
+	r0 = 1r
+ 	r1 = 1r + 2000p
+	fill_color         = $color2
+	thickness          = 2p
+	label_snuggle             = yes
+	max_snuggle_distance            = 20r
+	show_links     = yes
+	link_dims      = 10p,200p,8p,4p,4p
+	link_thickness = 2p
+	link_color     = $color2
+	label_size   = 22p
+	label_font   = normal
+	padding  = 5p
+	rpadding = 5p
+ </plot>\n";
+ 		}
+ 		if ($extendCount > 0) {
+			print $configOUT "
+# extend labels
+ <plot>
+	type             = text
+	color            = $color3
+	file             = $extendLabelFile
+	r0 = 1r
+ 	r1 = 1r + 2000p
+	fill_color         = $color3
+	thickness          = 2p
+	label_snuggle             = yes
+	max_snuggle_distance            = 20r
+	show_links     = yes
+	link_dims      = 10p,200p,8p,4p,4p
+	link_thickness = 2p
+	link_color     = $color3
+	label_size   = 22p
+	label_font   = normal
+	padding  = 5p
+	rpadding = 5p
+ </plot>\n";
+ 		}
+		print $configOUT "</plots>\n";
+			
+		my ($circosCheck) = system("circos -conf $configFile -outputfile $outprefix &>/dev/null");
+		if ($circosCheck != 0) { die "\n\n[$datestring] error: could not execute circos on commandline for $genomeID, exiting..\n$!\n";}
+	}
+			
+}
+
+sub Combine_coordinates {
+	my ($allStarshipCoords, $emptyCoords) = @_;
+	my %allCoords;
+	
+	if (defined $allStarshipCoords) {
+		foreach my $genomeID (keys %{$allStarshipCoords}) {
+			foreach my $contigID (keys %{$allStarshipCoords->{$genomeID}}) {
+				foreach my $regionID (keys %{$allStarshipCoords->{$genomeID}->{$contigID}}) {
+					push @{$allCoords{$genomeID}{$contigID}{$regionID}}, @{$allStarshipCoords->{$genomeID}->{$contigID}->{$regionID}};
+				}
+			}
+		}
+	}
+	
+	if (defined $emptyCoords) {
+		foreach my $genomeID (keys %{$emptyCoords}) {
+			foreach my $contigID (keys %{$emptyCoords->{$genomeID}}) {
+				foreach my $regionID (keys %{$emptyCoords->{$genomeID}->{$contigID}}) {
+					push @{$allCoords{$genomeID}{$contigID}{$regionID}}, @{$emptyCoords->{$genomeID}->{$contigID}->{$regionID}};
+				}
+			}
+		}
+	}
+	
+	return(\%allCoords);
+}
+
+sub Parse_empty_regions {
+	my ($regionsfile, $queID, $SEP, $MAXEMPTY) = @_;
+	my %emptySites;
+	open(my $IN, '<', $regionsfile) or usage("\nError: could not open $regionsfile for reading\n");
+	
+	# first, load into a hash by empty site coordinates to enable counting
+	my %coords;
+	while (my $line = <$IN>) {
+		next if ($line =~ m/^#/);
+		chomp $line;
+		#acquire info
+		my ($regionID, $memberGroupID, $memberID, $memberType, $contigID, $begin, $end, $regionBegin, $regionEnd, $flankingOGs) = split("\t", $line);
+		my ($genomeID) = split/$SEP/, $contigID;
+
+		# for targeted analyses
+		next if ((defined $queID) && ($genomeID ne $queID));
+		push @{$coords{$genomeID}{$contigID}{"${regionBegin}-${regionEnd}"}}, $regionID;
+	}
+
+	# now, load up into final hash but if > MAXEMPTY elements are present, count them instead of naming
+	foreach my $genomeID (keys %coords) {
+		foreach my $emptyContigID (keys %{$coords{$genomeID}}) {
+			foreach my $range (keys %{$coords{$genomeID}{$emptyContigID}}) {
+				my ($emptyBegin, $emptyEnd) = split/-/, $range;
+				my $elementCount = scalar @{$coords{$genomeID}{$emptyContigID}{$range}};
+				if ($elementCount > $MAXEMPTY) {
+					my $newID = "${elementCount}_elements";
+					push @{$emptySites{$genomeID}{$emptyContigID}{$newID}}, $emptyBegin, $emptyEnd, 'NA', "empty";
+				} else {
+					foreach my $elementID (@{$coords{$genomeID}{$emptyContigID}{$range}}) {
+						push @{$emptySites{$genomeID}{$emptyContigID}{$elementID}}, $emptyBegin, $emptyEnd, 'NA', "empty";
+					}
+				}
+			}
+		}
+	}
+
+	return(\%emptySites);
+}
+
+
+sub Parse_empty_sites {
+	my ($statsfile, $queID, $SEP, $MAXEMPTY) = @_;
+	my %emptySites;
+	open(my $IN, '<', $statsfile) or usage("\nError: could not open $statsfile for reading\n");
+	
+	# first, load into a hash by empty site coordinates to enable counting
+	my %coords;
+	while (my $line = <$IN>) {
+		next if ($line =~ m/^#/);
+		chomp $line;
+		#acquire info
+		my ($elementID, $elementCaptainID, $elementContigID, $elementBegin, $elementEnd, $elementLength, $elementStrand, $emptySiteID, $emptyContigID, $emptyBegin, $emptyEnd, $emptyLength, $emptyStrand, $emptySiteSeq, $quality, $warnings) = split("\t", $line);
+		my ($genomeID) = split/$SEP/, $emptyContigID;
+
+		# for targeted analyses
+		next if ((defined $queID) && ($genomeID ne $queID));
+		push @{$coords{$genomeID}{$emptyContigID}{"${emptyBegin}-${emptyEnd}"}}, $elementID;
+	}
+
+	# now, load up into final hash but if > MAXEMPTY elements are present, count them instead of naming
+	foreach my $genomeID (keys %coords) {
+		foreach my $emptyContigID (keys %{$coords{$genomeID}}) {
+			foreach my $range (keys %{$coords{$genomeID}{$emptyContigID}}) {
+				my ($emptyBegin, $emptyEnd) = split/-/, $range;
+				my $elementCount = scalar @{$coords{$genomeID}{$emptyContigID}{$range}};
+				if ($elementCount > $MAXEMPTY) {
+					my $newID = "${elementCount}_elements";
+					push @{$emptySites{$genomeID}{$emptyContigID}{$newID}}, $emptyBegin, $emptyEnd, 'NA', "empty";
+				} else {
+					foreach my $elementID (@{$coords{$genomeID}{$emptyContigID}{$range}}) {
+						push @{$emptySites{$genomeID}{$emptyContigID}{$elementID}}, $emptyBegin, $emptyEnd, 'NA', "empty";
+					}
+				}
+			}
+		}
+	}
+
+	return(\%emptySites);
+}
+
+sub Parse_element_coords {
+	my ($starshipFeatures, $knownElements, $flankCoords, $SEP, $queID) = @_;
+	my (%all);
+	
+	my (%cap2empty, %cap2extend, %element2contig, %element2cap);
+	foreach my $contigID (keys %{$starshipFeatures}) {
+		foreach my $starshipID (keys %{$starshipFeatures->{$contigID}}) {
+			foreach my $targetFeatureID (keys %{$starshipFeatures->{$contigID}->{$starshipID}}) {
+				my ($start, $end, $strand, $tag, $ann) = @{$starshipFeatures->{$contigID}->{$starshipID}->{$targetFeatureID}};
+				if ($tag =~ m/^insert$/) {
+					my ($capID, $emptyContigID) = split/\|/, $targetFeatureID;
+					$cap2empty{$capID} = $emptyContigID;
+					$element2contig{$starshipID} = $contigID;
+					$element2cap{$starshipID} = $capID;
+				} elsif ($tag =~ m/^flank$/) {
+					my ($capID) = split/\|/, $targetFeatureID;
+					my $emptyContigID = $flankCoords->{$capID};
+					$cap2empty{$capID} = $emptyContigID;
+					$element2contig{$starshipID} = $contigID;
+					$element2cap{$starshipID} = $capID;
+				} elsif ($tag =~ m/^extend$/) {
+					my ($capID, $extendRefElement) = split/\|/, $targetFeatureID;
+					$cap2extend{$capID} = $extendRefElement;
+				}
+			}
+		}
+	}
+	
+	# structured: {genomeID}{contigID}{regionID/emptyID} = [begin, end, strand, tag]
+	foreach my $contigID (keys %{$knownElements}) {
+		my ($genomeID) = split/$SEP/, $contigID;
+	
+		# for targeted analyses
+		next if ((defined $queID) && ($genomeID ne $queID));
+
+		foreach my $starshipID (keys %{$knownElements->{$contigID}}) {
+			foreach my $capID (keys %{$knownElements->{$contigID}->{$starshipID}}) {
+				if (exists $cap2empty{$capID}) { # for insert and flank elements
+					my ($start, $end, $strand, $tag, $ann) = @{$knownElements->{$contigID}->{$starshipID}->{$capID}};
+					push @{$all{$genomeID}{$contigID}{$starshipID}}, $start, $end, $strand, "insert";
+					
+				} elsif (exists $cap2extend{$capID}){
+					my ($start, $end, $strand, $tag, $ann) = @{$knownElements->{$contigID}->{$starshipID}->{$capID}};
+					push @{$all{$genomeID}{$contigID}{$starshipID}}, $start, $end, $strand, "extend";
+				}
+			}
+		}	
+	}
+	return(\%all);	
+}
+
+sub Parse_flank_empty {
+	my ($flankFile) = @_;
+	my %cap2empty;
+	open(my $IN, '<', $flankFile) or usage("\nError: could not open $flankFile for reading\n");
+	while (my $line = <$IN>) {
+		next if ($line =~ m/^#/);
+		chomp $line;
+		my ($contigID, $captainID, $capStrand, $emptyContigID) = split/\t/, $line;
+		$emptyContigID =~ s/\.rev\d+$//;
+		$emptyContigID =~ s/\.for\d+$//;
+		$cap2empty{$captainID} = $emptyContigID;
+	}
+	return(\%cap2empty);
+}
+
+sub Opts_check {
+	my ($opts) = @_;
+	usage() if (exists $opts->{'h'});
+	usage(" ") if (scalar keys %{$opts} == 0);
+	usage("\nError: please provide a file to --assembly\n") if (not defined $opts->{'assembly'});
+	usage("\nError: the file provided to --assembly does not exist\n") if (! -f $opts->{'assembly'});
+	usage("\nError: please provide a file to --bed\n") if (not defined $opts->{'bed'});
+	usage("\nError: the file provided to --bed does not exist\n") if (! -f $opts->{'bed'});
+	usage("\nError: please provide a directory to --outdir\n") if (not defined $opts->{'outdir'});
+	usage("\nError: the directory provided to --outdir does not exist\n") if (! -d $opts->{'outdir'});
+	if (defined $opts->{'stats'}) {
+		usage("\nError: the file provided to --stats does not exist\n") if (! -f $opts->{'stats'});
+	}
+	if (defined $opts->{'regions'}) {
+		usage("\nError: the file provided to --regions does not exist\n") if (! -f $opts->{'regions'});
+	}
+	if (not defined $opts->{'separator'}) {
+		$opts->{'separator'} = '_';
+	} elsif ($opts->{'separator'} eq ':') {
+		usage("\nError: the separator character cannot be ':'\n");
+	} elsif ($opts->{'separator'} eq ';') {
+		usage("\nError: the separator character cannot be ';'\n");
+	} elsif ($opts->{'separator'} eq '|') {
+		usage("\nError: the separator character cannot be '|'\n");
+	}
+	if (defined $opts->{'separator'}) {
+		$opts->{'separator'} = quotemeta($opts->{'separator'});	# to allow splitting on special characters, like '.'
+	}
+	if (not defined $opts->{'mode'}) {
+		usage("\nError: you must specify an option for --mode, either 'all' or 'single'\n");
+	} elsif ($opts->{'mode'} !~ m/^all$|^single$/) {
+		usage("\nError: unrecognized option for --mode, must be either 'all' or 'single'\n");
+	} 
+	if (not defined $opts->{'color1'}) {
+		$opts->{'color1'} = 'b3b1b2';
+	}
+	if (not defined $opts->{'color2'}) {
+		$opts->{'color2'} = 'ff264e';
+	}
+	if (not defined $opts->{'color3'}) {
+		$opts->{'color3'} = 'fc869c';
+	}
+	if (not defined $opts->{'force'}) {
+		$opts->{'force'} = 0;
+	} else {
+		$opts->{'force'} = 1;
+	}
+	if (not defined $opts->{'empty'}) {
+		$opts->{'empty'} = 3;
+	}
+	if (not defined $opts->{'length'}) {
+		$opts->{'length'} = 50000;
+	}
+}

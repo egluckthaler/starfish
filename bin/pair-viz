@@ -1,0 +1,1016 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use Data::Dumper;
+use File::Basename;
+use Getopt::Long qw(:config auto_abbrev no_ignore_case);
+use Sort::Naturally;
+use Storable;
+use FileHandle;
+use POSIX;
+$|=1;
+# Fishtank lib
+use Fishtank::Utils qw(Reverse_complement Parse_known_elements Commandline_check Fasta_hash_many_files Glofish_bed_hash dim_0_hash Open_FH);
+
+sub usage {
+	my $message = shift;
+	my $usage = qq/
+usage: starfish pair-viz [args]
+
+execute element- element\/site\/region alignments, with optional circos visualization.
+
+Required:
+-m, --mode          STR    either 'all', 'regions', or 'pairwise'.
+-t, --type          STR    subject sequence type, either 'element' or 'empty'.
+                           (queries are always elements)
+-A, --aligner       STR    alignment software to use, either 'mafft' or 'nucmer'.
+-a, --assembly      FILE   2 column tsv: genome code, path to assembly FASTA.
+-b, --bed           FILE   BED file with feature coordinates of mobile elements.
+                           (output by starfish summarize)
+-o, --outdir        DIR    output directory.
+
+Required, with defaults:
+-T, --threads       INT    number of threads.
+                           (default: 1)
+-u, --upstream      INT    bp to align and visualize upstream.
+                           (default: 100000)
+-d, --downstream    INT    bp to align and visualize downstream.
+                           (default: 100000)
+
+Required, if --mode all\/pairwise and --type empty:
+-f, --flank         FILE   singleDR.stats file.
+                           (output by starfish flank)
+-S, --stats         FILE   named.stats file.
+                           (output by starfish summarize)
+
+Required, if --mode pairwise:
+--que               STR    query elementID.
+--sub               STR    subject elementID or empty site contigID.
+
+Required, if --mode regions:
+-r, --regions       FILE   regions.txt file.
+                           (output by starfish dereplicate)
+
+Required if --aligner mafft, with defaults:
+--mafftopts         STR    options to pass to mafft.
+                           (default: \\'--auto\\')
+
+Required if --aligner nucmer, with defaults:
+--nucmeropts        STR    options to pass to nucmer.
+                           (default: \\'--mum\\')
+--deltafilteropts   STR    options to pass to delta-filter.
+                           (default: \\'-m -l 1000 -i 90\\')
+--color1            HEX    hexcode of query element contig.
+                           (without leading '#'; default: b3b1b2)
+--color2            HEX    hexcode of subject element\/empty site contig.
+                           (without leading '#'; default: b3b1b2)
+--color3            HEX    hexcode of links between subject and query.
+                           (without leading '#'; default: b3b1b2)
+--color4            HEX    hexcode of elements.
+                           (without leading '#'; default: ff264e)
+
+Optional:
+--tags                     print gene tags in the BED file as gene labels.
+--force                    force all steps even if output already exists.
+-h, --help                 print more details and exit.
+
+/;
+	if (not defined $message) {
+		$message = $usage;
+	} else {
+		$message = "$message\nuse -h for more details\n\n" ;
+	}	
+	die($message);
+}
+
+main: {
+
+	# parse and check options
+	my %opts;
+	GetOptions(\%opts, 
+		'mode|m=s',
+		'type|t=s',
+		'assembly|a=s',
+		'aligner|A=s',
+		'bed|b=s',
+		'outdir|o=s',
+		'stats|S=s',
+		'flank|f=s',
+		'regions|r=s',
+		'sub=s',
+		'que=s',
+		'upstream|u|U=i',
+		'downstream|d|D=i',
+		'threads|T=i',
+		'color1=s',
+		'color2=s',
+		'color3=s',
+		'color4=s',
+		'nucmeropts=s',
+		'deltafilteropts=s',
+		'force',
+		'tags',
+		'h|help');
+	Opts_check(\%opts);
+
+	# check dependencies
+	my @commandlines;
+	@commandlines = ("circos", "nucmer", "delta-filter", "show-coords") if ($opts{'aligner'} eq 'nucmer');
+	@commandlines = ("mafft") if ($opts{'aligner'} eq 'mafft');
+	Commandline_check(\@commandlines);
+
+	print "Key parameters:
+--upstream             $opts{'upstream'}
+--downstream           $opts{'downstream'}";
+if ($opts{'aligner'} eq 'nucmer') {
+	print "
+nucmer                 $opts{'nucmeropts'}
+delta-filter           $opts{'deltafilteropts'}";}
+if ($opts{'aligner'} eq 'mafft') {
+	print "
+mafft                  $opts{'mafftopts'}\n\n";}
+
+	#######################################
+	#### FORMAT CHECK AND READ IN DATA ####
+	#######################################
+
+		my $datestring = localtime();
+		print "[$datestring] reading in data..\n";
+	
+		# Parse info from Starship regions
+		# structured: {contigID}{regionID}{featureID} = [begin, end, strand, tag, annotation]
+		my ($starshipFeatures) = Glofish_bed_hash($opts{'bed'});
+
+		# Parse the coordinates of any elements with 'cap' DUF3435 genes
+		# elementBegin and elementEnd are the upmost and downmost coordinates associated with this captain
+		# structured: starshipCoords{contigID}{regionID}{capID} = [elementBegin, elementEnd, strand, tag, ann]
+		my ($starshipCoordsTemp) = Parse_known_elements($starshipFeatures);
+
+		# Parse empty sites for elements with flank boundaries (located in singleDR.stats file)
+		# structured: {capID} = emptyContigID
+		my ($flankCoords) = Parse_flank_empty($opts{'flank'}) if (defined $opts{'flank'});
+
+		# Filter coords to retain only 'insert' and 'flank' element
+		# (insert elements consist of elements with either flank or insert boundaries)
+		# Empty sites for elements with insert boundaries are located in the .bed file as part of the feature name
+		# insert structured: starshipCoords{contigID}{regionID}{capID} = [elementBegin, elementEnd, strand, emptyContigID]
+		# extend structured: starshipCoords{contigID}{regionID}{capID} = [elementBegin, elementEnd, strand, refElementContigID, refElementID, refCapID]
+		my ($insertStarshipCoords, $extendStarshipCoords) = Parse_element_comparisons($starshipFeatures, $starshipCoordsTemp, $flankCoords);
+
+		# Parse the coordinates of all empty sites associated with Starship insertions
+		# structured: emptySites{contigID}{regionID}{emptyContig} = [emptyBegin, emptyEnd, strand, emptySiteID]
+		my ($emptyCoords) = Parse_insertion_sites($opts{'stats'}) if (defined $opts{'stats'});
+
+		# Load up all assembly sequences into a single hash
+		# Structured: {sequenceID} = sequence
+		my ($sequencePaths) = dim_0_hash($opts{'assembly'}, "\t", "1");
+		my ($id2sequence) = Fasta_hash_many_files($sequencePaths);
+		
+	######################################
+	#### PARSE COMPARISON COORDINATES ####
+	######################################
+	
+		# structured: comparisons{queryRegionID}{refRegionID/refEmptyContigID} = [queContigID, queBegin, queEnd, queStrand,
+		#																		  refContigID, refBegin, refEnd, refStrand, tag, regionID]
+		
+		$datestring = localtime();
+		print "[$datestring] parsing comparisons..\n";
+		my $comparisons;
+		
+		my $refID = $opts{'sub'} if (defined $opts{'sub'});
+		my $queID = $opts{'que'} if (defined $opts{'que'});
+		if (($opts{'mode'} eq 'all') || ($opts{'mode'} eq 'pairwise')) {
+			($comparisons) = Parse_pairwise_comparisons($insertStarshipCoords, $extendStarshipCoords, $emptyCoords, $opts{'upstream'}, $opts{'downstream'}, $id2sequence, $opts{'mode'}, $opts{'type'}, $refID, $queID);
+			usage("\n[$datestring] could not find the requested subject $refID and query $queID.. are you sure they are in the provided --stats and --bed files?\n") if (scalar keys %{$comparisons} == 0);
+		} elsif ($opts{'mode'} eq 'regions') {
+			# Parse the coordinates of the longest empty regions associated with each Starship insertion, per homologous region group
+			($comparisons) = Parse_region_comparisons($opts{'regions'}, $id2sequence, $opts{'upstream'}, $opts{'downstream'});
+		}
+		
+	############################
+	#### EXECUTE ALIGNMENTS ####
+	############################
+
+		$datestring = localtime();
+		print "[$datestring] executing $opts{aligner} alignments..\n";
+		
+		if ($opts{'aligner'} eq 'nucmer') {
+			
+			# skip alignment if already present
+			# for generating .tsv.links files
+			Nucmer_wrapper($comparisons, $id2sequence, $opts{'color3'}, $opts{'outdir'}, $opts{'force'}, $opts{'nucmeropts'}, $opts{'deltafilteropts'});
+
+			$datestring = localtime();
+			print "[$datestring] executing circos..\n";
+		
+			# print .kar, .config and .coords files
+			Circos_wrapper($comparisons, $insertStarshipCoords, $extendStarshipCoords, $starshipFeatures, $opts{'color1'}, $opts{'color2'}, $opts{'color4'},  $opts{'outdir'}, $opts{'force'}, $opts{'tags'});
+		} elsif ($opts{'aligner'} eq 'mafft') {
+			Mafft_wrapper($comparisons, $id2sequence, $opts{'mafftopts'}, $opts{'threads'}, $opts{'outdir'}, $opts{'force'});
+		}
+		
+		$datestring = localtime();
+		print "[$datestring] done\n";
+
+
+}
+
+sub Mafft_wrapper {
+	my ($comparisons, $id2sequence, $MAFFTOPTS, $THREADS, $OUTDIR, $FORCE) = @_;
+	foreach my $queElement (keys %{$comparisons}) {
+		foreach my $refRegion (keys %{$comparisons->{$queElement}}) {
+			my $datestring = localtime();
+			
+			my ($queContigID, $queBegin, $queEnd, $queStrand, $refContigID, $refBegin, $refEnd, $refStrand, $tag, $regionID, $regionType) = @{$comparisons->{$queElement}->{$refRegion}};
+						
+			# outputprefix
+			my $outfile = "$OUTDIR/${queElement}_vs_${refRegion}.mafft";
+			$outfile = "$OUTDIR/${regionID}_${queElement}_vs_${refRegion}.mafft" if (defined $regionID);
+			
+			if (! -f $outfile || -z $outfile || $FORCE == 1) {
+				my $queFile = "$OUTDIR/$queElement.fna";
+				my ($queOUT) = Open_FH($queFile);
+				my $queSeq = substr($id2sequence->{$queContigID}, $queBegin, $queEnd - $queBegin);
+				print $queOUT ">$queElement:$queContigID:${queBegin}-${queEnd}:$queStrand\n$queSeq\n";
+				
+				# reverse complement the subject sequence if necessary
+				my $refFile = "$OUTDIR/$refRegion.fna";
+				my ($refOUT) = Open_FH($refFile);
+				my $refSeq = substr($id2sequence->{$refContigID}, $refBegin, $refEnd - $refBegin);
+				print $refOUT ">$refRegion:$refContigID:${refBegin}-${refEnd}:$refStrand\n$refSeq\n";
+				
+				# determine orientation using a quick blastn search: for some reason, the strand info isn't working properly here, but its working in the circos plots..
+				my $blastString = `blastn -query $queFile -subject $refFile -outfmt 6 -evalue 0.001`;
+				my @blastLines = split/\n/, $blastString;
+				# find the orientation of the highest scoring HSP
+				my ($highestBit, $highestStrand) = (0, '+');
+				foreach my $line (@blastLines) {
+					chomp $line;
+					my ($qseqid, $sseqid, $pident, $hspLength, $mismatch, $gapopen, $qstart, $qend, $sstart, $send, $evalue, $bitscore) = split/\t/, $line;
+					next if ($qseqid eq $sseqid);
+					if ($bitscore > $highestBit) {
+						$highestBit = $bitscore;
+						$highestStrand = '-' if (($send < $sstart )|| ($qend < $qstart));
+					}
+				}
+
+				# 
+				my $seqFile = "$OUTDIR/pairwiseSeqs.fasta";
+				my ($seqOUT) = Open_FH($seqFile);
+				# query sequence strand refers to captain orientation
+				print $seqOUT ">$queElement:$queContigID:${queBegin}-${queEnd}:${queStrand}cap\n$queSeq\n";
+				($refSeq) = Reverse_complement($refSeq, $refContigID) if ($highestStrand eq '-');
+				print $seqOUT ">$refRegion:$refContigID:${refBegin}-${refEnd}:$highestStrand\n$refSeq\n";
+
+				my ($mafftCheck) = system("mafft --thread $THREADS $MAFFTOPTS --quiet $seqFile > $outfile");
+				if ($mafftCheck != 0) { die "\n\n[$datestring] error: could not execute mafft on commandline for $seqFile, exiting..\nmafft --thread $THREADS $MAFFTOPTS --quiet $seqFile > $outfile\n$!\n";}
+		
+				system("rm $seqFile $refFile $queFile");
+			} else {
+				print "[$datestring] $outfile exists, skipping mafft alignment\n";
+				next;
+				
+			}
+		}
+	}	
+}
+
+sub Circos_wrapper {
+	my ($comparisons, $insertStarshipCoords, $extendStarshipCoords, $starshipFeatures, $color1, $color2, $color4, $OUTDIR, $FORCE, $TAGS) = @_;
+
+	foreach my $queElement (keys %{$comparisons}) {
+		foreach my $refRegion (keys %{$comparisons->{$queElement}}) {
+			my $datestring = localtime();
+			
+			my ($queContigID, $queBegin, $queEnd, $queStrand, $refContigID, $refBegin, $refEnd, $refStrand, $tag, $regionID, $regionType) = @{$comparisons->{$queElement}->{$refRegion}};
+						
+			# outputprefix
+			my $outprefix = "$OUTDIR/${queElement}_vs_${refRegion}";
+			my $pngprefix = $outprefix;
+			$pngprefix = "$OUTDIR/${regionID}_${queElement}_vs_${refRegion}" if (defined $regionID);
+						
+			# check that links file is where it should be
+			my $linksFile = "$outprefix.links.tsv";
+			if (! -f $linksFile) {
+				print "[$datestring] warning: $linksFile output by nucmer does not exist, skipping circos execution\n";
+				next;	
+			}
+			
+			# skip if .png exists
+			if (-f -f "$pngprefix.png" && $FORCE != 1) {
+				print "[$datestring] $pngprefix.png exists, skipping circos plotting\n";
+				next;
+			}
+
+			# .kar file describing regions to visualize
+			# chr - mp102.cc10-1 mp102.cc10-1 2661008 3841204 a6cee3
+			# chr - mp053.cc2-3 mp053.cc2-3 3456950 4545745 a6cee3
+			my $karFile = "$outprefix.kar";
+			my ($karOUT) = Open_FH($karFile);
+			print $karOUT "chr - $queContigID $queContigID $queBegin $queEnd $color1\n";
+			print $karOUT "chr - $refContigID $refContigID $refBegin $refEnd $color2\n";
+		
+			# starships.coordinates file to visualize starship regions
+			# starships.labels to label starship regions with their ID
+			# genes.labels to label starship regions with gene tag, defined $TAGS
+			
+			my $coordsFile = "$outprefix.coords";
+			my ($coordOUT) = Open_FH($coordsFile);
+			my $labelFile =  "$outprefix.labels";
+			my ($labelOUT) = Open_FH($labelFile);
+			my $genesFile =  "$outprefix.genes";
+						
+			my ($queShipBegin, $queShipEnd, $refShipBegin, $refShipEnd);
+			if (($tag eq 'empty') || ($tag eq 'regions')) {
+				foreach my $capID (keys %{$insertStarshipCoords->{$queContigID}->{$queElement}}) {
+					($queShipBegin, $queShipEnd) = @{$insertStarshipCoords->{$queContigID}->{$queElement}->{$capID}};
+				}
+			}
+			if ($tag eq 'element') {
+				# get the query extend element coordinates
+				foreach my $capID (keys %{$extendStarshipCoords->{$queContigID}->{$queElement}}) {
+					($queShipBegin, $queShipEnd) = @{$extendStarshipCoords->{$queContigID}->{$queElement}->{$capID}};
+				}
+				if (not defined $queShipBegin) {
+					foreach my $capID (keys %{$insertStarshipCoords->{$queContigID}->{$queElement}}) {
+						($queShipBegin, $queShipEnd) = @{$insertStarshipCoords->{$queContigID}->{$queElement}->{$capID}};
+					}
+				}
+				
+				# get the reference extend element coordinates
+				foreach my $capID (keys %{$insertStarshipCoords->{$refContigID}->{$refRegion}}) {
+					($refShipBegin, $refShipEnd) = @{$insertStarshipCoords->{$refContigID}->{$refRegion}->{$capID}};
+				}
+			}
+			print $coordOUT "$queContigID\t$queShipBegin\t$queShipEnd\n";
+			print $coordOUT "$refContigID\t$refShipBegin\t$refShipEnd\n" if ($tag eq 'element');
+			
+			# print label to appear ~1/4 of the way along the element to avoid overlapping with contig label
+			# do some on the fly math to avoid overlapping with major tick marks
+			my $queOffset = $queShipBegin + floor(($queShipEnd - $queShipBegin) / 4);
+			$queOffset = (sprintf("%1f", $queOffset / 50000) * 50000) + 25000;
+			print $labelOUT "$queContigID\t$queOffset\t$queOffset\t$queElement\n";
+			
+			if ($tag eq 'element') {
+				my $refOffset = $refShipBegin + floor(($refShipEnd - $refShipBegin) / 4);
+				$refOffset = (sprintf("%1f", $refOffset / 50000) * 50000) + 25000;
+				print $labelOUT "$refContigID\t$refOffset\t$refOffset\t$refRegion\n";
+			} elsif ($tag eq 'regions') { # print region label in the middle of the contig
+				my $refOffset = $refEnd - $refBegin;
+				$refOffset = (sprintf("%1f", $refOffset / 50000) * 50000) + 25000;
+				print $labelOUT "$refContigID\t$refOffset\t$refOffset\t$regionType\n";
+			}
+			
+			# print genes, if requested, for both ref and que
+			# structured: {contigID}{regionID}{featureID} = [begin, end, strand, tag, annotation]
+			my $geneTagBlock = "\n";
+			if (defined $TAGS) {
+				my ($genesOUT) = Open_FH($genesFile);
+				# print out genes for query element, since it will always be defined
+				foreach my $featureID (keys %{$starshipFeatures->{$queContigID}->{$queElement}}) {
+					my ($featBegin, $featEnd, $featStrand, $featTag, $featAnn) = @{$starshipFeatures->{$queContigID}->{$queElement}->{$featureID}};
+					next if (($featTag eq '.') || ($featTag eq 'insert')|| ($featTag eq 'extend')|| ($featTag eq 'flank'));
+					print $genesOUT "$queContigID\t$featBegin\t$featEnd\t$featTag\n";
+				}
+				# print out genes for reference element, if its element mode
+				if ($tag eq 'element') {
+					foreach my $featureID (keys %{$starshipFeatures->{$refContigID}->{$refRegion}}) {
+						my ($featBegin, $featEnd, $featStrand, $featTag, $featAnn) = @{$starshipFeatures->{$refContigID}->{$refRegion}->{$featureID}};
+						next if (($featTag eq '.') || ($featTag eq 'insert')|| ($featTag eq 'extend')|| ($featTag eq 'flank'));
+						print $genesOUT "$refContigID\t$featBegin\t$featEnd\t$featTag\n";
+					}
+				}
+				$geneTagBlock =" 
+<plot>
+type             = text
+color            = greys-5-seq-5
+file             = $genesFile
+r0 = 1r
+r1 = 1r + 2000p
+show_links     = yes
+link_dims      = 0p,10p,20p,10p,10p
+link_thickness = 6
+link_color     = greys-5-seq-5
+label_size   = 32p
+label_font   = default
+padding  = 0p
+rpadding = 0p
+label_snuggle             = yes
+max_snuggle_distance      = 1r
+snuggle_sampling          = 1
+snuggle_tolerance         = 0.25r
+snuggle_refine                 = no
+snuggle_link_overlap_test      = no
+snuggle_link_overlap_tolerance = 2p
+</plot>"
+			}
+
+			# determine orientation; if necessary, reverse the reference
+			my $reverseString = "chromosomes_reverse = /NULLLLL/";
+			$reverseString = "chromosomes_reverse = /$refContigID/" if ($refStrand ne $queStrand);
+			
+			# .config file for everything else
+			my $configFile = "$outprefix.config";
+			my ($configOUT) = Open_FH($configFile);
+			print $configOUT "karyotype = $karFile
+chromosomes_units = 10000
+
+<<include colors_fonts_patterns.conf>>
+<<include housekeeping.conf>>
+
+$reverseString
+
+# IMAGE
+<image>
+<<include image.conf>>
+</image>
+
+# IDEOGRAM
+<ideogram>
+<spacing>
+default = 3u
+break = 3u
+</spacing>
+radius           = 0.50r
+thickness        = 200p
+fill             = yes
+stroke_color     = black
+stroke_thickness = 2p
+show_label       = yes
+label_parallel   = yes
+label_radius     = 1.3r
+label_size       = 36p
+
+</ideogram>
+show_ticks         = yes
+show_tick_labels   = yes
+ 
+<ticks>
+tick_label_font    = light
+radius             = dims(ideogram,radius_outer)
+label_offset       = 12p
+label_size         = 24p
+color              = black
+thickness          = 2p
+
+	<tick>
+	show_ticks         = yes
+	skip_first_label = no
+	spacing           = 5u
+	size              = 12p
+	show_label        = yes
+	label_size        = 32p
+	multiplier        = 10/1u
+	format            = %d kb
+	thickness         = 8p
+	color             = greys-5-seq-3
+	</tick>
+
+	<tick>
+	show_ticks         = yes
+	skip_first_label = no
+	spacing           = 1u
+	size              = 12p
+	show_label        = no
+	thickness         = 8p
+	color             = greys-5-seq-3
+	</tick>
+
+</ticks>
+
+# LINKS
+<links>
+<link>
+file                = $linksFile
+radius              = 0.95r
+ribbon              = yes
+color               = white
+stroke_color        = black
+stroke_thickness    = 0.5p
+</link>
+</links>
+
+# element regions as highlight
+<highlights>
+ <highlight>
+ file       = $coordsFile
+ fill_color = $color4
+ stroke_color = black
+ stroke_thickness = 14
+ ideogram   = yes
+ </highlight>
+</highlights>
+
+# Labels of element regions
+<plots>
+ <plot>
+ type             = text
+ color            = $color4
+ file             = $labelFile
+ r0 = 1r
+ r1 = 1r + 2000p
+ show_links     = yes
+ link_dims      = 0p,0p,40p,0p,20p
+ link_thickness = 14
+ link_color     = black
+ label_size   = 36p
+ label_font   = default
+ padding  = 0p
+ rpadding = 0p
+ </plot>
+ $geneTagBlock
+</plots>
+\n";
+			
+			
+			my ($circosCheck) = system("circos -conf $configFile -outputfile $pngprefix &>/dev/null");
+			if ($circosCheck != 0) { warn("\n\n[$datestring] warning: could not execute circos on commandline for $queElement and $refRegion, skipping..\n$!\n");}
+			
+		}
+	}
+			
+}
+
+sub Nucmer_wrapper {
+	my ($comparisons, $id2sequence, $color3, $OUTDIR, $FORCE, $NUCMEROPTS, $DELTAFILTEROPTS) = @_;
+	
+	foreach my $queElement (keys %{$comparisons}) {
+		foreach my $refRegion (keys %{$comparisons->{$queElement}}) {
+			my $outprefix = "$OUTDIR/${queElement}_vs_${refRegion}";
+			my $linksFile = "$outprefix.links.tsv";
+			my $datestring = localtime();
+			if (-f $linksFile && $FORCE != 1) {
+				print "[$datestring] $linksFile exists, skipping nucmer alignment\n";
+				next;
+			}
+			my ($linksOUT) = Open_FH($linksFile);
+		
+			# # mp053 vs mp102
+			# nucmer --mum -p mp053_vs_mp102 mp053.cc2-3.fna mp102.contigs.fna 
+			# delta-filter -1 -i 90 -l 15000 mp053_vs_mp102.delta > mp053_vs_mp102.filt.delta
+			# show-coords -TH mp053_vs_mp102.filt.delta | sort -k5,5nr | awk '{z+=1;print $8"\t"$1"\t"$2"\t"$9"\t"$3"\t"$4}' > mp053_vs_mp102.links.tsv
+
+			my ($queContigID, $queBegin, $queEnd, $queStrand, $refContigID, $refBegin, $refEnd, $refStrand, $tag) = @{$comparisons->{$queElement}->{$refRegion}};
+			
+			my $refFile = "$OUTDIR/$refRegion.fna";
+			my ($refOUT) = Open_FH($refFile);
+			print $refOUT ">$refContigID\n$id2sequence->{$refContigID}\n";
+			my $queFile = "$OUTDIR/$queElement.fna";
+			my ($queOUT) = Open_FH($queFile);
+			print $queOUT ">$queContigID\n$id2sequence->{$queContigID}\n";
+			
+			my ($nucmerCheck) = system("nucmer $NUCMEROPTS -p $outprefix $queFile $refFile 2>/dev/null");
+			if ($nucmerCheck != 0) { die "\n\n[$datestring] error: could not execute nucmer on commandline for $queFile and $refFile, exiting..\n$!\n";}
+			
+			my ($deltaCheck) = system("delta-filter $DELTAFILTEROPTS $outprefix.delta > $outprefix.filt.delta 2>/dev/null");
+			if ($deltaCheck != 0) { die "\n\n[$datestring] error: could not execute delta-filter on commandline for $queFile and $refFile, exiting..\n$!\n";}
+			
+			my $awkArgs = q{'{z+=1;print $8"\t"$1"\t"$2"\t"$9"\t"$3"\t"$4}'};
+			#print "show-coords -TH $outprefix.filt.delta | sort -k5,5nr | awk $awkArgs | perl -pe 's/\\t\$/\\tcolor=\$color3/' > $outprefix.links.tsv";die;
+			my (@coordsLines) = `show-coords -TH $outprefix.filt.delta | sort -k5,5nr | awk $awkArgs`;
+			if (scalar @coordsLines == 0) { 
+				warn("\n\n[$datestring] warning: no nucmer alignments found between $queFile and $refFile, skipping..\n$!\n");
+				system("rm $linksFile");
+			}
+			foreach my $line (@coordsLines) {
+				chomp $line;
+				print $linksOUT "$line\tcolor=$color3\n";
+			}	
+			system("rm $refFile $queFile $outprefix.delta $outprefix.filt.delta");
+		}
+	}
+}
+
+sub Parse_region_comparisons {
+	my ($regionFile, $id2sequence, $upstreamMOD, $downstreamMOD) = @_;
+	my %comparisons;
+	
+	# output structured: comparisons{queryRegionID}{refRegionID/refEmptyContigID} = [queContigID, queBegin, queEnd, queStrand,
+	#																		        refContigID, refBegin, refEnd, refStrand, tag, regionID, regionType]
+	
+	# tag will always be empty for region comparisons
+	
+	# parse data from regions file	
+	my (%region2element, %region2site, %region2empty, %region2frag);
+	open (my $IN, '<', $regionFile) or usage("\nError: could not open $regionFile for reading\n");
+	while (my $line = <$IN>) {
+		next if ($line =~ m/^#/);
+		chomp $line;
+		my ($regionID, $memberGroupID, $memberID, $memberType, $contigID, $begin, $end, $regionBegin, $regionEnd, $flankingOGs) = split/\t/, $line;
+		my $contigLength = 0;
+		$contigLength = length($id2sequence->{$contigID});
+		if ($memberType eq 'element') { # only starships are assigned to families
+			push @{$region2element{$regionID}{$memberID}}, $contigID, $begin, $end, $flankingOGs;
+		} elsif ($memberID =~ m/_site/) { # is this member associated with a validated site?
+			push @{$region2site{$regionID}{$contigLength}{$contigID}}, $contigID, $begin, $end, $flankingOGs;
+		} elsif ($memberType eq 'empty') { # assign empty regions without insertion sites a key value of the contigID; if you want to include fragmented site, add a conditional 
+			push @{$region2empty{$regionID}{$contigLength}{$contigID}}, $contigID, $regionBegin, $regionEnd, $flankingOGs;
+		} else { # will occur for memberType 'frag'
+			push @{$region2frag{$regionID}{$contigLength}{$contigID}}, $contigID, $regionBegin, $regionEnd, $flankingOGs;
+		}
+	}
+	
+	# find the largest empty region per homologous region to use as a reference, prioritizing scaffolds with validated insertion sites
+	# don't visualize elements that are not associated with an empty region
+	# priority: site, empty, frag
+	my %region2refEmpty;
+	my %region2regionType; # for labeling the reference contig so we can tell if element is aligning to an empty site, empty region or fragmented region
+	foreach my $regionID (keys %region2element) {
+		
+		
+		if (scalar keys %{$region2site{$regionID}} > 0) { # first see if theres a region with an insertion site
+			foreach my $length (sort {$b <=> $a} keys %{$region2site{$regionID}}) { # sort largest to smallest
+				foreach my $contigID (nsort keys %{$region2site{$regionID}{$length}}) {
+					push @{$region2refEmpty{$regionID}}, @{$region2site{$regionID}{$length}{$contigID}};
+					$region2regionType{$regionID} = 'insertion_site';
+					last;
+				}
+			}
+		} elsif (scalar keys %{$region2empty{$regionID}} > 0) {
+			foreach my $length (sort {$b <=> $a} keys %{$region2empty{$regionID}}) { # sort largest to smallest
+				foreach my $contigID (nsort keys %{$region2empty{$regionID}{$length}}) {
+					push @{$region2refEmpty{$regionID}}, @{$region2empty{$regionID}{$length}{$contigID}};
+					$region2regionType{$regionID} = 'empty_region';
+					last;
+				}
+			}
+		} elsif (scalar keys %{$region2frag{$regionID}} > 0) {
+			foreach my $length (sort {$b <=> $a} keys %{$region2frag{$regionID}}) { # sort largest to smallest
+				foreach my $contigID (nsort keys %{$region2frag{$regionID}{$length}}) {
+					push @{$region2refEmpty{$regionID}}, @{$region2frag{$regionID}{$length}{$contigID}};
+					$region2regionType{$regionID} = 'fragmented_region';
+					last;
+				}
+			}
+		}
+	}
+	
+	# orient elements according to the sequence of OGs in the reference empty region
+	foreach my $regionID (keys %region2refEmpty) {
+		my ($refContigID, $refRegionBegin, $refRegionEnd, $refFlankingOGs) = @{$region2refEmpty{$regionID}};
+		my $refStrand = '+';
+		my @refOGs = split/,/, $refFlankingOGs;
+		
+		# sometimes a site will have multiple begin and ends, if multiple sites were recovered at that distinct location (e.g., through aligning different elements to that scaffold)
+		# pick the longest site, representing the longest empty sequence. Begins and Ends are paired in order
+		my (@refBegins) = split/,/, $refRegionBegin;
+		my (@refEnds) = split/,/, $refRegionEnd;
+		my $currentRefDist = 0;
+		foreach my $refBegin (@refBegins) {
+			my $refEnd = shift @refEnds;
+			my $candidateDist = $refEnd - $refBegin + 1;
+			if ($candidateDist > $currentRefDist) {
+				$refRegionBegin = $refBegin;
+				$refRegionEnd = $refEnd;
+				$currentRefDist = $candidateDist;
+			}
+		}
+		
+		# modify begin and end coordinates
+		$refRegionBegin = $refRegionBegin - $upstreamMOD;
+		$refRegionBegin = 1 if ($refRegionBegin < 1);
+		$refRegionEnd = $refRegionEnd + $downstreamMOD;
+		$refRegionEnd = length($id2sequence->{$refContigID}) if ($refRegionEnd > length($id2sequence->{$refContigID}));
+
+		foreach my $queElementID (keys %{$region2element{$regionID}}) {
+			my ($queContigID, $queRegionBegin, $queRegionEnd, $queFlankingOGs) = @{$region2element{$regionID}{$queElementID}};
+
+			# modify begin and end coordinates
+			$queRegionBegin = $queRegionBegin - $upstreamMOD;
+			$queRegionBegin = 1 if ($queRegionBegin < 1);
+			$queRegionEnd = $queRegionEnd + $downstreamMOD;
+			$queRegionEnd = length($id2sequence->{$queContigID}) if ($queRegionEnd > length($id2sequence->{$queContigID}));
+
+			my @queOGs = split/,/, $queFlankingOGs;
+			my @revQueOGs = reverse @queOGs;
+			my ($forwardMismatches, $reverseMismatches) = (0,0);
+			# how far do we have to iterate through refOGs until we find a match?
+			# if a query OGs doesnt have a match, it will contribute just as much to forward and reverse count
+			
+			# assess match distance forward
+			my %forwardMatches; # skip OGs that have previously matched
+			foreach my $queOG (@queOGs) {
+				next if (($queOG eq '.' ) || (exists $forwardMatches{$queOG}));
+				foreach my $refOG (@refOGs) {
+					next if (($refOG eq '.') || (exists $forwardMatches{$refOG}));
+					$forwardMismatches++ if ($queOG ne $refOG);
+					# stop iterating once a match has been found
+					if ($queOG eq $refOG) {
+						$forwardMatches{$queOG} = 1;
+						last;
+					} 
+				}
+			}
+			
+			# assess match distance reverse
+			my %reverseMatches;
+			foreach my $queOG (@revQueOGs) {
+				next if (($queOG eq '.' ) || (exists $reverseMatches{$queOG}));
+				foreach my $refOG (@refOGs) {
+					next if (($refOG eq '.') || (exists $reverseMatches{$refOG}));
+					$reverseMismatches++ if ($queOG ne $refOG);
+					if ($queOG eq $refOG) {
+						$reverseMatches{$queOG} = 1;
+						last;
+					} 
+				}
+			}
+			
+			# trouble shooting
+# 			print "$regionID: $refContigID vs $queElementID\n";
+# 			print "forward que: ".join(",", @queOGs)."\n";
+# 			print "reverse que: ".join(",", @revQueOGs)."\n";
+# 			print "reference  : ".join(",", @refOGs)."\n";
+# 			print "forward mis: $forwardMismatches\n";
+# 			print "reverse mis: $reverseMismatches\n";
+		
+			# the smallest mismatch distance is the correct orientation for query element
+			my $queStrand = '+';
+			$queStrand = '-' if ($reverseMismatches > $forwardMismatches); # not sure why this is > instead of <, but it works
+			push @{$comparisons{$queElementID}{$refContigID}}, $queContigID, $queRegionBegin, $queRegionEnd, $queStrand, $refContigID, $refRegionBegin, $refRegionEnd, $refStrand, 'regions', $regionID, $region2regionType{$regionID};
+		}
+	}
+	return(\%comparisons);	
+}
+
+sub Parse_pairwise_comparisons {
+	my ($insertStarshipCoords, $extendStarshipCoords, $emptyCoords, $upstreamMOD, $downstreamMOD, $id2sequence, $MODE, $TYPE, $refID, $queID) = @_;
+	
+	my (%comparisons, @refInfo, @queInfo);
+	foreach my $queContigID (keys %{$insertStarshipCoords}) {
+		foreach my $queStarshipID (keys %{$insertStarshipCoords->{$queContigID}}) {
+			foreach my $queCapID (keys %{$insertStarshipCoords->{$queContigID}->{$queStarshipID}}) {
+				my ($queBegin, $queEnd, $queStrand, $refContigID) = @{$insertStarshipCoords->{$queContigID}->{$queStarshipID}->{$queCapID}};
+				$queBegin = $queBegin - $upstreamMOD;
+				$queBegin = 1 if ($queBegin < 1);
+				$queEnd = $queEnd + $downstreamMOD;
+				$queEnd = length($id2sequence->{$queContigID}) if ($queEnd > length($id2sequence->{$queContigID}));
+
+				if ($MODE eq 'all') {
+					
+					if ($TYPE eq 'empty') {
+					
+						#print "$queContigID\t$queStarshipID\t$refContigID\n";
+						if (scalar @{$emptyCoords->{$queContigID}->{$queStarshipID}->{$refContigID}} < 1) {
+							my $datestring = localtime();
+							print "[$datestring] warning: cannot retrieve empty site coordinates on $refContigID for $queStarshipID, skipping\n";
+							next;
+						}
+						my ($refBegin, $refEnd, $refStrand) = @{$emptyCoords->{$queContigID}->{$queStarshipID}->{$refContigID}};
+						$refBegin = $refBegin - $upstreamMOD;
+						$refBegin = 1 if ($refBegin < 1);
+						$refEnd = $refEnd + $downstreamMOD;
+						$refEnd = length($id2sequence->{$refContigID}) if ($refEnd > length($id2sequence->{$refContigID}));
+						push @{$comparisons{$queStarshipID}{$refContigID}}, $queContigID, $queBegin, $queEnd, $queStrand, $refContigID, $refBegin, $refEnd, $refStrand, 'empty';
+					}
+				} elsif ($MODE eq 'pairwise') {
+					
+					if ($TYPE eq 'element') {
+						if ($queStarshipID eq $refID) {
+							push @refInfo, $queContigID, $queBegin, $queEnd, $queStrand;
+						} elsif ($queStarshipID eq $queID) {
+							push @queInfo, $queContigID, $queBegin, $queEnd, $queStrand;
+						}
+					
+					} elsif ($TYPE eq 'empty') {
+						if ($queStarshipID eq $queID) {
+							
+							# if this is the requested query Starship, then retrieve the requested reference empty site
+							if (not exists $emptyCoords->{$queContigID}->{$queStarshipID}->{$refID}) {
+								my $datestring = localtime();
+								print "\n[$datestring] warning: cannot retrieve empty site coordinates on $refID for $queStarshipID, skipping\n";
+								next;
+							}
+				
+							my ($refBegin, $refEnd, $refStrand) = @{$emptyCoords->{$queContigID}->{$queStarshipID}->{$refID}};
+							$refBegin = $refBegin - $upstreamMOD;
+							$refBegin = 1 if ($refBegin < 1);
+							$refEnd = $refEnd + $downstreamMOD;
+							$refEnd = length($id2sequence->{$refID}) if ($refEnd > length($id2sequence->{$refID}));
+			
+							push @{$comparisons{$queStarshipID}{$refID}}, $queContigID, $queBegin, $queEnd, $queStrand, $refID, $refBegin, $refEnd, $refStrand, 'empty';
+					
+						}
+					
+					}
+				
+				}
+			}
+		}
+	}
+	
+	# if this was an element to element comparison:
+	if (($TYPE eq 'element') && ($MODE eq 'pairwise')) {
+		push @{$comparisons{$queID}{$refID}}, @queInfo, @refInfo, 'element';
+	}
+	
+	
+	# for element all comparisons, we need to iterate through a separate hash, not an elegant implementation but gets the job done
+	if (($TYPE eq 'element') && ($MODE eq 'all')) {
+		foreach my $queContigID (keys %{$extendStarshipCoords}) {
+			foreach my $queStarshipID (keys %{$extendStarshipCoords->{$queContigID}}) {
+				foreach my $queCapID (keys %{$extendStarshipCoords->{$queContigID}->{$queStarshipID}}) {
+					my ($queBegin, $queEnd, $queStrand, $refContigID, $refRegionID, $refCapID) = @{$extendStarshipCoords->{$queContigID}->{$queStarshipID}->{$queCapID}};
+					$queBegin = $queBegin - $upstreamMOD;
+					$queBegin = 1 if ($queBegin < 1);
+					$queEnd = $queEnd + $downstreamMOD;
+					$queEnd = length($id2sequence->{$queContigID}) if ($queEnd > length($id2sequence->{$queContigID}));
+					if (defined $insertStarshipCoords->{$refContigID}->{$refRegionID}->{$refCapID}) {
+						my ($refBegin, $refEnd, $refStrand) = @{$insertStarshipCoords->{$refContigID}->{$refRegionID}->{$refCapID}};
+						$refBegin = $refBegin - $upstreamMOD;
+						$refBegin = 1 if ($refBegin < 1);
+						$refEnd = $refEnd + $downstreamMOD;
+						$refEnd = length($id2sequence->{$refContigID}) if ($refEnd > length($id2sequence->{$refContigID}));
+						push @{$comparisons{$queStarshipID}{$refRegionID}}, $queContigID, $queBegin, $queEnd, $queStrand, $refContigID, $refBegin, $refEnd, $refStrand, 'element';
+					} else {
+						my $datestring = localtime();
+						print "[$datestring] warning: could not find coordinates for reference element refRegionID when comparing to $queStarshipID, skipping..\n";
+					}
+				}
+			}
+		}
+	}
+	return(\%comparisons);
+}
+
+sub Parse_insertion_sites {
+	my ($statsfile) = @_;
+	my %emptySites;
+	open(my $IN, '<', $statsfile) or usage("\nError: could not open $statsfile for reading\n");
+	while (my $line = <$IN>) {
+		next if ($line =~ m/^#/);
+		chomp $line;
+		#acquire info
+		my ($elementID, $elementCaptainID, $elementContigID, $elementBegin, $elementEnd, $elementLength, $elementStrand, $emptySiteID, $emptyContigID, $emptyBegin, $emptyEnd, $emptyLength, $emptyStrand, $emptySiteSeq, $quality, $warnings) = split("\t", $line);
+		push @{$emptySites{$elementContigID}{$elementID}{$emptyContigID}}, $emptyBegin, $emptyEnd, $emptyStrand, $emptySiteID;
+	}
+	return(\%emptySites);
+}
+
+sub Parse_element_comparisons {
+	my ($starshipFeatures, $knownElements, $flankCoords) = @_;
+	my (%inserts, %extends);
+	
+	my (%cap2empty, %cap2extend, %element2contig, %element2cap);
+	foreach my $contigID (keys %{$starshipFeatures}) {
+		foreach my $starshipID (keys %{$starshipFeatures->{$contigID}}) {
+			foreach my $targetFeatureID (keys %{$starshipFeatures->{$contigID}->{$starshipID}}) {
+				my ($start, $end, $strand, $tag, $ann) = @{$starshipFeatures->{$contigID}->{$starshipID}->{$targetFeatureID}};
+				if ($tag =~ m/^insert$/) {
+					my ($capID, $emptyContigID) = split/\|/, $targetFeatureID;
+					$cap2empty{$capID} = $emptyContigID;
+					$element2contig{$starshipID} = $contigID;
+					$element2cap{$starshipID} = $capID;
+				} elsif ($tag =~ m/^flank$/) {
+					my ($capID) = split/\|/, $targetFeatureID;
+					my $emptyContigID = $flankCoords->{$capID};
+					$cap2empty{$capID} = $emptyContigID;
+					$element2contig{$starshipID} = $contigID;
+					$element2cap{$starshipID} = $capID;
+				} elsif ($tag =~ m/^extend$/) {
+					my ($capID, $extendRefElement) = split/\|/, $targetFeatureID;
+					$cap2extend{$capID} = $extendRefElement;
+				}
+			}
+		}
+	}
+	
+	foreach my $contigID (keys %{$knownElements}) {
+		foreach my $starshipID (keys %{$knownElements->{$contigID}}) {
+			foreach my $capID (keys %{$knownElements->{$contigID}->{$starshipID}}) {
+				if (exists $cap2empty{$capID}) { # for insert and flank elements
+					my ($start, $end, $strand, $tag, $ann) = @{$knownElements->{$contigID}->{$starshipID}->{$capID}};
+					push @{$inserts{$contigID}{$starshipID}{$capID}}, $start, $end, $strand, $cap2empty{$capID};
+				} elsif (exists $cap2extend{$capID}){
+					my ($start, $end, $strand, $tag, $ann) = @{$knownElements->{$contigID}->{$starshipID}->{$capID}};
+					push @{$extends{$contigID}{$starshipID}{$capID}}, $start, $end, $strand, $element2contig{$cap2extend{$capID}}, $cap2extend{$capID}, $element2cap{$cap2extend{$capID}};
+				}
+			}
+		}	
+	}
+	return(\%inserts, \%extends);	
+}
+
+sub Parse_flank_empty {
+	my ($flankFile) = @_;
+	my %cap2empty;
+	open(my $IN, '<', $flankFile) or usage("\nError: could not open $flankFile for reading\n");
+	while (my $line = <$IN>) {
+		next if ($line =~ m/^#/);
+		chomp $line;
+		my ($contigID, $captainID, $capStrand, $emptyContigID) = split/\t/, $line;
+		$emptyContigID =~ s/\.rev\d+$//;
+		$emptyContigID =~ s/\.for\d+$//;
+		$cap2empty{$captainID} = $emptyContigID;
+	}
+	return(\%cap2empty);
+}
+
+sub Opts_check {
+	my ($opts) = @_;
+	usage() if (exists $opts->{'h'});
+	usage("\nError: no arguments provided\n") if (scalar keys %{$opts} == 0);
+	usage("\nError: please provide a file to --assembly\n") if (not defined $opts->{'assembly'});
+	usage("\nError: the file provided to --assembly does not exist\n") if (! -f $opts->{'assembly'});
+	usage("\nError: please a file to --bed\n") if (not defined $opts->{'bed'});
+	usage("\nError: the file provided to --bed does not exist\n") if (! -f $opts->{'bed'});
+	usage("\nError: please provide a directory to --outdir\n") if (not defined $opts->{'outdir'});
+	usage("\nError: the directory provided to --outdir does not exist\n") if (! -d $opts->{'outdir'});
+	if (not defined $opts->{'mode'}) {
+		usage("\nError: you must specify an option for --mode, either 'all', 'regions', or 'pairwise'\n");
+	} elsif ($opts->{'mode'} !~ m/^all$|^pairwise$|^regions$/) {
+		usage("\nError: unrecognized option for --mode, must be either 'all', 'regions' or 'pairwise'\n");
+	} 
+	if (not defined $opts->{'type'}) {
+		usage("\nError: you must specify an option for --type, either 'element' or 'empty'\n");
+	} elsif ($opts->{'type'} !~ m/^element$|^empty$/) {
+		usage("\nError: unrecognized option for --type, must be either 'element' or 'empty'\n");
+	} 
+	if (($opts->{'type'} eq 'empty') && ($opts->{'mode'} eq 'all')) {
+		if (not defined $opts->{'flank'}) {
+			usage("\nError: please provide a file to --flank\n");
+		} elsif (! -f $opts->{'flank'}) {
+			usage("\nError: the file provided to --flank does not exist\n");
+		}
+	}
+	if (($opts->{'type'} eq 'element') && ($opts->{'mode'} eq 'pairwise')) {
+		if ((not defined $opts->{'sub'}) || (not defined $opts->{'que'} )) {
+			usage("\nError: --type element with --mode pairwise requires both --sub and --que to be specified\n");
+		}
+	}
+	if (($opts->{'type'} eq 'empty') && ($opts->{'mode'} eq 'pairwise')) {
+		if ((not defined $opts->{'sub'}) || (not defined $opts->{'que'} )) {
+			usage("\nError: --type empty with --mode pairwise requires both --sub and --que to be specified\n");
+		}
+	}
+	if ($opts->{'type'} eq 'empty') {
+		if (defined $opts->{'stats'}) {
+			usage("\nError: the file provided to --stats does not exist\n") if (! -f $opts->{'stats'});
+			if ($opts->{'stats'} !~ m/\.named\.stats$/) {
+				usage("\nError: the file provided to --stats does not end in .named.stats.. it should if it was output by starfish summarize\n")
+			}
+		} else {
+			usage("\nError: please provide a file to --stats\n");
+		}
+	}
+	if ($opts->{'mode'} eq 'regions') {
+		if (defined $opts->{'regions'}) {
+			usage("\nError: the file provided to --regions does not exist\n") if (! -f $opts->{'regions'});
+		} else {
+			usage("\nError: please provide a file to --regions\n");
+		}
+	}
+	if ($opts->{'mode'} eq 'all' && $opts->{'type'} eq 'empty') {
+		if (defined $opts->{'flank'}) {
+			usage("\nError: the file provided to --flank does not exist\n") if (! -f $opts->{'flank'});
+			if ($opts->{'flank'} !~ m/\.singleDR\.stats$/) {
+				usage("\nError: the file provided to --flank does not end in .singleDR.stats.. it should if it was output by starfish flank\n")
+			}
+		} else {
+			usage("\nError: please provide a file to --flank\n");
+		}
+	}
+	if (not defined $opts->{'aligner'}) {
+		usage("\nError: you must specify an option for --aligner, either 'mafft' or 'nucmer'\n");
+	} elsif ($opts->{'aligner'} !~ m/^nucmer$|^mafft$/) {
+		usage("\nError: unrecognized option for --aligner, must be either 'mafft' or 'nucmer'\n");
+	} 
+	
+	if ($opts->{'aligner'} eq 'nucmer' && defined $opts->{'threads'}) {
+		warn("\nWarning: multi-threading currently not supported for --aligner nucmer\n");
+	} elsif (not defined $opts->{'threads'}) {
+		$opts->{'threads'} = '1';
+	}
+	if (not defined $opts->{'upstream'}) {
+		$opts->{'upstream'} = '100000';
+	}
+	if (not defined $opts->{'downstream'}) {
+		$opts->{'downstream'} = '100000';
+	}
+	if (not defined $opts->{'color1'}) {
+		$opts->{'color1'} = 'b3b1b2';
+	}
+	if (not defined $opts->{'color2'}) {
+		$opts->{'color2'} = 'b3b1b2';
+	}
+	if (not defined $opts->{'color3'}) {
+		$opts->{'color3'} = 'b3b1b2';
+	}
+	if (not defined $opts->{'color4'}) {
+		$opts->{'color4'} = 'ff264e';
+	}
+	if (not defined $opts->{'force'}) {
+		$opts->{'force'} = 0;
+	} else {
+		$opts->{'force'} = 1;
+	}
+	if (not defined $opts->{'nucmeropts'}) {
+		$opts->{'nucmeropts'} = '--mum';
+	}
+	if (not defined $opts->{'deltafilteropts'}) {
+		$opts->{'deltafilteropts'} = '-m -l 1000 -i 90';
+	}
+	if (not defined $opts->{'maffopts'}) {
+		$opts->{'mafftopts'} = "--auto";
+	}
+}

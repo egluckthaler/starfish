@@ -1,0 +1,435 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use Data::Dumper;
+use File::Basename;
+use Getopt::Long qw(:config auto_abbrev no_ignore_case);
+use Sort::Naturally;
+use FileHandle;
+$|=1;
+# Fishtank lib
+use Fishtank::Utils qw(Commandline_check Fasta_hash Fasta_hash_nospace dim_0_hash dim_1_hash Open_FH Format_check_fasta Format_check_gff);
+
+sub usage {
+	my $message = shift;
+	my $usage = qq/
+usage: starfish annotate [args]
+
+de novo HMM-validated gene annotation with metaeuk.
+
+Required:
+-a, --assembly    FILE   2 column tsv: genomeID, path to assembly FASTA.
+-p, --profile     FILE   profile HMM file.
+                         (can contain multiple)
+-P, --proteins    FILE   FASTA file of query amino acid sequences.
+-x, --prefix      STR    prefix for naming all output files.
+-i, --idtag       STR    string used as prefix for predicted gene featureIDs.
+-o, --outdir      DIR    output directory.
+
+Required, with defaults:
+-s, --separator   STR    character separating genomeID from featureID.
+                         (default: '_')
+-n, --nameField   STR    GFF3 attribute field where gene features are named.
+                         (default: 'Name=')
+-t, --tempdir     DIR    directory for writing temporary files.
+                         (default: --outdir)
+-T, --threads     INT    number of threads to use for parallel processes.
+                         (default: 6)
+--metaeukopts     STR    options to pass to metaeuk easy-predict.
+                         (default: see manual)
+--hmmsearchopts   STR    options to pass to hmmsearch.
+                         (default: '--max -E 0.001')
+
+Optional:
+-g, --gff         FILE   GFF3 file containing gene coordinates from all assemblies.
+--noCheck                skip format checking.
+-f, --force              force all steps, instead of skipping if output already exists.
+-h, --help               print more details and exit.
+
+/;
+	if (not defined $message) {
+		$message = $usage;
+	} else {
+		$message = "$message\nuse -h for more details\n\n" ;
+	}	
+	die($message);
+}
+
+main: {
+
+	# parse and check options
+	my %opts;
+	GetOptions(\%opts, 
+		'profile|p=s',
+		'proteins|P=s',
+		'assembly|a=s',
+		'separator|s=s',
+		'prefix|x=s',
+		'idtag|i=s',
+		'gff|g=s',
+		'nameField|namefield|n=s',
+		'threads|T=i',
+		'outdir|o=s',
+		'tempdir|t=s',
+		'metaeukopts=s',
+		'hmmsearchopts=s',
+		'noCheck|nocheck',
+		'force|f',
+		'h|help');
+	Opts_check(\%opts);
+	
+	# check dependencies
+	my @commandlines = ("metaeuk", "hmmsearch", "bedtools");
+	Commandline_check(\@commandlines);
+
+	print "Key parameters:
+metaeuk        $opts{metaeukopts}
+hmmsearch      $opts{hmmsearchopts}\n\n";
+
+	#########################
+	#### EXECUTE METAEUK ####
+	#########################
+
+	my $datestring = localtime();
+	
+	# always make sure no codon files exist in the main data directory
+	system("mkdir -p $opts{outdir}/metaeukData/codon") if (! -d "$opts{outdir}/metaeukData/codon");
+	system("mv $opts{outdir}/metaeukData/*.codon.fas $opts{outdir}/metaeukData/codon") if (my @files = glob("$opts{outdir}/metaeukData/*.codon.fas"));
+
+	if (! -f "$opts{outdir}/$opts{prefix}.fas" || ! -f "$opts{outdir}/$opts{prefix}.gff" || -z "$opts{outdir}/$opts{prefix}.fas" || -z "$opts{outdir}/$opts{prefix}.gff" || $opts{'force'} == 1) {
+
+		# load up assembly hash
+		my ($assemblies) = dim_1_hash($opts{'assembly'}, "\t", "0:1");
+
+		# make a temp data directory
+		system("mkdir -p $opts{outdir}/metaeukData/");
+		system("mkdir -p $opts{outdir}/metaeukTemp/");
+
+		# iterate through each assembly, and execute metaeuk
+		$datestring = localtime();
+		print "[$datestring] running metaeuk easy-predict for ".scalar(keys %{$assemblies})." assemblies..\n";
+
+		foreach my $assemblyName (nsort keys %{$assemblies}) {
+			if (! -f "$opts{outdir}/metaeukData/$assemblyName.fas") { # check for metaeuk output
+				# format check: check sequence IDs in fastas and gffs are correctly labeled (assumes if metaeuk results are present, format check has already been run)
+				if (not defined $opts{'noCheck'}) {
+					Format_check_fasta($assemblies->{$assemblyName}, $opts{'separator'});
+				}
+				if (-f $assemblies->{$assemblyName}) {
+					my ($failCheckMetaeuk) = system("metaeuk easy-predict $assemblies->{$assemblyName} $opts{proteins} $opts{outdir}/metaeukData/$assemblyName $opts{outdir}/metaeukTemp/ --local-tmp $opts{outdir}/metaeukTemp/ --threads $opts{threads} $opts{metaeukopts} &>$opts{outdir}/$opts{prefix}.metaeuk.log");
+					$datestring = localtime();					
+					if ($failCheckMetaeuk != 0) { die "\n\n[$datestring] error: could not execute metaeuk on commandline, exiting..\n$!\n";}
+					system("rm -r $opts{outdir}/metaeukTemp/*"); # clean up temp directory
+				} else {
+					$datestring = localtime();
+					print "[$datestring] the assembly $assemblies->{$assemblyName} does not exist, skipping metaeuk annotation\n";
+				}
+			} else {
+				$datestring = localtime();
+				print "[$datestring] $opts{outdir}/metaeukData/$assemblyName.fas already exists, skipping metaeuk annotation\n";
+			}
+		}
+
+		# combine all metaeuk amino acid predictions into a single file (move .codon.fas predictions out first)
+		system("mv $opts{outdir}/metaeukData/*.codon.fas $opts{outdir}/metaeukData/codon");
+		system("cat $opts{outdir}/metaeukData/*.fas > $opts{outdir}/$opts{prefix}.fas");
+		system("cat $opts{outdir}/metaeukData/*.gff > $opts{outdir}/$opts{prefix}.gff");
+		system("rm -r $opts{outdir}/metaeukTemp/");
+
+	} else {
+		$datestring = localtime();
+		print "[$datestring] $opts{outdir}/$opts{prefix}.fas exists, skipping metaeuk annotation\n";
+	}
+	
+	#######################
+	#### EXECUTE HMMER ####
+	#######################
+
+	# execute hmmer to verify metaeuk predictions
+	if (! -f "$opts{outdir}/$opts{prefix}.hmmout" || -z "$opts{outdir}/$opts{prefix}.hmmout" || $opts{'force'} == 1) {
+
+		$datestring = localtime();
+		print "[$datestring] running hmmsearch on metaeuk annotations..\n";
+
+		my ($failCheckHmmer) = system("hmmsearch --cpu $opts{threads} $opts{hmmsearchopts} --noali --tblout $opts{outdir}/$opts{prefix}.hmmout $opts{profile} $opts{outdir}/$opts{prefix}.fas 1>/dev/null");
+		if ($failCheckHmmer != 0) { die "\n\n[$datestring] error: could not execute hmmsearch on commandline, exiting..\n$!\n";}
+
+	} else {
+		$datestring = localtime();
+		print "[$datestring] $opts{outdir}/$opts{prefix}.hmmout exists, skipping HMM annotation of metaeuk results\n";
+	}
+	
+	#####################################
+	#### FILTER OUT HITS WITHOUT HMM ####
+	#####################################
+
+	# filter out sequences with no HMM hit, and rename sequence to the standard <genomeID><SEP><hmmID><featureID> format
+	# incrementing and numerical featureIDs will be assigned on the fly
+	my $newCount = 0;	
+	$datestring = localtime();
+	print "[$datestring] filtering metaeuk annotations based on hmmsearch results..\n";
+
+	# fields 1-3 and 7-8 of the metaeuk sequenceID, contains unique identifying info that can be recovered from the gff
+	Parse_hmm_hits("$opts{outdir}/$opts{prefix}.hmmout"); #print .hmmout.ids file
+
+	# the sequenceIDs in the metaeuk gff output are not unique. the sequenceIDs in the metaeuk .fas ARE
+	# unique, because they include coordinate info. Parse GFF to recover the coordinates, and filter 
+	($newCount) = Print_filtered_hmm_hits("$opts{outdir}/$opts{prefix}.hmmout.ids", "$opts{outdir}/$opts{prefix}.gff", "$opts{outdir}/$opts{prefix}.fas", $opts{'separator'}, $opts{'idtag'}, $opts{'nameField'});
+
+	#############################
+	#### ANNOTATION LIFTOVER ####
+	#############################
+
+	# if a gff annotation file is provided:
+	# if a newly predicted metaeuk gene overlaps with an existing predicted gene, the name of the existing gene
+	# will be lifted over, but the predicted sequence and coordinates will be derived from the metaeuk analysis
+	# if multiple predicted genes overlap with metaeuk, their featureIDs will be concatenated to form a new featureID with ':'
+	my ($oldOverlappingCount, $newOverlappingCount) = (0,0);
+	if (defined $opts{'gff'}) {
+		if (! -f "$opts{outdir}/$opts{prefix}.filt_intersect.fas" || ! -f "$opts{outdir}/$opts{prefix}.filt_intersect.gff" || $opts{'force'} == 1) {
+
+			$datestring = localtime();
+			print "[$datestring] lifting over names from overlapping genes in $opts{'gff'} to metaeuk annotations..\n";
+		
+			# check gff formatting
+			if (not defined $opts{'noCheck'}) {
+				print "[$datestring] checking formatting of $opts{'gff'}..\n";
+				Format_check_gff($opts{'gff'}, $opts{'separator'}, $opts{'nameField'}) if (defined $opts{'gff'});
+			}
+		
+			# find the newly predicted genes that overlap with existing genes, and those that don't, then filter by hmm hits
+			# -wao Write the original A and B entries plus the number of base pairs of overlap between the two features. A features w/o overlap are also reported with a NULL B feature and overlap = 0.
+			my ($bedtoolsFailCheck) = system("bedtools intersect -a $opts{outdir}/$opts{prefix}.filt.gff -b $opts{gff} -wao > $opts{outdir}/$opts{prefix}.intersect.gff");
+			if ($bedtoolsFailCheck != 0) { die "\n\n[$datestring] error: could not execute bedtools intersect on commandline, exiting..\n$!\n";}
+			sleep(5); # to avoid issues with bedtools I/O
+			my ($idConversions) = Parse_overlap_gff("$opts{outdir}/$opts{prefix}.intersect.gff", $opts{'separator'}, $opts{'nameField'});
+			
+			# Print out replaced info, if any overlaps were found
+			if (scalar keys %{$idConversions} > 0 ) {
+				($newCount, $oldOverlappingCount, $newOverlappingCount) = Print_overlapping_names("$opts{outdir}/$opts{prefix}.filt.fas", "$opts{outdir}/$opts{prefix}.filt.gff", $idConversions, $opts{'separator'}, $opts{'nameField'}, $opts{'idtag'});
+			} else {
+				$datestring = localtime();
+				print "[$datestring] no metaeuk genes intersect with gene features in $opts{'gff'}, so there are no gene names to lift over\n";
+			}
+			
+		} else {
+			$datestring = localtime();
+			print "[$datestring] either $opts{outdir}/$opts{prefix}.filt_intersect.faa or $opts{outdir}/$opts{prefix}.filt_intersect.gff exists, skipping re-naming of metaeuk results\n";
+		}
+	}
+		
+	$datestring = localtime();
+	print "[$datestring] found $newCount new $opts{idtag} genes and $newOverlappingCount $opts{idtag} genes that overlap with $oldOverlappingCount existing genes\n"; 
+	print "[$datestring] done\n";
+
+}
+
+sub Print_overlapping_names {
+	my ($filteredFas, $filteredGff, $idConversions, $SEP, $NAMEFIELD, $IDTAG) = @_;
+	my ($PREFIX, $OUTDIR) = fileparse($filteredFas, ".filt.fas");
+	my ($gffOUT) = Open_FH("$OUTDIR/$PREFIX.filt_intersect.gff");
+	my ($fasOUT) = Open_FH("$OUTDIR/$PREFIX.filt_intersect.fas");
+	my ($idOUT) = Open_FH("$OUTDIR/$PREFIX.filt_intersect.ids");
+	my ($newCount, $oldOverlappingCount, $newOverlappingCount) = (0,0,0);
+	my $SEPprint = $SEP;
+	$SEPprint =~ s/\\//g;
+	
+	# first change any sequenceIDs in .fas, if applicable, and print
+	my ($seqs) = Fasta_hash_nospace($filteredFas);
+	foreach my $header (keys %{$seqs}) {
+		if (exists $idConversions->{$header}) {
+			my ($genomeID) = split/$SEP/, $header;
+			my $newHeader = "${genomeID}$SEPprint".join(":", nsort keys %{$idConversions->{$header}}); #this is where to change the character that joins up featureIDs of overlapping genes
+			print $fasOUT ">$newHeader\n$seqs->{$header}\n";
+			$oldOverlappingCount+= scalar keys %{$idConversions->{$header}};
+			$newOverlappingCount++;
+			print $idOUT "$newHeader\t$IDTAG\n"; # print out a geneID to idtag mapping file 
+		} else {
+			print $fasOUT ">$header\n$seqs->{$header}\n";
+			print $idOUT "$header\t$IDTAG\n"; # print out a geneID to idtag mapping file 
+			$newCount++;
+		}
+	}	
+
+	# then change any sequenceIDs in .gff, if applicable, and print
+	open(my $IN, '<', $filteredGff) or usage("\nError: can't open gff $filteredGff for reading, exiting..\n");
+	while (my $line = <$IN>) {
+		next if ($line =~ m/^#/);
+		chomp $line;
+		my ($contigID, $annotator, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $info) = split("\t", $line);
+		next if ($featureType ne 'gene'); # only parse gene features
+		my ($otherInfo, $metaInfo) = split/;/, $info;
+		$metaInfo =~ m/$NAMEFIELD(.+)$/;
+		my $metaSeqID = $1;
+		if (exists $idConversions->{$metaSeqID}) { 
+			my ($genomeID) = split/$SEP/, $metaSeqID;
+			my $newHeader = "${genomeID}$SEPprint".join(":", nsort keys %{$idConversions->{$metaSeqID}}); #this is where to change the character that joins up featureIDs of overlapping genes
+			print $gffOUT join("\t", $contigID, $annotator, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $otherInfo).";${NAMEFIELD}$newHeader\n";
+		} else {
+			print $gffOUT "$line\n";
+		}
+	}
+	return($newCount, $oldOverlappingCount, $newOverlappingCount);
+}
+
+sub Parse_overlap_gff {
+	my ($gffFile, $SEP, $NAMEFIELD) = @_;
+	my %idConversions;
+	open(my $IN, '<', $gffFile) or usage("\nError: can't open $gffFile for reading\n");
+	while (my $line = <$IN>) {
+		next if ($line =~ m/^#/);
+		chomp $line;
+		#DK180_Scaffold1	MetaEuk	gene	222642	225282	1038	+	.	Target_ID=sodalk2_346302;Name=DK180_TYR01301	DK180_Scaffold1	GLEAN	gene	222642	223415	.	+	.	ID=DK180_V000059;Name=DK180_V000059	774
+		my ($metaContig, $metaMeta, $metaFeat, $metaStart, $metaEnd, $metaNA1, $metaStrand, $metaNA2, $metaInfo, $predContig, $predMeth, $predFeat, $predStart, $predEnd, $predNA1, $predStrand, $predNA2, $predInfo, $overlap) = split/\t/, $line;
+		if ($overlap > 0) { 
+			$metaInfo = "\t$metaInfo"; # for helping with regex parsing
+			$metaInfo =~ m/[;\t]$NAMEFIELD([^\t]+)/;
+			my $metaSeqID = $1;
+
+			$predInfo = "\t$predInfo"; # for helping with regex parsing
+			$predInfo =~ m/[;\t]$NAMEFIELD([^;]+)/;
+			my $predSeqID = $1;
+			
+			next if ($metaSeqID eq $predSeqID);
+			
+			my ($genomeID, $featureID) = split/$SEP/, $predSeqID;
+			$idConversions{$metaSeqID}{$featureID} = 1;
+		}
+	}	
+	return(\%idConversions);	
+}
+
+sub Print_filtered_hmm_hits {
+	my ($hmmIDfile, $gffFile, $fasFile, $SEP, $TAG, $NAMEFIELD) = @_;
+	my ($HMMseqIDs) = dim_0_hash($hmmIDfile, "\t", '0');
+	my ($PREFIX, $OUTDIR) = fileparse($fasFile, ".fas");
+	my ($gffOUT) = Open_FH("$OUTDIR/$PREFIX.filt.gff");
+	my ($fasOUT) = Open_FH("$OUTDIR/$PREFIX.filt.fas");
+	my ($idOUT) = Open_FH("$OUTDIR/$PREFIX.filt.ids");
+	my $SEPprint = $SEP;
+	$SEPprint =~ s/\\//g;
+	
+	# first edit the sequenceIDs in .fas to conform to naming convention in .hmmout
+	my %renamedSeqs;
+	my ($seqs) = Fasta_hash_nospace($fasFile);
+	foreach my $header (keys %{$seqs}) {
+		my (@fields) = split/\|/, $header;
+		my $newHeader = "$fields[0]\|$fields[1]\|$fields[2]\|$fields[6]\|$fields[7]";
+		$renamedSeqs{$newHeader} = $seqs->{$header};
+	}
+
+	# then print out new fasta and gff with reformatted ids, keeping only those genes with HMMs
+	my $newGeneCounter = 0;
+	open(my $IN, '<', $gffFile) or usage("\nError: can't open gff $gffFile for reading, exiting..\n");
+	while (my $line = <$IN>) {
+		next if ($line =~ m/^#/);
+		chomp $line;
+		# DK051-Scaffold13	gene	MetaEuk	18274	20639	447	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-
+		# DK051-Scaffold13	mRNA	MetaEuk	18274	20639	447	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-_mRNA;Parent=consp.1_660283|DK051-Scaffold13|-
+		# DK051-Scaffold13	exon	MetaEuk	20313	20639	90	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-_exon;Parent=consp.1_660283|DK051-Scaffold13|-_mRNA
+		# DK051-Scaffold13	CDS	MetaEuk	20313	20639	90	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-_CDS;Parent=consp.1_660283|DK051-Scaffold13|-_exon
+
+		# metaeuk gffs have the source and feature fields reversed according to gff specifications
+		my ($contigID, $featureType, $source, $begin, $end, $NULL1, $strand, $NULL2, $info) = split("\t", $line);
+		next if ($featureType ne 'gene'); # only parse gene features
+		my ($otherInfo, $metaeukID) = split/;/, $info;
+		$metaeukID =~ s/TCS_ID=//;
+		# gff coordinates of gene are +1 greater than the coordinates in the metaeuk headers >:(
+		my $beginFas = $begin - 1;
+		my $endFas = $end - 1;
+		$metaeukID = "$metaeukID|$beginFas|$endFas"; # format to a unique identifier corresponding to how the hmm file was parsed
+		if (exists $HMMseqIDs->{$metaeukID}) { # is this gene in the hmmout file?
+			my ($genomeID) = split/$SEP/, $contigID;
+			$newGeneCounter++;
+			#my $formattedCount = sprintf("%05d", $newGeneCounter);
+			my $formattedCount = $newGeneCounter;
+			my $newSeqID = "$genomeID${SEPprint}${TAG}$formattedCount";
+			# convert to standard gff format
+			print $gffOUT join("\t", $contigID, $source, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $otherInfo).";$NAMEFIELD${newSeqID}\n";
+			print $fasOUT ">$newSeqID\n$renamedSeqs{$metaeukID}\n";
+			print $idOUT "$newSeqID\t$TAG\n";
+		}
+	}
+	return($newGeneCounter);
+}
+
+sub Parse_hmm_hits {
+	my ($hmmFile) = @_;
+	my ($OUT) = Open_FH("$hmmFile.ids");
+	open(my $IN, '<', $hmmFile) or usage("\nError: can't open $hmmFile for reading\n");
+	while (my $line = <$IN>) {
+		next if ($line =~ m/^#/);
+		chomp $line;
+		my ($id) = split/ /, $line;
+		$id =~ s/^([^\|]+\|[^\|]+\|[^\|]+)\|[^\|]+\|[^\|]+\|[^\|]+(\|[^\|]+\|[^\|]+).+/$1$2/;
+		print $OUT "$id\n";
+	}	
+}
+
+sub Opts_check {
+	my ($opts) = @_;
+	usage() if (exists $opts->{'h'});
+	usage("\nError: no arguments provided\n") if (scalar keys %{$opts} == 0);
+	usage("\nError: please provide a file to --profile\n") if (not defined $opts->{'profile'});
+	usage("\nError: the file provided to --profile does not exist\n") if (! -f $opts->{'profile'});
+	usage("\nError: please provide a string to --prefix\n") if (not defined $opts->{'prefix'});
+	usage("\nError: please provide a string to --idtag\n") if (not defined $opts->{'idtag'});
+	usage("\nError: please provide a directory to --outdir\n") if (not defined $opts->{'outdir'});
+	usage("\nError: the directory provided to --outdir does not exist\n") if (! -d $opts->{'outdir'});
+	usage("\nError: please provide a file to --proteins\n") if (not defined $opts->{'proteins'});
+	usage("\nError: the file provided to --proteins does not exist\n") if (! -f $opts->{'proteins'});
+	usage("\nError: please provide a file to --assembly\n") if (not defined $opts->{'assembly'});
+	usage("\nError: the file provided to --assembly does not exist\n") if (! -f $opts->{'assembly'});
+	if (not defined $opts->{'separator'}) {
+		$opts->{'separator'} = '_';
+	} elsif ($opts->{'separator'} eq ':') {
+		usage("\nError: the separator character cannot be ':'\n");
+	} elsif ($opts->{'separator'} eq ';') {
+		usage("\nError: the separator character cannot be ';'\n");
+	} elsif ($opts->{'separator'} eq '|') {
+		usage("\nError: the separator character cannot be '|'\n");
+	}
+	if (defined $opts->{'separator'}) {
+		$opts->{'separator'} = quotemeta($opts->{'separator'});	# to allow splitting on special characters, like '.'
+	}
+	
+	if (defined $opts->{'gff'}) {
+		usage("\nError: the file provided to --gff does not exist\n") if (! -f $opts->{'gff'});
+	}
+	if (not defined $opts->{'nameField'}) {
+		$opts->{'nameField'} = 'Name=';
+	}
+	if (not defined $opts->{'threads'}) {
+		$opts->{'threads'} = 6;
+	} elsif ($opts->{'threads'} !~ m/^\d+$/) {
+		usage("\nError: the argument for --threads must be an integer\n");
+	}
+	if (not defined $opts->{'tempdir'}) {
+		$opts->{'tempdir'} = $opts->{'outdir'};
+	}
+	if (not defined $opts->{'force'}) {
+		$opts->{'force'} = 0;
+	}
+	if (not defined $opts->{'metaeukopts'}) {
+		# metaeuk parameters
+		# -v				verbosity \nErrors, warnings and info
+		# -s				sensitivity: sensitive
+		# -e				List matches below this E-value	[0.0, inf]
+		# --metaeuk-eval	maximal combined evalue of an optimal set [0.0, inf]
+		# --metaeuk-tcov	minimal length ratio of combined set to target [0.0, 1.0]
+		# --allow-deletion	Allow deletions in a MSA
+		# --protein			translate the joint exons coding sequence to amino acids
+		# --disk-space-limit  Set max disk space to use for reverse profile searches (defaults to all available)
+		# --max-seqs INT     Maximum results per query sequence allowed to pass the prefilter (affects sensitivity) [0.000]
+		#	shouldn't be an issue for use because we do a search per genome, never expect more than 300 copies of a given gene per genome
+		$opts->{'metaeukopts'} = '-v 3 -s 7.5 -e 0.0001 --max-intron 2000 --max-seqs 300 --metaeuk-eval 0.001 --exhaustive-search 1 --metaeuk-tcov 0.25 --allow-deletion 1 --protein 1 --disk-space-limit 100G --remove-tmp-files 1 --compressed 1';
+	}
+
+
+	if (not defined $opts->{'hmmsearchopts'}) {
+		# hmmsearch paramters
+		#  --max    : Turn all heuristic filters off (less speed, more power)
+		# -E <x>     : report sequences <= this E-value threshold in output
+		$opts->{'hmmsearchopts'} =  "--max -E 0.001";
+	}
+}

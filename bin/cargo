@@ -1,0 +1,558 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use Data::Dumper;
+use File::Basename;
+use Getopt::Long qw(:config auto_abbrev no_ignore_case);
+use Sort::Naturally;
+use Storable;
+use FileHandle;
+$|=1;
+# Fishtank lib
+use Fishtank::Utils qw(dim_0_hash dim_1_hash Open_FH);
+
+# not currently implemented, but kept here for posterity: current practice is to just calculate Jaccard similarity
+# constants recommended by Lin et al. (2006) for weighting jaccard and duplication distances
+#my $JCONSTANT = 0.36;
+#my $DCONSTANT = 0.64;
+
+sub usage {
+	my $message = shift;
+	my $usage = qq/
+usage: starfish cargo [args]
+
+define element pangenomes and calculate cargo-based similarities between elements.
+
+Required:
+-b, --bed           FILE   BED file with feature coordinates of mobile elements.
+-x, --prefix        STR    prefix for naming all output files.
+-o, --outdir        DIR    output directory.
+
+Required, with defaults:
+-t, --thresh        LIST   thresholds for determining core, common,
+                           and rare annotations.
+                           (default: 0.2,0.9)
+
+One of the following, for grouping genes together by annotations:
+-f, --field         STR    annotation field in --bed for parsing gene annotations.
+-a, --ann           FILE   2 column tsv: geneID, annotation.
+
+One or more of the following, for defining sets of elements to compare:
+-g, --group         FILE   MCL-formatted group file with element IDs.
+-d, --dereplicated  FILE   dereplicated.txt file with all elements per region.
+                           (output by starfish dereplicate)
+-l, --list          STR    1 column list of elementIDs.
+
+Optional:
+-i, --idtag         STR    prefix of members of interest in --group.
+                           (only members with this prefix will be parsed)
+-h, --help                 print more details and exit.
+/;
+	if (not defined $message) {
+		$message = $usage;
+	} else {
+		$message = "$message\nuse -h for more details\n\n" ;
+	}	
+	die($message);
+}
+
+main: {
+
+	# parse and check options
+	my %opts;
+	GetOptions(\%opts, 
+		'bed|b=s',
+		'thresh|t=f',
+		'prefix|x=s',
+		'outdir|o=s',
+		'field|f=s',
+		'ann|a=s',
+		'idtag|i=s',
+		'group|g=s',
+		'dereplicated|d=s',
+		'list|l=s',
+		'h|help');
+	Opts_check(\%opts);
+
+	#######################################
+	#### FORMAT CHECK AND READ IN DATA ####
+	#######################################
+
+		my $datestring = localtime();
+		print "\n[$datestring] reading in data..\n";
+		
+		# parse all elements from BED
+		# parse raw counts of all elements in each set, for determining annotation fraction
+		# structured: {'all'}{starshipID} = \@cargo gene annotation
+		# structured: {'all'} = elementCount;
+		my ($allCargo, $allElementCount);
+		if (defined $opts{'field'}) {
+			($allCargo, $allElementCount) = Parse_cargo_by_field($opts{'bed'}, $opts{'field'});
+		} elsif (defined $opts{'ann'}) {
+			my ($gene2ann) = dim_1_hash($opts{'ann'}, "\t", "0:1");
+			($allCargo, $allElementCount) = Parse_cargo_by_ann($opts{'bed'}, $gene2ann);	
+		}
+
+		# parse elements from group file
+		# structured: {groupID}{fraction} = \@cargo gene annotation
+		# structured: {groupID} = elementCount;
+		my ($groupCargo, $groupElementCount, $element2group);
+		if (defined $opts{'group'}) {
+			($element2group, $groupElementCount) = Parse_group_file_by_member($opts{'group'}, $opts{'idtag'});
+			($groupCargo) = Parse_cargo_by_set($element2group, $allCargo);
+			($groupCargo) = Filter_cargo_by_freq($groupCargo, $groupElementCount);
+		}
+		
+		# parse elements from region file
+		# structured: {regionID}{fraction} = \@cargo gene annotation
+		my ($regionCargo, $regionElementCount, $element2region);
+		if (defined $opts{'dereplicated'}) {
+			($element2region, $regionElementCount) = Parse_dereplicated_file_by_member($opts{'dereplicated'});
+			($regionCargo) = Parse_cargo_by_set($element2region, $allCargo);
+			($regionCargo) = Filter_cargo_by_freq($regionCargo, $regionElementCount);
+		}
+		
+		# parse elements from list
+		# structured: {'list'}{fraction} = \@cargo gene annotation
+		my ($listCargo, $listElementCount, $elementIDs);
+		if (defined $opts{'list'}) {
+			($elementIDs) = dim_0_hash($opts{'list'}, "\t", "0");
+			($listCargo, $listElementCount) = Parse_cargo_by_list($elementIDs, $allCargo);
+			($listCargo) = Filter_cargo_by_freq($listCargo, $listElementCount);
+		}
+		
+	#############################
+	#### PRINT SUMMARY FILES ####
+	#############################
+		
+		if (defined $groupCargo) {
+			my $groupOutfile = "$opts{outdir}/$opts{prefix}.group_cargo_summary.txt";
+			Print_cargo_summary($groupCargo, $element2group, $allCargo, $groupElementCount, $opts{'thresh'}, $groupOutfile);
+		}
+		
+		if (defined $regionCargo) {
+			my $regionOutfile = "$opts{outdir}/$opts{prefix}.region_cargo_summary.txt";		
+			Print_cargo_summary($regionCargo, $element2region, $allCargo, $regionElementCount, $opts{'thresh'}, $regionOutfile);
+		}
+		
+		if (defined $listCargo) {
+			my $listOutfile = "$opts{outdir}/$opts{prefix}.list_cargo_summary.txt";				
+			Print_cargo_summary($listCargo, $elementIDs, $allCargo, $listElementCount, $opts{'thresh'}, $listOutfile);
+		}
+		
+	#############################
+	#### CALCULATE DISTANCES ####
+	#############################
+	
+		# calculate lin similarity (1 - lin distance) based on all cargo annotations
+		# structured: dist{element1}{element2} = jaccard_index\tduplication_index\tlins_dist
+		$datestring = localtime();
+		print "[$datestring] calculating Jaccard similarities between all element pairs per set..\n";
+
+		my ($groupSim, $regionSim, $listSim);
+		if (defined $groupCargo) {
+			($groupSim) = Calculate_lin_similarity($groupCargo, $element2group, $allCargo);
+		}
+		
+		if (defined $regionCargo) {
+			($regionSim) = Calculate_lin_similarity($regionCargo, $element2region, $allCargo);
+		}
+		
+		if (defined $listCargo) {
+			($listSim) = Calculate_lin_similarity($listCargo, $elementIDs, $allCargo);
+		}
+		
+	#########################
+	#### PRINT SIM FILES ####
+	#########################
+		
+		if (defined $groupSim) {
+			my $groupOutfile = "$opts{outdir}/$opts{prefix}.group_cargo.sim";
+			Print_sim_file($groupSim, $groupOutfile);
+		}
+		
+		if (defined $regionSim) {
+			my $regionOutfile = "$opts{outdir}/$opts{prefix}.region_cargo.sim";		
+			Print_sim_file($regionSim, $regionOutfile);
+		}
+		
+		if (defined $listSim) {
+			my $listOutfile = "$opts{outdir}/$opts{prefix}.list_cargo.sim";				
+			Print_sim_file($listSim, $listOutfile);
+		}
+
+		$datestring = localtime();
+		print "[$datestring] done\n";
+}
+
+sub Print_sim_file {
+	my ($similarities, $outfile) = @_;
+	my ($OUT) = Open_FH($outfile);
+	foreach my $setID (nsort keys %{$similarities}) {
+		foreach my $refID (nsort keys %{$similarities->{$setID}}) {
+			foreach my $queID (nsort keys %{$similarities->{$setID}->{$refID}}) {
+				print $OUT "$setID\t$refID\t$queID\t$similarities->{$setID}->{$refID}->{$queID}\n";
+			}
+		}
+	}
+}
+
+sub Calculate_lin_similarity {
+	my ($cargo, $element2set, $allCargo) = @_;
+	my (%similarities, %observed_pairs);
+	
+	foreach my $set (nsort keys %{$cargo}) {
+
+		# parse all anns in this set
+		my %setAnns;
+		foreach my $annFreq (keys %{$cargo->{$set}}) {
+			foreach my $ann (@{$cargo->{$set}->{$annFreq}}) {
+				$setAnns{$ann} = 1;
+			}
+		}
+
+		# get the filtered annotations for all elements in this set
+		my %element2cargo; 
+		foreach my $elementID (keys %{$element2set}) {
+			if ($set eq $element2set->{$elementID} || $element2set->{$elementID} eq '1') { # 1 for list-based elements
+				if (defined $allCargo->{'all'}->{$elementID}) {
+					foreach my $ann (@{$allCargo->{'all'}->{$elementID}}) {
+						$element2cargo{$elementID}{$ann}++ if (exists $setAnns{$ann});
+					}
+				}
+			}
+		}
+		foreach my $elementP (keys %element2cargo) {
+			foreach my $elementQ (keys %element2cargo) {
+				next if ($elementP eq $elementQ);
+				next if (exists $observed_pairs{"$elementP|$elementQ"}); #skip observed pairwise interactions
+				$observed_pairs{"$elementP|$elementQ"} = 1; #mark pair as observed
+				$observed_pairs{"$elementQ|$elementP"} = 1; #mark pair as observed
+
+				#calculate Jaccard similarity based on distinct annotations in hoods
+				my $distinctP = $element2cargo{$elementP};
+				my $distinctQ = $element2cargo{$elementQ};
+			
+				my ($J_SIM, $distincts) = Calculate_Jaccard_similarity($distinctP, $distinctQ);
+
+				#calculate Duplication similarity based on counts of duplicated annotations in hoods
+				#my ($D_SIM) = Calculate_Duplication_similarity($distinctP, $distinctQ, $distincts);
+	
+				#Combine into linear function with weighted values
+				#my $Spq = ($JCONSTANT*$J_SIM) + ($DCONSTANT*$D_SIM);
+				#$Spq= sprintf("%.3f", $Spq);
+				#$D_SIM = sprintf("%.3f", $D_SIM);
+				$J_SIM = sprintf("%.3f", $J_SIM);
+				
+				$similarities{$set}{$elementP}{$elementQ} = "$J_SIM";
+				$similarities{$set}{$elementQ}{$elementP} = "$J_SIM";
+			}
+		}
+	}
+	return(\%similarities);
+}
+
+sub Calculate_Duplication_similarity {
+	my ($distinctP, $distinctQ, $distincts) = @_;
+	
+	#First calculate 'S' portion of denominator, based on maximum number of duplicated annotations in each region, for each OG
+	my $S = 0;
+	foreach my $OGi (keys %{$distincts}) {
+		my $Nip = 0;
+		$Nip = $distinctP->{$OGi} if (exists $distinctP->{$OGi}); #the number of the ith annotation duplicates in P 
+		my $Niq = 0;
+		$Niq = $distinctQ->{$OGi} if (exists $distinctQ->{$OGi}); #the number of the ith annotation duplicates in Q 
+		my $max = 0;
+		if ($Nip > $Niq) {
+			$max = $Nip;
+		} else {
+			$max = $Niq;
+		}
+		$S += $max;
+	}
+		
+	#Now continue to calculate rest of exponent	
+	my $exponent = 0; #exponent of duplication expression
+	foreach my $OGi (keys %{$distincts}) {
+		my $Nip = 0;
+		$Nip = $distinctP->{$OGi} if (exists $distinctP->{$OGi}); #the number of the ith annotation duplicates in P 
+		my $Niq = 0;
+		$Niq = $distinctQ->{$OGi} if (exists $distinctQ->{$OGi}); #the number of the ith annotation duplicates in Q 
+		my $diff = (abs($Nip - $Niq)) / $S;
+		$exponent += $diff;
+	}
+	
+	#Calculate Duplication diff
+	$exponent = 0 - $exponent;
+	my $D_SIM = exp $exponent;
+	#print "S=$S\texp=$exponent\tDdist=$D_SIM\n";
+	return($D_SIM);	
+}
+
+sub Calculate_Jaccard_similarity {
+	my ($distinctP, $distinctQ) = @_;
+	my $Npq = 0; #distinct annotations in common
+	my $Np = 0; #distinct annotations in region P
+	my $Nq = 0; #distinct annotations in region Q
+	my %distincts; #track all distinct annotations in set
+	foreach my $ogP (keys %{$distinctP}) {
+		$distincts{$ogP} = 1;
+		$Np++;
+		if (exists $distinctQ->{$ogP}) { #if OG is present in other region
+			$Npq++;
+		} 
+	}
+	foreach my $ogQ (keys %{$distinctQ}) {
+		$distincts{$ogQ} = 1;
+		$Nq++;
+	}
+	my $J_SIM;
+	if ($Np == 0 && $Nq == 0) {
+		$J_SIM = 0;
+	} else {
+		$J_SIM = ($Npq / ($Np + $Nq - $Npq));
+	}
+	return($J_SIM, \%distincts);	
+}
+
+sub Print_cargo_summary {
+	my ($cargo, $element2set, $allCargo, $elementCount, $RANGE, $outfile) = @_;
+	my ($OUT) = Open_FH($outfile);
+	
+	print $OUT "#setID\trefElementID\telementCount\n";
+	my ($THRESH1, $THRESH2) = split/,/, $RANGE;
+
+	foreach my $set (nsort keys %{$cargo}) {
+		
+		# parse all anns in this set
+		my %setAnns;
+		foreach my $annFreq (keys %{$cargo->{$set}}) {
+			foreach my $ann (@{$cargo->{$set}->{$annFreq}}) {
+				$setAnns{$ann} = 1;
+			}
+		}
+		
+		# define the reference element as the element with the most annotations
+		my %elementAnnCount; 
+		foreach my $elementID (keys %{$element2set}) {
+			if ($set eq $element2set->{$elementID} || $element2set->{$elementID} eq '1') { # 1 for list-based elements
+				$elementAnnCount{$elementID} = 0;
+				if (defined $allCargo->{'all'}->{$elementID}) {
+					foreach my $ann (@{$allCargo->{'all'}->{$elementID}}) {
+						$elementAnnCount{$elementID}++ if (exists $setAnns{$ann});
+					}
+				}
+			}
+		}
+		my $refCount = 0;
+		my $refElementID;
+		foreach my $elementID (nsort keys %elementAnnCount) {
+			$refElementID = $elementID if ($elementAnnCount{$elementID} > $refCount);
+			$refCount = $elementAnnCount{$elementID};
+		}
+		# print reference line
+		print $OUT "#$set\t$refElementID\t$elementCount->{$set}\n";
+		
+		# print out summarized info
+		foreach my $annFreq (sort {$b <=> $a} keys %{$cargo->{$set}}) {
+			foreach my $ann (nsort @{$cargo->{$set}->{$annFreq}}) {
+				print $OUT "$set\t";
+				if ($annFreq >= $THRESH2) {
+					print $OUT "core\t";
+				} elsif (($annFreq >= $THRESH1) && ($annFreq < $THRESH2)) {
+					print $OUT "common\t";
+				} elsif (($annFreq >= 1/$elementCount->{$set}) && ($annFreq < $THRESH1)) {
+					print $OUT "rare\t";
+				} elsif ($annFreq <= 1/$elementCount->{$set}) {
+					print $OUT "unique\t";
+				}
+				print $OUT "$ann\t$annFreq\n";
+			}
+		}
+	}
+}
+
+sub Filter_cargo_by_freq {
+	my ($cargo, $elementCount) = @_;
+	my %filtCargo;
+	
+	foreach my $set (keys %{$cargo}) {
+		my %cargoFreqs;
+		foreach my $elementID (keys %{$cargo->{$set}}) {
+			foreach my $ann (@{$cargo->{$set}->{$elementID}}) {
+				# $cargoFreqs{$ann}++; # for frequency-based analysis
+				$cargoFreqs{$ann}{$elementID} = 1;
+			}
+		}
+		my $totalCount = $elementCount->{$set};
+		foreach my $ann (keys %cargoFreqs) {
+			my $annCount = scalar (keys %{$cargoFreqs{$ann}}); # how many elements have this annotation?
+			my $annFrac = sprintf("%.5f", $annCount / $totalCount);
+			push @{$filtCargo{$set}{$annFrac}}, $ann;
+		}
+	}
+	return(\%filtCargo);	
+}
+
+sub Parse_cargo_by_list {
+	my ($elementIDs, $allCargo) = @_;
+	my $datestring = localtime();					
+	my (%setCargo, %listElementCount);
+	foreach my $elementID (keys %{$elementIDs}) {
+		$listElementCount{'list'}++;
+		push @{$setCargo{'list'}{$elementID}}, @{$allCargo->{'all'}->{$elementID}} if (exists $allCargo->{'all'}->{$elementID});
+	}
+	return(\%setCargo, \%listElementCount);	
+}
+
+sub Parse_cargo_by_set {
+	my ($element2set, $allCargo) = @_;
+	my $datestring = localtime();					
+	my (%setCargo);
+	foreach my $elementID (keys %{$element2set}) {
+		push @{$setCargo{$element2set->{$elementID}}{$elementID}}, @{$allCargo->{'all'}->{$elementID}} if (exists $allCargo->{'all'}->{$elementID});
+	}
+	return(\%setCargo);	
+}
+
+sub Parse_cargo_by_ann {
+	my ($bedFile, $gene2ann) = @_;
+	my $datestring = localtime();					
+	my (%regions, %allElementCount);
+	open (my $IN, '<', $bedFile) or usage("\n\n[$datestring] error: can't open $bedFile for reading\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		# DK001_Scaffold1	97800	100136	DK001_V000019	$tag	+	DK001_ship00001	ann
+		my ($contigID, $begin, $end, $featureID, $idtag, $strand, $regionIDString, $annString) = split("\t", $line);
+		my (@regionIDs) = split/,/, $regionIDString; # to accomodate overlapping regions e.g., in case of nested starships
+		foreach my $regionID (@regionIDs) {
+			$allElementCount{'all'}++;
+			next if ($annString eq '.'); # indicates no annotations
+			if (exists $gene2ann->{$featureID}) {
+				push @{$regions{'all'}{$regionID}}, $gene2ann->{$featureID};
+			}
+		}
+	}
+	return(\%regions, \%allElementCount);	
+}
+
+sub Parse_cargo_by_field {
+	my ($bedFile, $FIELD) = @_;
+	my $datestring = localtime();					
+	$FIELD = "$FIELD=" if ($FIELD !~ m/=$/);
+	my (%regions, %allElementCount);
+	open (my $IN, '<', $bedFile) or usage("\n\n[$datestring] error: can't open $bedFile for reading\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		# DK001_Scaffold1	97800	100136	DK001_V000019	$tag	+	DK001_s00001	ann
+		my ($contigID, $begin, $end, $featureID, $idtag, $strand, $regionIDString, $annString) = split("\t", $line);
+		my (@regionIDs) = split/,/, $regionIDString; # to accomodate overlapping regions e.g., in case of nested starships
+		my (@annFields) = split/;/, $annString;
+		foreach my $regionID (@regionIDs) {
+			$allElementCount{'all'}++;
+			next if ($annString eq '.'); # indicates no annotations
+			foreach my $annField (@annFields) {
+				if ($annField =~ m/^$FIELD/) {
+					my $annFieldString = $annField;
+					$annFieldString =~ s/^$FIELD//;
+					my %examinedAnns;
+					
+					my @anns;
+					if ($FIELD eq 'COG=') { # for patching a bug where sometimes for COG annotatinos, multiple are combined together into a single string
+						(@anns) = split//, $annFieldString;
+					} else {
+						(@anns) = split/\|/, $annFieldString;
+					}
+					
+					foreach my $ann (@anns) {
+						next if (exists $examinedAnns{$ann}); # make sure that identical annotations for the same gene are not loaded into hash, avoid potential formatting issues with BED
+						push @{$regions{'all'}{$regionID}}, $ann;
+						$examinedAnns{$ann} = 1;
+					}
+				}
+			}
+		}
+	}
+	return(\%regions, \%allElementCount);	
+}
+
+sub Parse_dereplicated_file_by_member {
+	my ($dereplicatedFile) = @_;
+	my $datestring = localtime();					
+	my (%element2region, %elementRegionCount);
+	open (my $IN, '<', $dereplicatedFile) or usage("\n\n[$datestring] error: cannot read $dereplicatedFile, exiting\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		my ($regionID, $elementGroupID, $refElementID, $refSiteID, $otherElementIDsString) = split/\t/, $line;
+		$element2region{$refElementID} = $regionID;
+		$elementRegionCount{$regionID}++;
+		next if ($otherElementIDsString eq '.');
+		my @otherElements = split/,/, $otherElementIDsString;
+		foreach my $otherElementID (@otherElements) {
+			$elementRegionCount{$regionID}++;
+			$element2region{$otherElementID} = $regionID;
+		}
+	}
+	return(\%element2region, \%elementRegionCount);	
+}
+
+sub Parse_group_file_by_member {
+	my ($clusteringOutfile, $IDTAG) = @_;
+	my $datestring = localtime();					
+	my (%element2group, %elementGroupCount);
+	open (my $IN, '<', $clusteringOutfile) or usage("\n\n[$datestring] error: cannot read $clusteringOutfile, exiting\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		my (@elements) = split/\s+/, $line;
+		my $group = shift @elements;
+		$group =~ s/:$//;
+		
+		foreach my $element (@elements) {
+			if (defined $IDTAG) {
+				if ($element =~ m/$IDTAG/) {
+					$elementGroupCount{$group}++;
+					$element2group{$element} = $group;
+				}
+			} else {
+				$elementGroupCount{$group}++;
+				$element2group{$element} = $group;
+			}
+		}
+	}
+	return(\%element2group, \%elementGroupCount);	
+}
+
+sub Opts_check {
+	my ($opts) = @_;
+	usage() if (exists $opts->{'h'});
+	usage("\nError: no arguments provided\n") if (scalar keys %{$opts} == 0);
+	usage("\nError: please provide a file to --bed\n") if (not defined $opts->{'bed'});
+	usage("\nError: the file provided to --bed does not exist\n") if (! -f $opts->{'bed'});
+	if (not defined $opts->{'thresh'}) {
+		$opts->{'thresh'} = "0.2,0.9";
+	}
+	usage("\nError: please specify exactly two comma-separated fractions to --thresh\n") if (scalar(split/,/, $opts->{'thresh'}) != 2);
+	my @thresholds = split/,/, $opts->{'thresh'};
+	foreach my $threshold (@thresholds) {
+		usage("\nError: each fraction provided to --thresh must be a floating value\n") if (($threshold !~ m/^0\.\d+$/) && ($threshold !~ m/^0$/)  && ($threshold !~ m/^1.0$/));
+	}
+	usage("\nError: please provide a string to --prefix\n") if (not defined $opts->{'prefix'});
+	usage("\nError: please provide a directory to --outdir\n") if (not defined $opts->{'outdir'});
+	usage("\nError: the directory provided to --outdir does not exist\n") if (! -d $opts->{'outdir'});
+
+	if (defined $opts->{'ann'}) { # for 
+		usage("\nError: the file provided to --ann does not exist\n") if (! -f $opts->{'ann'});
+	} elsif (not defined $opts->{'field'}) {
+		usage("\nError: please provide either a string to --field or a file to --ann\n");
+	}
+	if (defined $opts->{'group'}) {
+		usage("\nError: the file provided to --group does not exist\n") if (! -f $opts->{'group'});
+	}
+	if (defined $opts->{'dereplicated'}) {
+		usage("\nError: the file provided to --dereplicated does not exist\n") if (! -f $opts->{'dereplicated'});
+	}
+	if (defined $opts->{'list'}) {
+		usage("\nError: the file provided to --list does not exist\n") if (! -f $opts->{'list'});
+	}
+	usage("\nError: you must provide a file to either --group, --dereplicated or --list\n")  if ((not defined $opts->{'group'}) && (not defined $opts->{'dereplicated'}) && (not defined $opts->{'list'}));
+}

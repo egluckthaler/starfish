@@ -1,0 +1,192 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use Data::Dumper;
+use File::Basename;
+use Getopt::Long qw(:config auto_abbrev no_ignore_case);
+use Sort::Naturally;
+use FileHandle;
+$|=1;
+# glofish lib
+use Fishtank::Utils qw(Fasta_hash_nospace dim_1_hash Open_FH Format_check_fasta Format_check_gff Format_name);
+
+sub usage {
+	my $message = shift;
+	my $usage = qq/
+usage: starfish format [args]
+
+format fasta and gff files (assumes genomeIDs assigned).
+
+At least one of the following:
+-f, --fasta       FILE   2 column tsv: genomeID, path to fasta file to format.
+                         (can specify multiple times)
+-g, --gff         FILE   2 column tsv: genomeID, path to gff3 file to format.
+
+Required, with defaults:
+-s, --separator   STR    character separating genomeID from featureID.
+                         (default: '_')
+-n, --nameField   STR    GFF3 attribute field where gene features are named.
+                         (default: 'Name=')
+
+Optional:
+-h, --help               print more details and exit.
+
+/;
+	if (not defined $message) {
+		$message = $usage;
+	} else {
+		$message = "$message\nuse -h for more details\n\n" ;
+	}	
+	die($message);
+}
+
+main: {
+
+	# parse and check options
+	my %opts;
+	GetOptions(\%opts, 
+		'fasta|f=s@',
+		'gff|g=s',
+		'separator|s=s',
+		'nameField|namefield|n=s',
+		'h|help');
+	Opts_check(\%opts);
+
+	#########################
+	#### REFORMAT FASTAS ####
+	#########################
+
+	if (defined $opts{'fasta'}) {
+
+		my $datestring = localtime();
+		print "[$datestring] reformatting fasta headers..\n";
+
+		foreach my $fastaFilePath (@{$opts{'fasta'}}) {
+			my ($fastaFiles) = dim_1_hash($fastaFilePath, "\t", "0:1");
+			foreach my $genomeID (keys %{$fastaFiles}) {
+				Format_fasta($genomeID, $fastaFiles->{$genomeID}, $opts{'separator'});
+			}
+		}
+	} 
+	
+	#######################
+	#### REFORMAT GFFS ####
+	#######################
+
+	if (defined $opts{'gff'}) {
+
+		my $datestring = localtime();
+		print "[$datestring] reformatting gff featureIDs..\n";
+
+		my ($gffFiles) = dim_1_hash($opts{'gff'}, "\t", "0:1");
+		foreach my $genomeID (keys %{$gffFiles}) {
+			Format_gff($genomeID, $gffFiles->{$genomeID}, $opts{'separator'}, $opts{'nameField'});
+		}
+	}
+
+	my $datestring = localtime();
+	print "[$datestring] done\n";
+}
+
+sub Format_fasta {
+	my ($genomeID, $fastaFile, $SEP) = @_;
+	my ($fastaFileName, $fastaOUTDIR, $fastaSuffix) = fileparse($fastaFile, (".aa.fa", ".faa", ".fas", ".filtered.fa", ".fa", ".fasta", ".fna"));
+	my ($OUT) = Open_FH("$fastaOUTDIR/$fastaFileName.fishtank_format$fastaSuffix");
+	my ($seqs) = Fasta_hash_nospace($fastaFile);
+	foreach my $header (keys %{$seqs}) {
+		my ($newName) = Format_name($header, $genomeID, $SEP);
+		print $OUT ">$newName\n$seqs->{$header}\n";
+	}
+	close($OUT);
+	# sanity check to confirm that fasta is indeed properly formatted
+	Format_check_fasta("$fastaOUTDIR/$fastaFileName.fishtank_format$fastaSuffix", $SEP);
+}
+
+sub Format_gff {
+	my ($genomeID, $gffFile, $SEP, $NAMEFIELD) = @_;
+	my ($gffFileName, $gffOUTDIR, $gffSuffix) = fileparse($gffFile, (".gff", ".gff3"));
+	my ($OUT) = Open_FH("$gffOUTDIR/$gffFileName.fishtank_format$gffSuffix");
+	open (my $IN, '<', $gffFile) or usage("\nError: can't open $gffFile for reading\n");
+	while (my $line = <$IN>) {
+		next if ($line =~ m/^#/);
+		chomp $line;
+		$line =~ s/ /\t/g;
+		my @fields = split/\t/, $line;
+		# unfortunately, many ncbi or JGI info lines have spaces in them, so lets fix this
+		my $contigID = shift @fields;
+		my $annotator = shift @fields;
+		my $featureType = shift @fields;
+		my $begin = shift @fields;
+		my $end = shift @fields;
+		my $NULL1 = shift @fields;
+		my $strand = shift @fields;
+		my $NULL2 = shift @fields;
+		my $info = join("", @fields);
+		$info =~ s/\t/_/g;
+		if (defined $featureType) {
+			next if ($featureType ne 'gene'); # only parse gene features
+			my ($newContigID) = Format_name($contigID, $genomeID, $SEP);
+			if ($info =~ m/$NAMEFIELD([^;]+)/) { # if we can't parse gene name according to the user-provide NAMEFIELD, then skip the line
+				my $geneName = $1;
+				my ($newGeneName) = Format_name($geneName, $genomeID, $SEP);
+				next if ($newGeneName eq 'NA');
+				$info =~ s/$geneName/$newGeneName/g;
+				($begin, $end) = ($end, $begin) if ($begin > $end); # many tools require begin coordinate to be < end coordinate, as expected
+				print $OUT "$newContigID\t$annotator\t$featureType\t$begin\t$end\t$NULL1\t$strand\t$NULL2\t$info\n";
+			} elsif ($info =~ m/gene_biotype=([^;]+)/) { # will happen for some JGI annotations that have tRNA and rRNA features that don't have protein IDs
+				my $biotype = $1;
+				$info =~ m/locus_tag=[^_]+_([^;]+)/;
+				my $locustag = $1;
+				my $geneName = "${biotype}${locustag}";
+				my ($newGeneName) = Format_name($geneName, $genomeID, $SEP);
+				next if ($newGeneName eq 'NA');
+				($begin, $end) = ($end, $begin) if ($begin > $end); # many tools require begin coordinate to be < end coordinate, as expected
+				print $OUT "$newContigID\t$annotator\t$featureType\t$begin\t$end\t$NULL1\t$strand\t$NULL2\t$info;$NAMEFIELD=$newGeneName\n";
+			} else {
+				my $datestring = localtime();
+				print "[$datestring] warning: can't parse gene name from line: $line\n"
+			}
+		} else {
+			my $datestring = localtime();
+			print "[$datestring] warning: can't parse featureType from line in $genomeID gff: $line\n";
+		}
+	}
+	close($OUT);
+	# sanity check to confirm that gff is indeed properly formatted
+	Format_check_gff("$gffOUTDIR/$gffFileName.fishtank_format$gffSuffix", $SEP, $NAMEFIELD);
+}
+
+sub Opts_check {
+	my ($opts) = @_;
+	usage() if (exists $opts->{'h'});
+	usage("\nError: no arguments provided\n") if (scalar keys %{$opts} == 0);
+	if (not defined $opts->{'separator'}) {
+		$opts->{'separator'} = '_';
+	} elsif ($opts->{'separator'} eq ':') {
+		usage("\nError: the separator character cannot be ':'\n");
+	} elsif ($opts->{'separator'} eq ';') {
+		usage("\nError: the separator character cannot be ';'\n");
+	} elsif ($opts->{'separator'} eq '|') {
+		usage("\nError: the separator character cannot be '|'\n");
+	}
+	if (defined $opts->{'separator'}) {
+		$opts->{'separator'} = quotemeta($opts->{'separator'});	# to allow splitting on special characters, like '.'
+	}
+	if (defined $opts->{'gff'}) {
+		usage("\nError: the file provided to --gff does not exist\n") if (! -f $opts->{'gff'});
+	}
+	if (defined $opts->{'fasta'}) {
+		foreach my $fastaFilePath (@{$opts->{'fasta'}}) {
+			usage("\nError: the file $fastaFilePath provided to --fasta does not exist\n") if (! -f $fastaFilePath);
+		}
+	}
+	if (not defined $opts->{'nameField'}) {
+		$opts->{'nameField'} = 'Name=';
+	}
+	if (not defined $opts->{'force'}) {
+		$opts->{'force'} = 0;
+	}
+}
+
+
+

@@ -1,0 +1,1216 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use Data::Dumper;
+use File::Basename;
+use Getopt::Long qw(:config auto_abbrev no_ignore_case);
+use Sort::Naturally;
+use FileHandle;
+use Storable;
+$|=1;
+# Fishtank lib
+use Fishtank::Utils qw(Commandline_check Homopolymer_check Edit_distance_check Sort_bed_hash_by_coordinate Reverse_gene_hash Filter_in_first_key Reverse_complement Fasta_hash_many_files Glofish_bed_hash dim_0_hash Open_FH);
+
+# CNEFinder defaults, users should never have to change these
+my $MEMLENGTH = 4;
+my $MERGEDLENGTH = 1;
+my $EXTTHRESH = '0.01';
+my $MINDRLENGTH = 4;
+my $MINTIRLENGTH = 8;
+my $MAXSEQLENGTH = 50;
+my $SIMTHRESH = 0.75;
+
+# used to filter pairs of DRs and TIRs based on Levenshtein edit distance
+my $minDRTIRsim = 0.75;
+
+sub usage {
+	my $message = shift;
+	my $usage = qq/
+usage: starfish flank [args]
+
+annotate flanking repeats at element boundaries.
+
+Required:
+-a, --assembly    FILE   2 column tsv: assembly name, path to assembly FASTA.
+-b, --bed         FILE   BED file with insert features of mobile elements.
+                         (output by starfish insert)
+-x, --prefix      STR    prefix for naming all output files.
+-o, --outdir      DIR    the output directory.
+
+Required, with defaults:
+-u, --upstream    INT    bp to search up and down from upstream boundary.
+                         (default: 100)
+-d, --downstream  INT    bp to search up and down from downstream boundary.
+                         (default: 100)
+-i, --maxTIR      INT    TIRs farther than this from DRs will be filtered out.
+                         (in bp; default: 50)
+-e, --edit        FLT    TIR and DR pairs must be at least this similar.
+                         (based on Levenshtein edit distance; default: 0.75)
+
+Optional:
+-h, --help               print more details and exit
+
+/;
+	if (not defined $message) {
+		$message = $usage;
+	} else {
+		$message = "$message\nuse -h for more details\n\n" ;
+	}	
+	die($message);
+}
+
+main: {
+
+	# parse and check options
+	my %opts;
+	GetOptions(\%opts, 
+		'assembly|a=s',
+		'bed|b=s',
+		'prefix|x=s',
+		'outdir|o=s',
+		'edit|e=s',
+		'upstream|u=i',
+		'downstream|d=i',
+		'maxTIR|i=i',
+		'h|help');
+	Opts_check(\%opts);
+
+	# check dependencies
+	my @commandlines = ("cnef");
+	Commandline_check(\@commandlines);
+
+		print "Key parameters:
+--upstream       $opts{'upstream'}
+--downstream     $opts{'downstream'}
+--maxTIR         $opts{'maxTIR'}
+--edit           $opts{'edit'}
+cnef parameters:
+ MEMLENGTH       $MEMLENGTH
+ MERGEDLENGTH    $MERGEDLENGTH
+ EXTTHRESH       $EXTTHRESH
+ MINDRLENGTH    $MINDRLENGTH
+ MINTIRLENGTH    $MINTIRLENGTH
+ MAXSEQLENGTH    $MAXSEQLENGTH
+ SIMTHRESH       $SIMTHRESH\n\n";
+
+	#######################################
+	#### FORMAT CHECK AND READ IN DATA ####
+	#######################################
+
+		my $datestring = localtime();
+		print "[$datestring] reading in data..\n";
+
+		# Parse info from candidate Starship regions
+		# structured: {contigID}{starshipID}{geneID} = [begin, end, strand, tag, annotation]
+		my ($bedFeatures) = Glofish_bed_hash($opts{'bed'});
+	
+		# Parse the coordinates of any elements with insert boundaries that have candidate DRs and captain
+		# boundary tag must equal 'insert'
+		# Alse parse candidate DR information from insertion site alignments
+		# this can only ever be 1 candidate DR per captain/emptyContig pair
+		# structured: candidateDRs{captainID}{emptyContigID} = DRseq
+		# Structured: knownElements{contigID}{emptyContigID}{captainID} = [elementBegin, elementEnd, capStrand, tag, annotation]
+		# Structured: knownCaptains{contigID}{emptyContigID}{captainID} = [capBegin,capEnd, capStrand, tag, annotation]
+		my ($knownElements, $knownCaptains, $candidateDRs, $cap2regionID) = Parse_insert_elements($bedFeatures);
+		
+		# Load up all assembly sequences into a single hash
+		# Structured: {contigID} = sequence
+		my ($assemblyPaths) = dim_0_hash($opts{'assembly'}, "\t", "1");
+		my ($assemblies) = Fasta_hash_many_files($assemblyPaths);
+	
+		# Only keep contigs that have a candidate Starship regions to speed up iterations
+		($assemblies) = Filter_in_first_key($assemblies, $knownElements);
+
+		# Reverse gene hashes for easier parsing based on geneID
+		# knownElements structured: {captainID}{emptyContigID}{capContigID} = [elementBegin, elementEnd, capStrand, capTag, capAnnotation]
+		# knownCaptains structured: {captainID}{emptyContigID}{capContigID} = [capBegin, capEnd, capStrand, capTag, capAnnotation]
+		($knownElements) = Reverse_gene_hash($knownElements);
+		($knownCaptains) = Reverse_gene_hash($knownCaptains);
+
+		# make checkpoint directory for good filekeeping
+		system("mkdir $opts{'outdir'}/checkpoints") if (! -d "$opts{'outdir'}/checkpoints");
+
+	######################################
+	#### RECOVER KNOWN DRS AT BOUNDS ####
+	####   AND SEARCH FOR NEW TIRS    ####
+	######################################
+
+		$datestring = localtime();
+		print "[$datestring] searching for DR-TIR pairs $opts{'upstream'} bp upstream and $opts{'downstream'} bp downstream of the insert boundaries of ".scalar(keys(%{$candidateDRs}))." input DUF3435 captains with candidate DRs..\n";
+	
+		# Search for DR/DR-TIR pairs flanking candidate captain sequences (within -u and -d)
+		# only looks for known DRs and for de novo TIRs
+		# TIR coordinates will eq 'NA' if none were found, and we can never have TIRs without DRs
+		# structured: {knownCaptainID}{patternID} = [$tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd]
+		# where patternID has prefix '$emptyContigID'
+		my ($flankingRepeats) = Targeted_DR_and_denovo_TIR_search($knownElements, $candidateDRs, $assemblies, $opts{'upstream'}, $opts{'downstream'}, $opts{'maxTIR'}, $opts{'outdir'}, $opts{'prefix'});
+		
+		# filter candidate repeats based on some sanity check
+		# no homopolymers
+		# forward and reverse DR candidates should be $minDRTIRsim similar (calculate this on the fly by calculating Levenshtein edit distance)
+		# structured: {knownCaptainID}{patternID} = [$tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd]
+		my ($filteredRepeats) = Filter_repeat_candidates($knownElements, $flankingRepeats, $opts{'edit'}, $assemblies);
+		
+		# verify that DR sequences flank the captain sequence, sanity check
+		# structured: {knownCaptainID}{patternID} = [$tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd]
+		my ($verifiedRepeats) = Verify_tsdtir_flanking($filteredRepeats, $knownCaptains);
+		
+		# pick longest candidate DR/DR-TIR patterns, where either:
+		# the one with the longest combined DR sequence that has both DRs and TIRs; OR
+		# if no TIRs were recovered, then the one with the longest combined DR sequence
+		# will return multiple patterns if the above criteria are met for multiple patterns
+		# e.g., multiple DRs with the same, longest combined length
+		# if multiple DR-TIR patterns have same combined DR length, then will attempt to break tie based on longest combined TIR length
+		# structured: {knownCaptainID}{patternID} = [$tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd]
+		my ($longestRepeats) = Choose_longest_repeat_candidate($verifiedRepeats);
+
+		# now filter the longest candidate repeats by selecting the pairs with the shortest
+		# combined DR distance to the element boundaries
+		my ($bestRepeats, $tsdElementCount, $tsdtirElementCount, $multiRepeatCount) = Choose_closest_repeat_candidate($longestRepeats, $knownElements);
+
+	########################################
+	#### FIND CLOSEST INSERT BOUNDARIES ####
+	########################################
+	
+		# find the pair of insert boundaries closest to the captain sequence
+		# this will be used to filter out multiple insert boundaries, for any insert element
+		# that did not have a flanking repeat discovered. we do this to ensure that whatever
+		# bed file passed to the next step only has elements in it that would appear in the
+		# final set of elements
+		my ($closestBoundaries) = Parse_closest_insert_boundaries($bedFeatures);
+
+	############################
+	#### PRINT NEW BED FILE ####
+	############################
+
+		# Print out an updated BED file, where candidate DR and DR-TIR seqs are printed ONLY if they were the
+		# only longest pair to be recovered for this particular captain (see filtering criteria above)
+		# if they are the only pair, then the DR boundaries will replace the insert boundaries
+		# IF multiple pairs were recovered, don't replace insert boundaries to decrease risk of false positive.
+		# print 'insertUP' and 'insertDOWN' boundaries only if they are associated with a captain that did not have any boundaries verified
+		my $bedOutfile = "$opts{'outdir'}/$opts{'prefix'}.flank.bed";
+		Print_bed($bedFeatures, $closestBoundaries, $bestRepeats, $assemblies, $bedOutfile);
+
+		# Otherwise, if multiple best DR/DR-TIR pairs were found, print them out to a stats file
+		# that can be used to manually annotated the BED file, if desired
+		# also print out a separate stats table for single best DRs, for easier parsing of the data, for good record keeping
+		# finally, let us know which elements had no repeats found. These elements will retain their 'insert' boundaries
+		my $multiOutfile = "$opts{'outdir'}/$opts{'prefix'}.flank.multiDR.stats";
+		my $singleOutfile = "$opts{'outdir'}/$opts{'prefix'}.flank.singleDR.stats";
+		Print_stats($knownElements, $bestRepeats, $assemblies, $cap2regionID, $multiOutfile, $singleOutfile);
+
+		$datestring = localtime();
+		print "[$datestring] found $tsdElementCount captains with DR boundaries and $tsdtirElementCount captains with DR-TIR boundaries out of ".scalar(keys(%{$knownElements}))." input captains with candidate DRs\n";
+		print "[$datestring] $multiRepeatCount captains have multiple 'best' boundaries printed to $multiOutfile: manually replace insert boundaries in $bedOutfile with the best\n" if ($multiRepeatCount != 0);
+		print "[$datestring] done\n";
+		
+}
+
+
+sub Choose_longest_repeat_candidate {
+	# I/O structured: {knownCaptainID}{patternID} = [$tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd]
+	my ($flankingRepeats) = @_;
+	my %best;
+	
+	foreach my $featureID (keys %{$flankingRepeats}) {
+		
+		my (%candidateDRs, %candidateDRTIRs); # notice here we are summarizing across all patterns
+		foreach my $patternID (keys %{$flankingRepeats->{$featureID}}) {
+			my ($tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd) = @{$flankingRepeats->{$featureID}->{$patternID}};
+			
+			# add both DRs together to represent their combined length
+			my $tsdUpLength = $tsdUpEnd - $tsdUpBegin + 1;
+			my $tsdDownLength = $tsdDownEnd - $tsdDownBegin + 1;
+			my $tsdLength = $tsdUpLength + $tsdDownLength;
+			
+			# check for TIR
+			if ($tirUpBegin ne 'NA') {
+				# add both TIRs together to represent their combined length
+				my $tirUpLength = $tirUpEnd - $tirUpBegin + 1;
+				my $tirDownLength = $tirDownEnd - $tirDownBegin + 1;
+				my $tirLength = $tirUpLength + $tirDownLength;
+				@{$candidateDRTIRs{$featureID}{$tsdLength}{$tirLength}{$patternID}} = @{$flankingRepeats->{$featureID}->{$patternID}};
+			} else {
+				@{$candidateDRs{$featureID}{$tsdLength}{$patternID}} = @{$flankingRepeats->{$featureID}->{$patternID}};
+			}
+		}
+		
+		# first check for the longest DR and if multiple tie, the longest TIR in a DR-TIR pair
+		if (exists $candidateDRTIRs{$featureID}) {
+			# take the longest length DRs by only iterating through the largest key 
+			foreach my $tsdLength (sort { $b <=> $a } keys %{$candidateDRTIRs{$featureID}}) {
+				foreach my $tirLength (sort { $b <=> $a } keys %{$candidateDRTIRs{$featureID}{$tsdLength}}) {
+					foreach my $patternID (keys %{$candidateDRTIRs{$featureID}{$tsdLength}{$tirLength}}) {
+						@{$best{$featureID}{$patternID}} = @{$candidateDRTIRs{$featureID}{$tsdLength}{$tirLength}{$patternID}};
+					}
+					last;
+				}
+				last;
+			}
+		# otherwise, take the longest DR
+		} elsif (exists $candidateDRs{$featureID}) {
+			foreach my $tsdLength (sort { $b <=> $a } keys %{$candidateDRs{$featureID}}) {
+				foreach my $patternID (keys %{$candidateDRs{$featureID}{$tsdLength}}) {
+					@{$best{$featureID}{$patternID}} = @{$candidateDRs{$featureID}{$tsdLength}{$patternID}};
+				}
+				last;
+			}		
+		}
+	}
+	return(\%best);	
+}
+
+sub Choose_closest_repeat_candidate {
+	my ($flankingRepeats, $knownElements) = @_;
+	my %best;
+	my ($tsdElementCount, $tsdtirElementCount, $multiRepeatCount) = (0,0,0);
+	foreach my $featureID (keys %{$flankingRepeats}) {
+		my %candidateDRs; # notice here we are summarizing across all patterns
+		foreach my $patternID (keys %{$flankingRepeats->{$featureID}}) {
+			my ($tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd) = @{$flankingRepeats->{$featureID}->{$patternID}};
+			$patternID =~ m/^(.+).(rev|for)/;
+			my $emptyContigID = $1;
+			foreach my $contigID (keys %{$knownElements->{$featureID}->{$emptyContigID}}) {
+				my ($elementBegin, $elementEnd, $elementStrand) = @{$knownElements->{$featureID}->{$emptyContigID}->{$contigID}};
+				
+				#print "$featureID\t$elementBegin\t$elementEnd\n"; # troubleshooting
+			
+				# identify which element boundary DRs are closest to
+				my $tsdUpDist1 = abs($tsdUpBegin - $elementBegin + 1);
+				my $tsdUpDist2 = abs($tsdUpBegin - $elementEnd + 1);
+				my $tsdUpDist3 = abs($tsdUpEnd - $elementBegin + 1);
+				my $tsdUpDist4 = abs($tsdUpEnd - $elementEnd + 1);
+				
+				my $smallestTsdUpDist = $tsdUpDist1;
+				$smallestTsdUpDist = $tsdUpDist2 if ($tsdUpDist2 < $smallestTsdUpDist);
+				$smallestTsdUpDist = $tsdUpDist3 if ($tsdUpDist3 < $smallestTsdUpDist);
+				$smallestTsdUpDist = $tsdUpDist4 if ($tsdUpDist4 < $smallestTsdUpDist);
+				
+				my $tsdDownDist1 = abs($tsdDownBegin - $elementBegin + 1);
+				my $tsdDownDist2 = abs($tsdDownBegin - $elementEnd + 1);
+				my $tsdDownDist3 = abs($tsdDownEnd - $elementBegin + 1);
+				my $tsdDownDist4 = abs($tsdDownEnd - $elementEnd + 1);
+				
+				my $smallestTsdDownDist = $tsdDownDist1;
+				$smallestTsdDownDist = $tsdDownDist2 if ($tsdDownDist2 < $smallestTsdDownDist);
+				$smallestTsdDownDist = $tsdDownDist3 if ($tsdDownDist3 < $smallestTsdDownDist);
+				$smallestTsdDownDist = $tsdDownDist4 if ($tsdDownDist4 < $smallestTsdDownDist);
+				
+				# add the combined boundary distance
+				my $tsdDist = $smallestTsdUpDist + $smallestTsdDownDist;
+				@{$candidateDRs{$featureID}{$tsdDist}{$patternID}} = @{$flankingRepeats->{$featureID}->{$patternID}};
+			}
+			
+		
+		}
+		# check for the DR pair with the shortest distance. If multiple pairs have shortest distance, will return all of them
+		if (exists $candidateDRs{$featureID}) {
+			# take the shortest DR dist by only iterating through the smallest key 
+			foreach my $tsdLength (sort { $a <=> $b } keys %{$candidateDRs{$featureID}}) {
+				foreach my $patternID (keys %{$candidateDRs{$featureID}{$tsdLength}}) {
+					my ($tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd) = @{$flankingRepeats->{$featureID}->{$patternID}};
+					if (exists $best{$featureID}) {
+						$multiRepeatCount++;
+					} elsif ($tirUpBegin ne 'NA') {
+						$tsdtirElementCount++;
+					} else {
+						$tsdElementCount++;
+					}
+					@{$best{$featureID}{$patternID}} = @{$candidateDRs{$featureID}{$tsdLength}{$patternID}};
+				}
+				last;
+			}
+		}
+	}
+	return(\%best, $tsdElementCount, $tsdtirElementCount, $multiRepeatCount);
+}
+
+sub Print_stats {
+	my ($knownElements, $flankingRepeats, $assemblies, $cap2regionID, $multiOutfile, $singleOutfile) = @_;
+	# print out header
+	my ($multiOUT) = Open_FH($multiOutfile, "#contigID\tcaptainID\tcapStrand\tpatternID\telementLength\tupDR\tupDRbegin\tupDRend\tdownDR\tdownDRbegin\tdownDRend\tupTIR\tupTIRbegin\tupTIRend\tdownTIR\tdownTIRbegin\tdownTIRend\n");
+	my ($singleOUT) = Open_FH($singleOutfile, "#contigID\tcaptainID\tcapStrand\tpatternID\telementLength\tupDR\tupDRbegin\tupDRend\tdownDR\tdownDRbegin\tdownDRend\tupTIR\tupTIRbegin\tupTIRend\tdownTIR\tdownTIRbegin\tdownTIRend\n");
+		
+ 	foreach my $featureID (nsort keys %{$knownElements}) {
+		if (exists $flankingRepeats->{$featureID}) { # if tsds were found for this captain
+			my $OUT;
+			my ($capStrand, $contigID);
+			foreach my $emptyContigID (nsort keys %{$knownElements->{$featureID}}) {
+				foreach my $capContigID (nsort keys %{$knownElements->{$featureID}->{$emptyContigID}}) {
+					if (scalar keys %{$flankingRepeats->{$featureID}} > 1) { # if > 1 DR pair is associated with this captain
+						$OUT = $multiOUT;
+					} else {
+						$OUT = $singleOUT;
+					}
+					$capStrand = @{$knownElements->{$featureID}->{$emptyContigID}->{$capContigID}}[2];
+					$contigID = $capContigID; # will be the same across all emptyContingIDs
+				}
+			}
+			# print each patternID only once
+			foreach my $patternID (keys %{$flankingRepeats->{$featureID}}) {
+				my ($tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd) = @{$flankingRepeats->{$featureID}->{$patternID}};
+
+				# determine strand based on relative coordinates of DR up and DR down
+				my $patternStrand = '+';
+				$patternStrand = '-' if ($tsdUpEnd > $tsdDownBegin);
+
+				# issue some warnings based on false positive flags
+				my $elementLength = 0;
+				if ($patternStrand eq '+') {
+					$elementLength = $tsdDownEnd - $tsdUpBegin + 1;
+				} else {
+					$elementLength = $tsdUpEnd - $tsdDownBegin + 1;
+				}
+				my $datestring = localtime();
+				# print "[$datestring] possible false positive: $featureID element length of $elementLength > $maxStarshipLengthFlag bp\n" if ($elementLength > $maxStarshipLengthFlag);
+				# print "[$datestring] possible false positive: $featureID element length of $elementLength < $minStarshipLengthFlag bp\n" if ($elementLength < $minStarshipLengthFlag);
+
+				# extract tsd and tir seqs in the right orientation according to captain (revcomp if necessary)
+				my $tsdUpSeq = lc(substr($assemblies->{$contigID}, $tsdUpBegin - 1, $tsdUpEnd - $tsdUpBegin + 1));
+				my $tsdDownSeq = lc(substr($assemblies->{$contigID}, $tsdDownBegin - 1, $tsdDownEnd - $tsdDownBegin + 1));
+				if ($patternStrand eq '-') {
+					($tsdUpSeq) = Reverse_complement($tsdUpSeq, $contigID);
+					($tsdDownSeq) = Reverse_complement($tsdDownSeq, $contigID);
+				}
+
+				print $OUT "$contigID\t$featureID\t$capStrand\t$patternID\t$elementLength\t$tsdUpSeq\t$tsdUpBegin\t$tsdUpEnd\t$tsdDownSeq\t$tsdDownBegin\t$tsdDownEnd";
+				
+				
+				if ($tirUpBegin ne 'NA') {
+					
+					my $tirUpSeq = lc(substr($assemblies->{$contigID}, $tirUpBegin - 1, $tirUpEnd - $tirUpBegin + 1));
+					my $tirDownSeq = lc(substr($assemblies->{$contigID}, $tirDownBegin - 1, $tirDownEnd - $tirDownBegin + 1));
+					if ($patternStrand eq '-') {
+						($tirUpSeq) = Reverse_complement($tirUpSeq, $contigID);
+						($tirDownSeq) = Reverse_complement($tirDownSeq, $contigID);
+					}
+					print $OUT "\t$tirUpSeq\t$tirUpBegin\t$tirUpEnd\t$tirDownSeq\t$tirDownBegin\t$tirDownEnd\n";
+					
+					# print out bed lines in multiStats to facilitate manual editing
+					if (scalar keys %{$flankingRepeats->{$featureID}} > 1) { # if > 1 DR pair is associated with this captain
+						my $tirUpID = "${featureID}|TIR|up";
+						my $tirDownID = "${featureID}|TIR|down";
+						my $repeatTag = 'flank';
+						print $OUT "#bedTemplate\t$contigID\t$tirUpBegin\t$tirUpEnd\t$tirUpID\t$repeatTag\t$capStrand\t$cap2regionID->{$featureID}\t$tirUpSeq\n";
+						print $OUT "#bedTemplate\t$contigID\t$tirDownBegin\t$tirDownEnd\t$tirDownID\t$repeatTag\t$capStrand\t$cap2regionID->{$featureID}\t$tirDownSeq\n";
+					}
+												
+				} else {
+					print $OUT "\t.\t.\t.\t.\t.\t.\n"
+				}
+
+				# print out bed lines in multiStats to facilitate manual editing
+				if (scalar keys %{$flankingRepeats->{$featureID}} > 1) { # if > 1 DR pair is associated with this captain
+					my $tsdUpID = "${featureID}|DR|up";
+					my $tsdDownID = "${featureID}|DR|down";
+					my $repeatTag = 'flank';
+					print $OUT "#bedTemplate\t$contigID\t$tsdUpBegin\t$tsdUpEnd\t$tsdUpID\t$repeatTag\t$capStrand\t$cap2regionID->{$featureID}\t$tsdUpSeq\n";
+					print $OUT "#bedTemplate\t$contigID\t$tsdDownBegin\t$tsdDownEnd\t$tsdDownID\t$repeatTag\t$capStrand\t$cap2regionID->{$featureID}\t$tsdDownSeq\n";
+				}
+			}
+		} else {
+			foreach my $emptyContigID (nsort keys %{$knownElements->{$featureID}}) {
+				foreach my $contigID (nsort keys %{$knownElements->{$featureID}->{$emptyContigID}}) {
+					my $datestring = localtime();
+					print "[$datestring] could not find candidate DRs associated with empty site on $emptyContigID for $featureID\n";
+				}
+			}			
+		}
+	}	
+}
+
+sub Print_bed {
+	my ($bedFeatures, $closestBoundaries, $flankingRepeats, $assemblies, $outfile) = @_;
+	my ($OUT) = Open_FH($outfile);
+	
+	# sort by coordinate, and add in any DR and TIR features if they are the only pair associated with this captain
+	my ($regions) = Sort_bed_hash_by_coordinate($bedFeatures);
+	foreach my $contigID (keys %{$regions}) {
+		foreach my $regionID (keys %{$regions->{$contigID}}) {
+			foreach my $position (keys %{$regions->{$contigID}->{$regionID}}) {
+				foreach my $featureID (keys %{$regions->{$contigID}->{$regionID}->{$position}}) {
+					if (exists $flankingRepeats->{$featureID}) { # if this is an element with newly discovered tsd/tsd-tir features
+						if (scalar keys %{$flankingRepeats->{$featureID}} == 1) { # if only 1 DR pair is associated with this captain
+							foreach my $patternID (keys %{$flankingRepeats->{$featureID}}) {
+								my ($tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd) = @{$flankingRepeats->{$featureID}->{$patternID}};
+								my $tsdUpID = "${featureID}|DR|up";
+								my $tsdDownID = "${featureID}|DR|down";
+								my $tirUpID = "${featureID}|TIR|up";
+								my $tirDownID = "${featureID}|TIR|down";
+								my $repeatTag = 'flank';
+
+								# determine strand based on relative coordinates of DR up and DR down
+								my $patternStrand = '+';
+								$patternStrand = '-' if ($tsdUpEnd > $tsdDownBegin);
+						
+								# issue some warnings based on false positive flags
+								my $elementLength = 0;
+								if ($patternStrand eq '+') {
+									$elementLength = $tsdDownEnd - $tsdUpBegin + 1;
+								} else {
+									$elementLength = $tsdUpEnd - $tsdDownBegin + 1;
+								}
+								# my $datestring = localtime();
+								# print "[$datestring] possible false positive: $featureID element length of $elementLength > $maxStarshipLengthFlag bp\n" if ($elementLength > $maxStarshipLengthFlag);
+								# print "[$datestring] possible false positive: $featureID element length of $elementLength < $minStarshipLengthFlag bp\n" if ($elementLength < $minStarshipLengthFlag);
+							
+								# extract tsd and tir seqs in the right orientation according to captain (revcomp if necessary)
+								my $tsdUpSeq = lc(substr($assemblies->{$contigID}, $tsdUpBegin - 1, $tsdUpEnd - $tsdUpBegin + 1));
+								my $tsdDownSeq = lc(substr($assemblies->{$contigID}, $tsdDownBegin - 1, $tsdDownEnd - $tsdDownBegin + 1));
+								if ($patternStrand eq '-') {
+									($tsdUpSeq) = Reverse_complement($tsdUpSeq, $contigID);
+									($tsdDownSeq) = Reverse_complement($tsdDownSeq, $contigID);
+								}
+								push @{$regions->{$contigID}->{$regionID}->{$tsdUpBegin}->{$tsdUpID}}, $tsdUpBegin, $tsdUpEnd, $patternStrand, $repeatTag, $tsdUpSeq;
+								push @{$regions->{$contigID}->{$regionID}->{$tsdDownBegin}->{$tsdDownID}}, $tsdDownBegin, $tsdDownEnd, $patternStrand, $repeatTag, $tsdDownSeq;
+								if ($tirUpBegin ne 'NA') {
+							
+									my $tirUpSeq = lc(substr($assemblies->{$contigID}, $tirUpBegin - 1, $tirUpEnd - $tirUpBegin + 1));
+									my $tirDownSeq = lc(substr($assemblies->{$contigID}, $tirDownBegin - 1, $tirDownEnd - $tirDownBegin + 1));
+									if ($patternStrand eq '-') {
+										($tirUpSeq) = Reverse_complement($tirUpSeq, $contigID);
+										($tirDownSeq) = Reverse_complement($tirDownSeq, $contigID);
+									}
+									push @{$regions->{$contigID}->{$regionID}->{$tirUpBegin}->{$tirUpID}}, $tirUpBegin, $tirUpEnd, $patternStrand, $repeatTag, $tirUpSeq;
+									push @{$regions->{$contigID}->{$regionID}->{$tirDownBegin}->{$tirDownID}}, $tirDownBegin, $tirDownEnd, $patternStrand, $repeatTag, $tirDownSeq;
+								}
+							}
+						}
+					} 
+				}
+			}
+		}
+	}
+		
+	# then print, after sorting by coordinate position
+	foreach my $contigID (nsort keys %{$regions}) {
+		foreach my $regionID (nsort keys %{$regions->{$contigID}}) {
+			foreach my $position (sort {$a <=> $b} keys %{$regions->{$contigID}->{$regionID}}) {
+				foreach my $featureID (nsort keys %{$regions->{$contigID}->{$regionID}->{$position}}) {
+					my ($begin, $end, $strand, $idtag, $annotation) = @{$regions->{$contigID}->{$regionID}->{$position}->{$featureID}};
+					
+					# dont print out 'insert' features that had a single best DRs and DR/TIR pairs found around their boundaries
+					# print out all other insert boundaries
+					if ($idtag =~ m/^insert/) {
+						my ($captainID, $emptyContigID) = split/\|/, $featureID;
+						if ((exists $flankingRepeats->{$captainID}) && (scalar keys %{$flankingRepeats->{$captainID}} == 1)) { # was a single pattern found for this captain?
+							next; # don't print out the insert feature
+						} elsif (exists $closestBoundaries->{$featureID}) { # if >1 insert, or no DRs found for inserts of this captain, print out the insert boundaries for the pair of insert boundaries whose upstream is closest to the captain sequence
+							print $OUT "$contigID\t$begin\t$end\t$featureID\t$idtag\t$strand\t$regionID\t$annotation\n";
+						}
+					} else {
+						$idtag = 'cap' if ((exists $flankingRepeats->{$featureID}) && (scalar keys %{$flankingRepeats->{$featureID}} == 1)); # if this is a new captain sequence, change the idtag
+						print $OUT "$contigID\t$begin\t$end\t$featureID\t$idtag\t$strand\t$regionID\t$annotation\n";
+					}
+				}
+			}
+		}
+	}
+}
+
+sub Parse_closest_insert_boundaries {
+	my ($bedFeatures) = @_;
+	my %closestBoundaries;
+	foreach my $contigID (keys %{$bedFeatures}) {
+		foreach my $regionID (keys %{$bedFeatures->{$contigID}}) {
+			my (%insert, %captains);
+			
+			# identify all boundary and captain features associated with this region
+			# remember that all boundary features and genes have unique featureIDs
+			foreach my $featureID (keys %{$bedFeatures->{$contigID}->{$regionID}}) {
+				my ($featBegin, $featEnd, $featStrand, $featTag, $featAnn) = @{$bedFeatures->{$contigID}->{$regionID}->{$featureID}};
+				if ($featTag eq 'insert') {
+					push @{$insert{$featureID}}, $featBegin, $featEnd, $featStrand, $featTag, $featAnn;
+				} elsif ($featTag eq 'cap') {
+					push @{$captains{$featureID}}, $featBegin, $featEnd, $featStrand, $featTag, $featAnn;
+				}
+			}
+			my ($upstreamFeature, $downstreamFeature);
+			if (scalar keys %insert > 0) {
+				($upstreamFeature, $downstreamFeature) = Parse_closest_boundaries(\%insert, \%captains);
+				next if ($upstreamFeature eq 'NA');
+				$closestBoundaries{$upstreamFeature} = 1;
+				$closestBoundaries{$downstreamFeature} = 1;
+			} 
+		}
+	}
+	return(\%closestBoundaries);
+}
+		
+sub Parse_closest_boundaries {
+	my ($boundaries, $captains) = @_;
+	
+	# figure out the distance of all upstream boundaries to the captain sequence
+	my %distances;
+	foreach my $upBoundary (keys %{$boundaries}) {
+		my ($captainID, $alt, $direction) = split/\|/, $upBoundary;
+		next if ($direction ne 'up'); # skip iterating through down boundaries, and identify them instead based on their corresponding up boundary
+		my $downBoundary = "${captainID}|${alt}|down"; # all up boundaries should have a down boundary
+		my ($upBegin, $upEnd, $upStrand) = @{$boundaries->{$upBoundary}};
+		my ($downBegin, $downEnd, $downStrand) = @{$boundaries->{$downBoundary}};
+		my ($capBegin, $capEnd, $capStrand) = @{$captains->{$captainID}};
+
+		# Sanity check: make sure that the boundaries flank the captain sequence (useful for potentially filtering out spurious extend boundaries)
+		my $distance;
+		if ($upStrand eq '+') {
+			if (($capBegin >= $upEnd )&& ($capBegin <= $downBegin)) {
+				$distance = $capBegin - $upEnd + 1;
+			} else {
+				return("NA", "NA");
+			}
+		} else {
+			if (($capBegin <= $upBegin )&& ($capBegin >= $downEnd)) {
+				$distance = $upBegin - $capEnd + 1;
+			} else {
+				return("NA", "NA");
+			}
+		}
+
+		# doesn't matter if boundaries with same distance to cap overwrite each other; they are all of the same boundary type
+		# and we are only interested in a one that is closest, not necessarily how many features give the longest lengths
+		push @{$distances{$distance}}, $upBoundary, $downBoundary;
+	}
+	
+	# now return the pair of boundaries that give the element with upstream boundary closest to the captain
+	# by only iterating through the shortest distance
+	foreach my $distance (sort { $a <=> $b } keys %distances) {
+		my ($closestUp, $closestDown) = @{$distances{$distance}};
+		return($closestUp, $closestDown);
+	}
+}
+
+sub Filter_repeat_candidates {
+	# structured: {knownCaptainID}{patternID} = [$tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd]
+	my ($knownElements, $flankingRepeats, $minDRTIRsim, $assemblies) = @_;
+	my %filtered;	
+		
+ 	foreach my $featureID (keys %{$knownElements}) {
+		if (exists $flankingRepeats->{$featureID}) { # if tsds were found for this captain
+			my %observed;
+			foreach my $emptyContigID (keys %{$knownElements->{$featureID}}) {
+				foreach my $contigID (keys %{$knownElements->{$featureID}->{$emptyContigID}}) {
+					foreach my $patternID (keys %{$flankingRepeats->{$featureID}}) {
+						
+						next if ($patternID eq 'NA');
+
+						my ($tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd) = @{$flankingRepeats->{$featureID}->{$patternID}};
+						my $tsdUpSeq = lc(substr($assemblies->{$contigID}, $tsdUpBegin - 1, $tsdUpEnd - $tsdUpBegin + 1));
+						my $tsdDownSeq = lc(substr($assemblies->{$contigID}, $tsdDownBegin - 1, $tsdDownEnd - $tsdDownBegin + 1));
+						
+						# skip if a pattern with identical coordinates has already been observed
+						next if (exists $observed{"$tsdUpBegin,$tsdUpEnd,$tsdDownBegin,$tsdDownEnd,$tirUpBegin,$tirUpEnd,$tirDownBegin,$tirDownEnd"});
+						$observed{"$tsdUpBegin,$tsdUpEnd,$tsdDownBegin,$tsdDownEnd,$tirUpBegin,$tirUpEnd,$tirDownBegin,$tirDownEnd"} = 1;
+						
+						#print "$patternID\t$tsdUpSeq\t$tsdDownSeq\n";	# troubleshooting
+
+						# completely skip this pattern if the DRs fail the checks
+						my ($homopolymerCheck1) = Homopolymer_check($tsdUpSeq);
+						next if ($homopolymerCheck1 == 1);
+						my ($homopolymerCheck2) = Homopolymer_check($tsdDownSeq);
+						next if ($homopolymerCheck2 == 1);
+						my ($distanceCheck1) = Edit_distance_check($tsdUpSeq, $tsdDownSeq, $minDRTIRsim);
+						next if ($distanceCheck1 == 1);
+
+						if ($tirUpBegin ne 'NA') {
+							# if DRs are valid, but TIRs fail check, convert TIRs to 'NA' (cant have a TIR without a DR)
+							my $tirUpSeq = lc(substr($assemblies->{$contigID}, $tirUpBegin - 1, $tirUpEnd - $tirUpBegin + 1));
+							my $tirDownSeq = lc(substr($assemblies->{$contigID}, $tirDownBegin - 1, $tirDownEnd - $tirDownBegin + 1));
+							$tirDownSeq = Reverse_complement($tirDownSeq, $contigID);
+							my ($homopolymerCheck3) = Homopolymer_check($tirUpSeq);
+							my ($homopolymerCheck4) = Homopolymer_check($tirDownSeq);
+							my ($distanceCheck2) = Edit_distance_check($tirUpSeq, $tirDownSeq, $minDRTIRsim);
+							($tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd) = ("NA", "NA", "NA", "NA") if (($homopolymerCheck3 == 1) || ($homopolymerCheck4 == 1) || ($distanceCheck2 == 1));
+						}
+						
+						# this would be the place to add a filter to remove trailing beginings/ends
+						
+						
+						push @{$filtered{$featureID}{$patternID}}, $tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd;
+					}
+				}
+			}
+		}
+	}
+	return(\%filtered);
+}
+
+sub Verify_tsdtir_flanking {
+	my ($candidateBoundaries, $candidateCaptains) = @_;
+	my %verified;
+	
+	foreach my $featureID (keys %{$candidateBoundaries}) {
+		foreach my $patternID (keys %{$candidateBoundaries->{$featureID}}) {
+		
+			my ($tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd) = @{$candidateBoundaries->{$featureID}->{$patternID}};
+
+			#cumbersome to retrieve captain coordinates, but no matter		
+			my ($capBegin, $capEnd, $capStrand, $capTag, $capAnn);
+			foreach my $regionID (nsort keys %{$candidateCaptains->{$featureID}}) {
+				foreach my $contigID (nsort keys %{$candidateCaptains->{$featureID}->{$regionID}}) {
+					($capBegin, $capEnd, $capStrand, $capTag, $capAnn) = @{$candidateCaptains->{$featureID}->{$regionID}->{$contigID}};
+				}
+			}
+		
+			if ($capStrand eq '+') {
+				if (($tsdUpEnd < $capBegin) && ($tsdDownBegin > $capEnd)) {
+					push @{$verified{$featureID}{$patternID}}, $tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd;
+				}
+			} elsif ($capStrand eq '-') {
+				if (($tsdUpBegin > $capEnd) && ($tsdDownEnd < $capBegin)) {
+					push @{$verified{$featureID}{$patternID}}, $tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd;
+				}
+			}
+		}
+	}
+	return(\%verified);	
+}
+
+sub Targeted_DR_and_denovo_TIR_search {
+	my ($knownElements, $candidateDRs, $assemblies, $upstreamMod, $downstreamMod, $maxTIRdist, $OUTDIR, $PREFIX) = @_;
+
+	# since this step can take a really long time, save each blastn search to file, and 
+	# re-read file if starting over
+	my $candidates;	
+	my $tsdtir_search_checkpointFile = "$OUTDIR/checkpoints/$PREFIX.flank.tsdtir_search.checkpoint";
+	if (-f $tsdtir_search_checkpointFile) {
+		$candidates = retrieve($tsdtir_search_checkpointFile);
+		my $datestring = localtime();
+		print "[$datestring] $tsdtir_search_checkpointFile exists, reading in ".scalar(keys(%{$candidates}))." previous searches and continuing from checkpoint..\n";
+	}
+
+	# search for known DR and de novo TIR in each starship region
+	# need to do up to 8 searches: targeted DR search in starship upstream
+	#				       		   targeted DR search in starship downstream
+	#						       de novo TIR search in starship upstream
+	#						       de novo reversed TIR search in starship downstream
+	# 							   targeted revcomp DR search in starship upstream
+	#				       		   targeted revcomp DR search in starship downstream
+	#						       de novo revcomp TIR search in starship upstream
+	#						       de novo revcomp revered TIR search in starship downstream
+	
+
+	foreach my $knownCap (keys %{$candidateDRs}) { # iterate through all known elements with candidate DRs (will result in redundant DR searches, if multiple known elements with the same DRs are present, so maybe we can speed this up in the future
+
+		# check if this captain's search is stored in checkpoint
+		next if ((defined $candidates) && (exists $candidates->{$knownCap}));
+		
+		# store DR to skip redundant searches for this candidate captain
+		my %observedPatterns;
+
+		foreach my $emptyContigID (keys %{$candidateDRs->{$knownCap}}) { 
+			my $upDR = $candidateDRs->{$knownCap}->{$emptyContigID};
+			my $DRlength = length($upDR);
+			
+			# skip if this DR has already been searched for
+			next if (exists $observedPatterns{$upDR});
+			$observedPatterns{$upDR}= 1;
+	
+			# print out forward DR
+			my $DRpatternFile = "$OUTDIR/tsdTemp.fas";
+			my ($DRout) = Open_FH($DRpatternFile);
+			print $DRout ">DRup\n$upDR\n";
+	
+			# print out revcomp DR
+			my $DRpatternRevcompFile = "$OUTDIR/tsdRevcompTemp.fas";
+			my ($DRrevcompOut) = Open_FH($DRpatternRevcompFile);
+			my ($upDRrevcomp) = Reverse_complement($upDR, $emptyContigID);
+			print $DRrevcompOut ">DRup\n$upDRrevcomp\n";
+	
+			# print out dummy bed files, because we will not restrict pattern search based on .bed file features
+			my $dummyBedFile = "$OUTDIR/dummyBed.bed";
+			my ($DummyOut) = Open_FH($dummyBedFile);
+			print $DummyOut "\n";
+	
+			# now search the regions surrounding each candidate captain sequence
+			foreach my $contigID (keys %{$knownElements->{$knownCap}->{$emptyContigID}}) {
+				my $contigOutfile = "$OUTDIR/contigTemp.fas";
+				my $contigRevfile = "$OUTDIR/contigTemp.fas.rev";
+				my ($fastaforwardOUT) = Open_FH($contigOutfile);
+				my ($fastarevOUT) = Open_FH($contigRevfile);
+
+				# print out contig sequence, forward and reverse
+				print $fastaforwardOUT ">$contigID\n$assemblies->{$contigID}\n";
+				my ($revcomp) = Reverse_complement($assemblies->{$contigID},$contigID);
+				print $fastarevOUT ">$contigID\n$revcomp\n";
+				usage("Error: could not reverse complement sequence for contig $contigID\n") if (not defined $revcomp);
+
+				# get the reverse coordinates for each forward position, so we can easily convert forward to reverse and reverse to forward
+				# structured {forwardPosition} = reversePosition, which will also work for converting from reverse to forward
+				my ($reverseCoords) = Reverse_coordinates($assemblies->{$contigID});
+
+				# now do a DR-TIR pattern search for each candidate captain and for each of their potential boundaries associated with emptyContigIDs
+				my ($elementBegin, $elementEnd, $capStrand, $capTag) = @{$knownElements->{$knownCap}->{$emptyContigID}->{$contigID}};
+
+				# upstream and downstream are relative to the captain's orientation
+				# in cnef syntax, 'ref' is region upstream of captains, and 'query' is region downstream of captain
+				my ($upBegin, $upEnd, $downBegin, $downEnd);
+
+				# search upstream and downstream region around element boundaries
+				# captain coordinates in known elements are the element boundaries
+
+				if ($capStrand eq '+') {
+					$upBegin = $elementBegin - $upstreamMod;
+					$upEnd = $elementBegin + $upstreamMod;
+					$downBegin = $elementEnd - $downstreamMod; 
+					$downEnd = $elementEnd + $downstreamMod; 
+				} elsif ($capStrand eq '-') {
+					$upBegin = $elementEnd - $upstreamMod; # notice elementEnd and elementBegin switch for - captains
+					$upEnd = $elementEnd + $upstreamMod; 
+					$downBegin = $elementBegin - $downstreamMod; 
+					$downEnd = $elementBegin + $downstreamMod; 
+				} else {
+					usage("Error: could not parse strand for $knownCap in $emptyContigID on $contigID\n");
+				}
+
+				# make sure coordinates are actually on the contig
+				# covers all possible conditions, whether cap is + or -
+				my $contigLength = length($assemblies->{$contigID});
+				$upBegin = 1 if ($upBegin < 0);
+				next if ($upBegin > $contigLength); # upstream region does not exist if its beginning is located off of the contig
+				$upEnd = $contigLength if ($upEnd > $contigLength);
+				next if ($upEnd < 2); # upstream region does not exist if its end is located off of the contig, or if it starts at position 1
+				$downBegin = 1 if ($downBegin < 0);
+				next if ($downBegin > $contigLength); # downstream region does not exist if its beginning is located off of the contig
+				$downEnd = $contigLength if ($downEnd > $contigLength);
+				next if ($downEnd < 2); # downstream region does not exist if its end is located off of the contig, or if it starts at position 1
+
+				# make sure the upstream end is actually upstream of downstream begining, or else there is no point in searching (when cap is +, reverse if cap if -)
+				next if (($upEnd > $downBegin) && $capStrand eq '+');
+				next if (($upBegin < $downEnd) && $capStrand eq '-');
+			
+				# search for forward patterns
+				my ($tsdsForward, $tirsForward) = CNEF_runner($capStrand, $contigOutfile, $contigRevfile, $DRpatternFile, $dummyBedFile, $contigID, $DRlength, $upBegin, $upEnd, $downBegin, $downEnd, $reverseCoords);
+				if ((scalar keys %{$tsdsForward} > 0)) { # if we recovered at least some forward DRs
+					# Identify candidate DR and TIRs that flank input regions based on proximity distance of recovered DR and TIRs
+					# will return NA for TIR coordinates if all candidate TIRs are filtered out or do not exist
+					# structured: {candidateID}	= $tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd
+					my ($candidatePairs) = Parse_candidate_pairs($tsdsForward, $tirsForward, $maxTIRdist, $capStrand, "$emptyContigID.for");
+					# Add adjacent pairs to final candidate hash
+					# structured: {knownCaptainID}{patternID} = [$tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd]
+					if (scalar keys %{$candidatePairs} > 0) {
+						foreach my $patternID (keys %{$candidatePairs}) {
+							$candidates->{$knownCap}->{$patternID} = $candidatePairs->{$patternID};
+						}
+					} else { # store search to avoid repeating in the future
+						$candidates->{$knownCap}->{'NA'} = 'NA';
+					}
+				}
+				
+				# search for reverse complement patterns
+				my ($tsdsReverse, $tirsReverse) = CNEF_runner($capStrand, $contigOutfile, $contigRevfile, $DRpatternRevcompFile, $dummyBedFile, $contigID, $DRlength, $upBegin, $upEnd, $downBegin, $downEnd, $reverseCoords);
+				if ((scalar keys %{$tsdsReverse} > 0)) { # if we recovered at least some reverse complement DRs
+					# Identify candidate DR and TIRs that flank input regions based on proximity distance of recovered DR and TIRs
+					# will return NA for TIR coordinates if all candidate TIRs are filtered out or do not exist
+					# structured: {candidateID}	= $tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd
+					my ($candidatePairs) = Parse_candidate_pairs($tsdsReverse, $tirsReverse, $maxTIRdist, $capStrand, "$emptyContigID.rev");
+
+					# Add adjacent pairs to final candidate hash
+					# structured: {knownCaptainID}{patternID} = [$tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd]
+					if (scalar keys %{$candidatePairs} > 0) {
+						foreach my $patternID (keys %{$candidatePairs}) {
+							$candidates->{$knownCap}->{$patternID} = $candidatePairs->{$patternID};
+						}
+					} else { # store search to avoid repeating in the future
+						$candidates->{$knownCap}->{'NA'} = 'NA';
+					}
+				} 
+				
+				# will invoke if no DRs recovered
+				if ((scalar keys %{$tsdsForward} == 0) && (scalar keys %{$tsdsReverse} == 0)) { 
+					my $datestring = localtime();
+					print "[$datestring] warning: could not find candidate DR '$upDR' from empty contig $emptyContigID around the insert boundaries of $knownCap, it should probably be there if no other DRs were found for this element\n";
+					$candidates->{$knownCap}->{'NA'} = 'NA'; # store search to avoid repeating in the future
+				}
+			}
+		}
+		
+		# update checkpoint file after every captain search
+		store($candidates, $tsdtir_search_checkpointFile) if (scalar(keys %{$candidates}) > 0);;			
+	}
+	
+	# clean up
+	system("rm $OUTDIR/contigTemp.fas*") if (-f "$OUTDIR/contigTemp.fas.tsd.out.cnef");
+	system("rm $OUTDIR/tsdTemp.fas") if (-f "$OUTDIR/tsdTemp.fas");
+	system("rm $OUTDIR/tsdRevcompTemp.fas") if (-f "$OUTDIR/tsdRevcompTemp.fas");
+	system("rm $OUTDIR/dummyBed.bed") if (-f "$OUTDIR/dummyBed.bed");
+	
+	return($candidates);
+}
+
+sub CNEF_runner {
+	
+	my ($capStrand, $contigOutfile, $contigRevfile, $DRpatternFile, $dummyBedFile, $contigID, $DRlength, $upBegin, $upEnd, $downBegin, $downEnd, $reverseCoords) = @_;
+	
+	
+	# 1. Candidate DRs: search for forward strings present around element upstream and element downstream (2 separate searches)
+
+	my $tsdOutfile1 = "$contigOutfile.tsd1.out";
+	my $tsdOutfile2 = "$contigOutfile.tsd2.out";
+	my ($tsds, $tirs);
+	
+	# for trouble shooting
+	#print "contigID=$contigID\ttsdLength=$DRlength\tcapStrand=$capStrand\tupBegin=$upBegin\tupEnd=$upEnd\tdownBegin=$downBegin\tdownEnd=$downEnd\n";
+	#print "cnef -r $DRpatternFile -q $contigOutfile -e $dummyBedFile -f $dummyBedFile -y $contigID -z $contigID -a $upBegin -b $upEnd -c $downBegin -d $downEnd -t $SIMTHRESH -l $MINDRLENGTH -u $MAXSEQLENGTH -Q $MEMLENGTH -M $MERGEDLENGTH -s $EXTTHRESH -p 0 -v 0 -x 1 -o $tsdOutfile1\n";
+		
+	# search for known tsd in upstream and downstream, both in forward sense
+	system("cnef -r $DRpatternFile -q $contigOutfile -e $dummyBedFile -f $dummyBedFile \\
+	-y DRup -z $contigID \\
+	-a 0 -b $DRlength \\
+	-c $upBegin -d $upEnd \\
+	-t $SIMTHRESH -l $MINDRLENGTH -u $MAXSEQLENGTH -Q $MEMLENGTH -M $MERGEDLENGTH -s $EXTTHRESH \\
+	-p 0 \\
+	-v 0 \\
+	-x 1 \\
+	-o $tsdOutfile1 2> $contigOutfile.tsd.out.cnef");
+	return($tsds, $tirs) if (! -f $tsdOutfile1); # if at least 1 file is missing output, no point in continuing 
+	my ($tsdsUpstream) = Parse_cnef_pattern_output($tsdOutfile1) if (-f $tsdOutfile1);
+	system("rm $tsdOutfile1") if (-f $tsdOutfile1);
+
+	system("cnef -r $DRpatternFile -q $contigOutfile -e $dummyBedFile -f $dummyBedFile \\
+	-y DRup -z $contigID \\
+	-a 0 -b $DRlength \\
+	-c $downBegin -d $downEnd \\
+	-t $SIMTHRESH -l $MINDRLENGTH -u $MAXSEQLENGTH -Q $MEMLENGTH -M $MERGEDLENGTH -s $EXTTHRESH \\
+	-p 0 \\
+	-v 0 \\
+	-x 1 \\
+	-o $tsdOutfile2 2> $contigOutfile.tsd.out.cnef");
+	return($tsds, $tirs) if (! -f $tsdOutfile2); # if at least 1 file is missing output, no point in continuing 
+	my ($tsdsDownstream) = Parse_cnef_pattern_output($tsdOutfile2) if (-f $tsdOutfile2);
+	system("rm $tsdOutfile2") if (-f $tsdOutfile2);
+	
+	#    Returns (for + captains) DR{UpstreamEnd}{DownstreamBegin} = @{full range info}
+	#    Returns (for - captains) DR{UpstreamBegin}{DownstreamEnd} = @{full range info}
+	($tsds) = Combine_pattern_hashes($tsdsUpstream, $tsdsDownstream, "DR$capStrand") if ((scalar keys %{$tsdsUpstream} > 0) && (scalar keys %{$tsdsDownstream} > 0));
+	
+	# 2. Candidate TIRs: search for forward de novo strings present around element upstream and reverse complement strings present around element downstream (2 separate searches)
+	#    Unfortunately, the cnef reverse complement search does not work correctly, so we have to manually reverse complement and convert coordinates
+	
+	my $tirOutfile1 = "$contigOutfile.tir1.out";
+	
+	# notice how both the ref and query files are the contig file, so by parsing que and ref columns in output, we don't need to do two separate searches, just 1 combined search
+
+	system("cnef -r $contigOutfile -q $contigRevfile -e $dummyBedFile -f $dummyBedFile \\
+	-y $contigID -z $contigID \\
+	-a $upBegin -b $upEnd \\
+	-c $reverseCoords->{$downEnd} -d $reverseCoords->{$downBegin} \\
+	-t $SIMTHRESH -l $MINTIRLENGTH -u $MAXSEQLENGTH -Q $MEMLENGTH -M $MERGEDLENGTH -s $EXTTHRESH \\
+	-p 0 \\
+	-v 0 \\
+	-x 1 \\
+	-o $tirOutfile1 2> $contigOutfile.tsd.out.cnef");
+	return($tsds, $tirs) if (! -f $tirOutfile1); # if at least 1 file is missing output, no point in continuing 
+	($tirs) = Parse_cnef_output($tirOutfile1, "TIR$capStrand", $reverseCoords) if (-f $tirOutfile1);
+	system("rm $tirOutfile1") if (-f $tirOutfile1);
+
+	# to avoid any monkey business with references
+	my (%tsds, %tirs);
+	%tsds = %{$tsds} if (defined $tsds);
+	%tirs = %{$tirs} if (defined $tirs);
+	return(\%tsds, \%tirs);
+}
+
+sub Combine_pattern_hashes {
+	my ($upstreamPatterns, $downstreamPatterns, $parseType) = @_;
+
+# mean to mimic the output of Parse_cnef_output
+# match each downstream pattern with each upstream pattern (makes sense because they were both obtained by searching using the same pattern)
+# as if each upstream pattern matched each downstream pattern in a cnef output
+# reverse TIR coords have already been reversed
+
+	my %coordinates;
+	foreach my $refBegin (keys %{$upstreamPatterns}) {
+		foreach my $refEnd (keys %{$upstreamPatterns->{$refBegin}}) {
+			foreach my $queBegin (keys %{$downstreamPatterns}) { 
+				foreach my $queEnd (keys %{$downstreamPatterns->{$queBegin}}) {
+					if ($parseType eq 'DR+') {
+						push @{$coordinates{$refEnd}{$queBegin}}, $refBegin, $refEnd, $queBegin, $queEnd;
+					} elsif ($parseType eq 'DR-') {
+						push @{$coordinates{$refBegin}{$queEnd}}, $refBegin, $refEnd, $queBegin, $queEnd;
+					} elsif ($parseType eq 'TIR+') {
+						push @{$coordinates{$refBegin}{$queEnd}}, $refBegin, $refEnd, $queBegin, $queEnd;
+					} elsif ($parseType eq 'TIR-') {
+						push @{$coordinates{$refEnd}{$queBegin}}, $refBegin, $refEnd, $queBegin,  $queEnd;
+					}
+				}
+			}
+		}
+	}
+	return(\%coordinates);	
+}
+
+sub Parse_candidate_pairs {
+	my ($tsds, $tirs, $maxDist, $capStrand, $tag) = @_;
+	my %adjacents;
+	
+	# if TIR end > DR begin, this is a downstream region of a + captain, or an upstream region of a - captain
+	# if DR end > TIR begin, this is an upstream region of a + captain, or a downstream region of a - captain
+	my $candidateCount = 0;
+	
+	foreach my $firstDRPosition (keys %{$tsds}) {
+
+		if ($capStrand eq '+') {
+			
+			# first, attempt to pair up any TIRs that are adjacent to DRs
+			# only look at tirs within the appropriate maxdist from this tsdPosition, depends on the strand of captain
+			my $TIRfound = 0;
+			if (scalar keys %{$tirs} > 0) {
+				my $TIRlastSearchPosition = $firstDRPosition + $maxDist;
+				my $TIRsearchPosition = $firstDRPosition;
+				while ($TIRsearchPosition <= $TIRlastSearchPosition) {
+				
+					# search for an ajacent TIR within maxDist
+					if (exists $tirs->{$TIRsearchPosition}) {
+					
+						# if found, check, for a reciprocal adjacency at the other end
+						foreach my $secondTIRPosition (keys %{$tirs->{$TIRsearchPosition}}) {
+							my $DRlastSearchPosition = $secondTIRPosition + $maxDist;
+							my $DRfirstSearchPosition = $secondTIRPosition;
+							foreach my $secondDRPosition (keys %{$tsds->{$firstDRPosition}}) {
+							
+								# if true, a reciprocal adjacency was found !
+								if (($secondDRPosition <= $DRlastSearchPosition) && ($secondDRPosition >= $DRfirstSearchPosition)) {
+									$TIRfound = 1;
+									# we have a lot of coordinates to keep track of..
+									my ($tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd) = @{$tsds->{$firstDRPosition}->{$secondDRPosition}};
+									my ($tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd) = @{$tirs->{$TIRsearchPosition}->{$secondTIRPosition}};
+									$candidateCount++;
+									push @{$adjacents{"${tag}$candidateCount"}}, $tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd;
+								}
+							}
+						}
+					}
+					$TIRsearchPosition++;
+				}
+			}
+			
+			# if no TIRs were found (either because they never existed, or because they were filtered out), add DRs to candidate hash anyways
+			if ($TIRfound == 0) {
+				foreach my $secondDRPosition (keys %{$tsds->{$firstDRPosition}}) {
+					my ($tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd) = @{$tsds->{$firstDRPosition}->{$secondDRPosition}};
+					my ($tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd) = ("NA", "NA", "NA", "NA");
+					$candidateCount++;
+					push @{$adjacents{"${tag}$candidateCount"}}, $tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd;
+				}
+			}
+		} elsif ($capStrand eq '-') { # we have a negative oriented captain (basically same steps taken above, but search positions are calculated differently, copied out in full for clarity)
+			my $TIRfound = 0;
+			if (scalar keys %{$tirs} > 0) {
+				my $TIRlastSearchPosition = $firstDRPosition;
+				my $TIRsearchPosition = $firstDRPosition - $maxDist;
+				while ($TIRsearchPosition <= $TIRlastSearchPosition) {
+				
+					# search for an ajacent TIR within maxDist
+					if (exists $tirs->{$TIRsearchPosition}) {
+					
+						# if found, check, for a reciprocal adjacency at the other end
+						foreach my $secondTIRPosition (keys %{$tirs->{$TIRsearchPosition}}) {
+							my $DRlastSearchPosition = $secondTIRPosition;
+							my $DRfirstSearchPosition = $secondTIRPosition - $maxDist;
+							foreach my $secondDRPosition (keys %{$tsds->{$firstDRPosition}}) {
+							
+								# if true, a reciprocal adjacency was found !
+								if (($secondDRPosition <= $DRlastSearchPosition) && ($secondDRPosition >= $DRfirstSearchPosition)) {
+									$TIRfound = 1;
+									# we have a lot of coordinates to keep track of..
+									my ($tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd) = @{$tsds->{$firstDRPosition}->{$secondDRPosition}};
+									my ($tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd) = @{$tirs->{$TIRsearchPosition}->{$secondTIRPosition}};
+									$candidateCount++;
+									push @{$adjacents{"${tag}$candidateCount"}}, $tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd;
+								}
+							}
+						}
+					}
+					$TIRsearchPosition++;
+				}
+			}
+			
+			# if no TIRs were found (either because they never existed, or because they were filtered out), add DRs to candidate hash anyways
+			if ($TIRfound == 0) {
+				foreach my $secondDRPosition (keys %{$tsds->{$firstDRPosition}}) {
+					my ($tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd) = @{$tsds->{$firstDRPosition}->{$secondDRPosition}};
+					my ($tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd) = ("NA", "NA", "NA", "NA");
+					$candidateCount++;
+					push @{$adjacents{"${tag}$candidateCount"}}, $tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd;
+				}
+			}
+		} else {
+			usage("Error: could not parse captain strand in sub Parse_candidate_pairs\n");
+		}
+	}
+	return(\%adjacents);
+}
+
+sub Parse_cnef_output {
+#    Returns DR{5'End}{3'Begin} = @{full range info}
+#    Returns TIR{5'Begin}{3'End} =  @{full range info}
+
+	my ($cnefOutfile, $parseType, $reverseCoords) = @_;
+	my %coordinates;
+	open(my $IN, '<', $cnefOutfile) or usage("Error: cannae open $cnefOutfile for reading\n");
+
+	#	upstream:	 begin      end        max     begin     end
+	#            		   DR___________________________TIR
+	#
+	#	downstream:   begin      end        max     begin     end
+	#            		   TIR___________________________DR
+	
+	# only load up relevant coordinates for proving candidates are within --max of each other
+	# convert downstream (que) TIR coordinates (which were reverse complemented) back to the forward coordinate system (end become beginnings, beginnings become ends)
+	while(my $line = <$IN>) {
+		chomp $line;
+		my ($refChr, $refBegin, $refEnd, $queChr, $queBegin, $queEnd, $refLength, $queLength, $similarity) = split/\t/, $line;
+		$refChr =~ s/^chr//;
+		$queChr =~ s/^chr//;
+		
+		my ($forwardQueBegin, $forwardQueEnd);
+		if (defined $reverseCoords) {
+			$forwardQueBegin = $reverseCoords->{$queEnd};
+			$forwardQueEnd = $reverseCoords->{$queBegin};
+			if (not defined $forwardQueBegin) {
+				print "Warning: parseTyp=$parseType forwardQueBegin=$forwardQueBegin and forwardQueEnd=$forwardQueEnd not defined on line=$line\n";
+			}
+		}
+		# the cnef start coordinates are not inclusive, for some weird reason, so adjust by 1
+		$refBegin += 1;
+		$queBegin += 1;
+
+		if ($parseType eq 'DR+') {
+			push @{$coordinates{$refEnd}{$queBegin}}, $refBegin, $refEnd, $queBegin, $queEnd;
+		} elsif ($parseType eq 'DR-') {
+			push @{$coordinates{$refBegin}{$queEnd}}, $refBegin, $refEnd, $queBegin, $queEnd;
+		} elsif ($parseType eq 'TIR+') {
+			# not sure why, but downTIRend was always 1 longer if we add 1 to length, so just make a manual adjustment here
+			$forwardQueEnd = $forwardQueEnd - 1;
+			push @{$coordinates{$refBegin}{$forwardQueEnd}}, $refBegin, $refEnd, $forwardQueBegin, $forwardQueEnd;
+		} elsif ($parseType eq 'TIR-') {
+			# not sure why, but downTIRend was always 1 longer if we add 1 to length, so just make a manual adjustment here
+			$forwardQueEnd = $forwardQueEnd - 1;
+			push @{$coordinates{$refEnd}{$forwardQueBegin}}, $refBegin, $refEnd, $forwardQueBegin,  $forwardQueEnd;
+		}
+	}
+	return(\%coordinates);	
+}
+
+sub Parse_cnef_pattern_output {
+#    Returns DR{5'End}{3'Begin} = @{full range info}
+#    Returns TIR{5'Begin}{3'End} =  @{full range info}
+
+	my ($cnefOutfile, $parseType) = @_;
+	my %coordinates;
+	open(my $IN, '<', $cnefOutfile) or usage("Error: cannae open $cnefOutfile for reading\n");
+
+	#	upstream:	 begin      end        max     begin     end
+	#            		   DR___________________________TIR
+	#
+	#	downstream:   begin      end        max     begin     end
+	#            		   TIR___________________________DR
+	
+	# only load up relevant coordinates for proving candidates are within --max of each other
+	# convert downstream (que) TIR coordinates (which were reverse complemented) back to the forward coordinate system (end become beginnings, beginnings become ends)
+	while(my $line = <$IN>) {
+		chomp $line;
+		my ($refChr, $refBegin, $refEnd, $queChr, $queBegin, $queEnd, $refLength, $queLength, $similarity) = split/\t/, $line;
+		$refChr =~ s/^chr//;
+		$queChr =~ s/^chr//;
+		
+		# the cnef start coordinates are not inclusive, for some weird reason, so adjust by 1
+		$queBegin += 1;
+		$coordinates{$queBegin}{$queEnd} = 1;
+	}
+	return(\%coordinates);	
+}
+
+sub Reverse_coordinates {
+	my ($seq) = @_;
+	my %coordinates;
+	my @bases = split//, $seq;
+	my $seqLength = scalar @bases;
+	my $forwardPosition = 0;
+	# 1 2 3 4 5
+	# 5 4 3 2 1 
+	foreach my $base (@bases) {
+		my $revPosition = $seqLength - $forwardPosition;
+		$forwardPosition++;
+		$coordinates{$forwardPosition} = $revPosition;
+	}
+	return(\%coordinates);
+}
+
+sub Parse_insert_elements {
+	# identifies captains of candidate elements based on 'cap' idtag and boundaries based on 'insert' features
+	# assumes candidate DR sequences derived from the insertion site are in the 'ann' column
+	# input  : {contigID}{starshipID}{geneID} = [begin, end, strand, tag]
+	my ($genes) = @_;
+	my (%boundaries, %elements, %captains, %tsds, %cap2regionID);
+	
+	# identify the boundaries of each element
+	# boundaries must be annotated with featureID capID|emptyContig|(up/down) and tag 'insert' and ann candidate tsd sequence based on insertion site
+	# structured $boundaries{$capID}{$emptyID}, $boundBegin, $boundEnd;
+	# first key in this hash is a captain sequence
+
+	 foreach my $contigID (keys %{$genes}) {
+ 		foreach my $regionID (keys %{$genes->{$contigID}}) {
+ 			
+ 			#next unless (($regionID eq 'Afla_Starship1'));
+
+ 			# iterate through all features on this regionID
+ 			foreach my $featureID (keys %{$genes->{$contigID}->{$regionID}}) {
+ 				my ($currentBegin, $currentEnd, $strand, $tag, $ann) = @{$genes->{$contigID}->{$regionID}->{$featureID}};
+	 			if ($tag eq 'insert') {
+	 				if (($ann ne '.' ) && ($ann ne '' )) { # only load up boundaries for captains that have a candidate DR
+		 				my ($captainID, $emptyContigID) = split/\|/, $featureID;
+ 						push @{$boundaries{$captainID}{$emptyContigID}}, $currentBegin; # currentBegin and CurrentEnd will be the same, since starfish insertBounds returns a single site in the genome
+						$tsds{$captainID}{$emptyContigID} = $ann; #the sequence associated with insertBOUNDS will always be the same
+	 				}
+	 			}
+	 			if ($tag eq 'cap') {
+	 				push @{$captains{$contigID}{$regionID}{$featureID}}, $currentBegin, $currentEnd, $strand, $tag, $ann;
+	 				$cap2regionID{$featureID} = $regionID;
+	 			}
+			}
+		
+			# then assign the captain both the up and downmost insert boundaries in one shot
+			foreach my $geneID (keys %{$genes->{$contigID}->{$regionID}}) {
+				if (exists $boundaries{$geneID}) { # is this a captain sequence with a DR-like insertion site?
+ 					my ($currentBegin, $currentEnd, $strand, $tag, $ann) = @{$genes->{$contigID}->{$regionID}->{$geneID}};
+					foreach my $emptyContigID (keys %{$boundaries{$geneID}}) {
+						my ($ultimateBegin, $ultimateEnd) = @{$boundaries{$geneID}{$emptyContigID}};
+						if (defined $ultimateEnd) {
+							($ultimateBegin, $ultimateEnd)  = ($ultimateEnd, $ultimateBegin) if ($ultimateBegin > $ultimateEnd);
+							push @{$elements{$contigID}{$emptyContigID}{$geneID}}, $ultimateBegin, $ultimateEnd, $strand, $tag, $ann;
+						} else {
+							print "Could not find at least two boundaries for $geneID in $regionID, skipping\n";
+						}
+					}
+				}
+			}
+		}
+	}
+	return(\%elements, \%captains, \%tsds, \%cap2regionID);
+}
+
+sub Opts_check {
+	my ($opts) = @_;
+	usage() if (exists $opts->{'h'});
+	usage("\nError: no arguments provided\n") if (scalar keys %{$opts} == 0);
+	usage("\nError: please provide a file to --assembly\n") if (not defined $opts->{'assembly'});
+	usage("\nError: the file provided to --assembly does not exist\n") if (! -f $opts->{'assembly'});
+	usage("\nError: please provide a file to --bed\n") if (not defined $opts->{'bed'});
+	usage("\nError: the file provided to --bed does not exist\n") if (! -f $opts->{'bed'});
+	usage("\nError: please provide a string to --prefix\n") if (not defined $opts->{'prefix'});
+	usage("\nError: please provide a directory to --outdir\n") if (not defined $opts->{'outdir'});
+	usage("\nError: the directory provided to --outdir does not exist\n") if (! -d $opts->{'outdir'});
+	if (not defined $opts->{'upstream'}) {
+		$opts->{'upstream'} = '100';
+	}
+	if (not defined $opts->{'downstream'}) {
+		$opts->{'downstream'} = '100';
+	}
+	if (not defined $opts->{'maxTIR'}) {
+		$opts->{'maxTIR'} = 50;
+	}
+	if (not defined $opts->{'edit'}) {
+		$opts->{'edit'} = 0.75;
+	}
+}

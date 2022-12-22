@@ -1,0 +1,1814 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use Data::Dumper;
+use File::Basename;
+use Getopt::Long qw(:config auto_abbrev no_ignore_case);
+use Sort::Naturally;
+use Storable;
+use FileHandle;
+$|=1;
+# Fishtank lib
+use Fishtank::Utils qw(Commandline_check Add_genome_to_sequence Sort_bed_hash_by_coordinate Parse_upstream_region_from_gene Reverse_gene_hash Parse_duf3435_from_regions Reverse_complement Fasta_hash_many_files Glofish_bed_hash dim_0_hash dim_1_hash Open_FH);
+
+# Default values for flagging possible false positives, users should never have to edit these
+my $minDR = 4;
+my $maxDR = 40;
+my $maxEmpty = 2000; 
+my $maxStarshipLengthFlag = 700000;
+my $minStarshipLengthFlag = 2000;
+
+sub usage {
+	my $message = shift;
+	my $usage = qq/
+usage: starfish insert [args]
+
+predict element boundaries and insertion sites. 
+ 
+Required:
+-a, --assembly      FILE   2 column tsv: genome code, path to assembly FASTA.
+-d, --database      PATH   BLAST database containing all assemblies in --assembly.
+-b, --bed           FILE   BED file with coordinates of candidate captain tyrs.
+                           (output by starfish sketch)
+-i, --idtag         STR    string used for tyrs in tag column of --bed.
+-x, --prefix        STR    prefix for naming all output files.
+-o, --outdir        DIR    output directory.
+
+Required, with defaults:
+-s, --separator     STR    character separating genomeID from featureID.
+                           (default: '_')
+-T, --threads       INT    number of threads for parallel BLASTn search.
+                           (default: 2)
+--upstream          I-I    bp range to search upstream of tyrs.
+                           (default: 0-17000)
+--downstream        I-I    bp range to search downstream of hits to tyr upstreams.
+                           (default: 0-14000)
+--length            I-I    min-max insertion length.
+                           (default: 2000-700000)
+--pid               INT    min perc identity of alignments in blastn and nucmer.
+                           (default: 90)
+--hsp               INT    min alignment length for blastn and nucmer.
+                           (in bp; default: 1000)
+--insertcov         FLT    max perc coverage of an insert in an empty contig.
+                           (default: 0.25)
+--flankcov          FLT    max perc coverage of an up- to a downstream region.
+                           (default: 0.25)
+--blastopts         STR    options to pass to blastn.
+                           (default: '-task dc-megablast -evalue 0.0001
+                           -max_target_seqs 1000000')
+--nucmeropts        STR    options to pass to nucmer.
+                           (default: '--mum')
+--deltafilteropts   STR    options to pass to delta-filter.
+                           (default: '-m')
+Optional:  
+-t, --taxonomy      FILE   3 column tsv: genome code, taxID to include in 
+                           alignments, taxID to exclude from alignments.
+                           (or '.' instead of taxID if not required)
+-h, --help                 print more details and exit.
+  
+/;
+
+if (not defined $message) {
+		$message = $usage;
+	} else {
+		$message = "$message\nuse -h for more details\n\n" ;
+	}	
+	die($message);
+}
+
+main: {
+
+	# parse and check options
+	my %opts;
+	GetOptions(\%opts, 
+		'assembly|a=s',
+		'bed|b=s',
+		'idtag|i=s',
+		'prefix|x=s',
+		'outdir|o=s',
+		'upstream=s',
+		'downstream=s',
+		'length=s',
+		'pid=i',
+		'hsp=i',
+		'insertcov=s',
+		'flankcov=s',
+		'separator|s=s',
+		'taxonomy|t=s',
+		'database|d=s',
+		'blastopts=s',
+		'nucmeropts=s',
+		'deltafilteropts=s',
+		'threads|T=i',
+		'h|help');
+	Opts_check(\%opts);
+
+	# check dependencies
+	my @commandlines = ("blastn", "nucmer", "delta-filter", "show-coords");
+	Commandline_check(\@commandlines);
+
+	print "Key parameters:
+--upstream             $opts{'upstream'}
+--downstream           $opts{'downstream'}
+--length               $opts{'length'}
+--pid                  $opts{'pid'}
+--hsp                  $opts{'hsp'}
+minDR                  $minDR
+maxDR                  $maxDR
+maxEmptySiteLength     $maxEmpty
+maxElementLengthFlag   $maxStarshipLengthFlag
+minElementLengthFlag   $minStarshipLengthFlag
+maxInsertCoverage      $opts{insertcov}
+maxFlankCoverage       $opts{flankcov}
+blastn                 $opts{blastopts}
+nucmer                 $opts{nucmeropts}
+delta-filt             $opts{deltafilteropts}\n\n";
+	
+	#######################################
+	#### FORMAT CHECK AND READ IN DATA ####
+	#######################################
+
+		my $datestring = localtime();
+		print "[$datestring] reading in data..\n";
+		
+		# Parse info from candidate Starship regions
+		# structured: {contigID}{starshipID}{geneID} = [begin, end, strand, tag, annotation]
+		my ($bedFeatures) = Glofish_bed_hash($opts{'bed'});
+		
+		# Parse the coordinates and direction of the putative captain DUF3435 gene
+		# will not return any captain sequences that have already been annotated with 'cap'
+		# and any DUF3435s in regions that contain a feature annotated with 'cap' will not be returned 
+		# Each region can have up to two putative captains:
+		#     in the 5'-3' direction, the most upstream DUF3435 sequence that is also on the + strand (if the most upstream DUF3435 is on the - strand, no putative captain is returned)
+		#     in the 3'-5' direction, the most downstream DUF3435 sequence that is also on the - strand (if the most downstream DUF3435 is on the + strand, no putative captain is returned)
+		# structured: {contigID}{starshipID}{captainID} = [geneBegin, geneEnd, capStrand, tag, annotation]
+		# at this point, will include all sequences tagged with 'idtag'
+		my ($candidateCaptains) = Parse_duf3435_from_regions($bedFeatures, $opts{'idtag'});
+
+		# Load up all assembly sequences into a single hash
+		# Structured: {contigID} = sequence
+		my ($ome2assemblyPath) = dim_1_hash($opts{'assembly'}, "\t", "0:1");
+		my ($assemblyPaths) = dim_0_hash($opts{'assembly'}, "\t", "1");
+		my ($assemblies) = Fasta_hash_many_files($assemblyPaths);
+		
+		#  Extract upstream flank of all captain sequences
+		#  upstream regions have the same ID as their captain
+		#  coordinate will be 'NA' if upstream region is located completely off of contig
+		my ($elementUpstreams) = Parse_upstream_region_from_gene($candidateCaptains, $assemblies, $opts{'upstream'});
+
+		#   Reverse gene hashes for easier parsing based on geneID
+		#   elementUpstreams structured: {geneID}{starshipID}{contigID} = [begin, end, strand, 'up']
+		#   captains structured: {captainID}{starshipID}{contigID} = [geneBegin, geneEnd, capStrand, tag, annotation]
+		($candidateCaptains) = Reverse_gene_hash($candidateCaptains);
+		($elementUpstreams) = Reverse_gene_hash($elementUpstreams); # swap the first and last keys for easier parsing
+				
+		# restructure to: {genome}{contig} = sequence
+		($assemblies) = Add_genome_to_sequence($assemblies, $opts{'separator'});
+		
+		# parse taxonomy info, if provided
+		my ($taxa) = dim_1_hash($opts{'taxonomy'}, "\t", "0:1") if (defined $opts{'taxonomy'});
+		my ($taxaExclude) = dim_1_hash($opts{'taxonomy'}, "\t", "0:2") if (defined $opts{'taxonomy'});
+		
+		# parse database info, if provided
+		my $threads = $opts{'threads'} if (defined $opts{'threads'});
+		my $dbPath = $opts{'database'} if (defined $opts{'database'});
+		
+		# make checkpoint directory for good filekeeping
+		system("mkdir $opts{'outdir'}/checkpoints") if (! -d "$opts{'outdir'}/checkpoints");
+
+	############################
+	#### DE NOVO ALIGNMENTS ####
+	############################
+		
+		$datestring = localtime();
+		print "[$datestring] parsing upstream regions of ".scalar(keys(%{$candidateCaptains}))." candidate DUF3435 captains..\n";
+
+		$datestring = localtime();
+		print "[$datestring] searching for hits to the upstream regions of ".scalar(keys(%{$elementUpstreams}))." candidate DUF3435 captains..\n";
+
+		# Search sequence in other genomes for hits to regions upstream of candidate captains
+		# prints each captain search to checkpoint file, and picks up from last search if file exists
+		# restrict by within taxon searches only, if desired
+		# checkpointing works such that you can add new genomes to an existing file and all captains will be searched against them
+		# and any new captains in the new genomes will be searched against everything else
+		# structured: @{$elementUpstreamHits{$capID}{$starshipID}{$capContigID}{$emptyContigID }}, $sstart, $ssend, $sstrand, $tag, '.';
+		my ($emptyUpstreamHits) = Element_upstream_search($elementUpstreams, $assemblies, $opts{'separator'}, $opts{'pid'}, $opts{'hsp'}, $opts{'blastopts'},  $opts{'outdir'}, $opts{'prefix'}, $taxa, $taxaExclude, $ome2assemblyPath, $dbPath, $threads);
+		
+		$datestring = localtime();
+		print "[$datestring] found ".scalar(keys(%{$emptyUpstreamHits}))." captains with candidate insertion sites\n";		
+
+		# Grab regions downstream and adjacent to empty site upstream
+		# structured: @{$emptyDownstreams{$capID}{$starshipID}{$capContigID}{$emptyContigID}}, $sstart, $ssend, $sstrand, $tag, '.';
+		my ($emptyDownstreams) = Parse_downstream_region_from_empty($emptyUpstreamHits, $assemblies, $opts{'downstream'}, $opts{'separator'});
+		
+		$datestring = localtime();
+		print "[$datestring] searching for hits to the downstream regions of candidate insertion sites for ".scalar(keys(%{$emptyDownstreams}))." captains that are also downstream of those captains..\n";
+
+		# Search sequence downstream of candidate captains with sequence adjacent to hit
+		# prints each captain search to checkpoint file, and picks up from last search if file exists
+		# Right now we identify the longest HSP on the captain contig. We could restrict
+		# this search by the downstream captain coordinates if we wanted, but not sure its worth it
+		# structured: @{$elementDownstreamHits{$capID}{$starshipID}{$capContigID}{$emptyContigID}}, $sstart, $ssend, $sstrand, $tag, '.';
+		my ($elementDownstreamHits) = Empty_downstream_search($emptyDownstreams, $assemblies, $opts{'separator'}, $opts{'pid'}, $opts{'hsp'}, $opts{'blastopts'}, $opts{'outdir'}, $opts{'prefix'}, $threads);
+		
+		# Check how far away captains are from any hits that are downstream of them
+		# if they pass the length cutoffs, these are candidate element insertions!
+		# structured: @{$candidateBoundaries{$capID}{$starshipID}{$capContigID}{$emptyContigID}}, $elementBegin, $elementEnd, strand, '.', '.';
+		my ($candidateBoundaries) = Identify_element_boundaries($elementUpstreams, $elementDownstreamHits, $opts{'separator'}, $opts{'length'});
+
+	##############################
+	#### BOUNDARY REFINEMENT  ####
+	##############################
+
+		# do a sanity check to make sure that the upstream boundary does not match the downstream boundary, filters out false positives 
+		# also get the absolute boundaries for empty sites
+		# structured: @{$emptyBoundaries{$capID}{$starshipID}{$capContigID}{$emptyContigID}}, $emptyBegin, $emptyEnd, strand, '.', '.';
+		$datestring = localtime();		
+		print "[$datestring] filtering out similar upstream and downstream flanks of insertion sites associated with ".scalar(keys(%{$candidateBoundaries}))." candidate DUF3435 captains..\n";
+
+		my ($emptyBoundaries) = Filter_empty_boundaries($emptyUpstreamHits, $emptyDownstreams, $opts{'separator'}, $opts{'length'}, $opts{'pid'}, $opts{'flankcov'},  $opts{'blastopts'}, $assemblies, $opts{'outdir'}, $opts{'prefix'});
+
+		# Refine alignment coordinates for all candidates by aligning the contiguous empty
+		# sequence site (from upstreamBegin to DownstreamEnd) to the entire contiguous
+		# element (from upstreamBegin to DownstreamEnd) 
+		# structured: @{$refinedInsertions{$capID}{$emptyContigID}}, $elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand;
+		# remove any elements that are < minLength and > maxLength (opts{'length'})
+		# filter out any insertion sites that >$maxEmpty, these are likely false positives
+
+		$datestring = localtime();		
+		print "[$datestring] refining boundary predictions of ".scalar(keys(%{$candidateBoundaries}))." candidate DUF3435 captains with insertion sites..\n";
+
+		my ($refinedBoundaries) = Refine_element_boundaries($candidateCaptains, $candidateBoundaries, $emptyBoundaries, $assemblies, $opts{'separator'}, $opts{'length'}, $opts{'pid'}, $opts{'blastopts'}, $opts{'hsp'}, $threads, $opts{'outdir'}, $opts{'prefix'});
+
+		$datestring = localtime();
+		print "[$datestring] found ".scalar(keys(%{$refinedBoundaries}))." candidate DUF3435 captains with refined insertion sites\n";
+
+	#################################
+	#### INSERTION SANITY CHECK  ####
+	#################################
+
+		$datestring = localtime();
+		print "[$datestring] aligning ".scalar(keys(%{$refinedBoundaries}))." candidate elements back to candidate insertion site contigs to make sure the element is really missing..\n";
+
+		# occassionally, we get false positives where an element, as defined by its insert
+		# boundaries, is more or less contiguous with the regions surrounding the putative insertion site
+		# this seems to happen most often when an inversion breakpoint is located within an element
+		# the sequence of "true" inserted element should not be located anywhere else on
+		# the contig with the putative insertion site
+		# here, we do a quick mummer alignment of candidate elements back to the empty site contig
+		# we use mummer so that we can use the --mum option of best 1:1 alignments
+		# if >MAXCOV of the element is present on the contig, then remove it
+		# only run if elementLength > min elementLengthFlag, because small elements may be filtered out if other DUF3435s exist on the contig
+		# @{$finalBoundaries{$capID}{$emptyContigID}}, $elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand;
+		my ($finalBoundaries) = Insert_alignment_check($refinedBoundaries, $candidateCaptains, $assemblies, $opts{'separator'}, $opts{'pid'}, $opts{'insertcov'}, $opts{'nucmeropts'}, $opts{'deltafilteropts'}, $opts{'outdir'}, $opts{'prefix'}, $threads);
+
+	##########################################
+	#### FILTER INSERT BOUNDARIES & PRINT ####
+	##########################################
+
+	if (scalar keys %{$finalBoundaries} > 0) { # were any new boundaries found?
+
+		# Identify possible element boundaries based on insertion sites
+		# if multiple DRs of the same length are associated with the exact same boundaries, pick the first observed one as the 'ref' to help cut down on redundancy in the .BED file
+		# structured:  $capBoundaries{$refGeneID}{associatedEmptyContig}, $elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand;
+		my ($capBoundaries, $falsePositiveFlags) =  Remove_redundant_boundaries($bedFeatures, $finalBoundaries);
+
+		$datestring = localtime();		
+		print "[$datestring] found element boundaries and insertion sites for ".scalar(keys %{$capBoundaries})." captains out of ".scalar(keys(%{$candidateCaptains}))." input captains\n";
+
+		# Identify and print the end coordinate of longest downstream region as the downstream boundary
+		# Print some summary statistics based on this script's specific findings
+		# Integrate candidate starship boundaries into the provided bed file
+		my $bedOutfile = "$opts{'outdir'}/$opts{'prefix'}.insert.bed";
+		my $statsOutfile = "$opts{'outdir'}/$opts{'prefix'}.insert.stats";
+		Print_bed($bedFeatures, $capBoundaries, $assemblies, $opts{'separator'}, $bedOutfile);
+		Print_stats($candidateCaptains, $capBoundaries, $finalBoundaries, $assemblies, $opts{'separator'}, $statsOutfile);
+	} else {
+		$datestring = localtime();		
+		print "[$datestring] did not find new boundaries for any of the candidate DUF3435 captains in $opts{'bed'}, so no results to print..\n";
+	}
+		
+	$datestring = localtime();
+	print "[$datestring] done\n";
+	
+}
+
+sub Print_stats {
+	my ($captains,  $capBoundaries, $boundaries, $assemblies, $SEP, $outfile) = @_;
+	my ($OUT) = Open_FH($outfile, "#elementID\telementCaptainID\telementContigID\telementBegin\telementEnd\telementLength\telementStrand\temptyContigID\temptyBegin\temptyEnd\temptyLength\temptyStrand\temptySiteSeq\tquality\twarnings\n");
+	
+	foreach my $featureID (nsort keys %{$captains}) {
+		foreach my $refStarshipID (nsort keys %{$captains->{$featureID}}) { # all captains will be associated with at most 1 starship region
+			if (exists $boundaries->{$featureID}) { # was this captain assigned a boundary?
+				foreach my $refContigID (nsort keys %{$captains->{$featureID}->{$refStarshipID}}) { # all starships will be associated with at most 1 contig
+					foreach my $emptyContigID (nsort keys %{$boundaries->{$featureID}}) {
+						my ($emptyGenome) = split/$SEP/, $emptyContigID;
+						my ($elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand) = @{$boundaries->{$featureID}->{$emptyContigID}};
+						my $elementLength = $elementEnd - $elementBegin + 1;
+						
+						my $emptyLength = $emptyEnd - $emptyBegin + 1;
+						
+						my $warning;
+						$warning = "*element length > $maxStarshipLengthFlag bp" if ($elementLength > $maxStarshipLengthFlag);
+						$warning = "*element length < $minStarshipLengthFlag bp" if ($elementLength < $minStarshipLengthFlag);
+						$warning .= " *empty site > $maxDR bp" if ($emptyLength > $maxDR);
+						$warning .= " *empty site < $minDR bp" if ($emptyLength < $minDR);
+						$warning = '.' if (not defined $warning);
+						
+						my $quality = 'alt';
+						$quality = 'ref' if (exists $capBoundaries->{$featureID}->{$emptyContigID}); # was this chosen as a 'filtered' insertion site, according to its DR length, and printed to the .bed file?
+						
+						# print out insertion site
+						#substr is 0 indexed, genomic coords are not
+						my $siteSeq = substr($assemblies->{$emptyGenome}->{$emptyContigID}, $emptyBegin - 1, $emptyLength);
+						
+						# ok, somehow, empty strand is always oriented OPPOSITE what it should be... not sure where this error is happening, but since it is consistent, just reverse the signs of emptySite
+						 if ($emptyStrand eq '-') {
+						 	$emptyStrand = '+';
+						 } else {
+						 	$emptyStrand = '-';
+						 }
+						
+						($siteSeq) = Reverse_complement($siteSeq, $emptyContigID) if ($elementStrand ne $emptyStrand); # orient the insertion site sequence according to the element if the orientations of the element and empty site dont match
+						$siteSeq = lc($siteSeq);
+						$siteSeq = '.' if ((length($siteSeq) > $maxDR) || length($siteSeq) < $minDR);# Site sequences longer or shorter than this are not actually DRs, but probably just messy insertion sites
+						print $OUT "$refStarshipID\t$featureID\t$refContigID\t$elementBegin\t$elementEnd\t$elementLength\t$elementStrand\t$emptyContigID\t$emptyBegin\t$emptyEnd\t$emptyLength\t$emptyStrand\t$siteSeq\t$quality\t$warning\n";
+					}
+				} 
+			} else {
+# 				foreach my $refContigID (keys %{$captains->{$featureID}->{$refStarshipID}}) { # all starships will be associated with at most 1 contig
+# 					print $OUT "$refStarshipID\t$featureID\t$refContigID\t.\t.\t.\t.\t.\t.\t.\t.\t.\t.\t.\t.\n";
+# 				}
+				next;
+			} 
+		}
+	}
+}
+
+sub Print_bed {
+	my ($starships, $boundaries, $assemblies, $SEP, $outfile) = @_;
+	my ($OUT) = Open_FH($outfile);
+	
+	# add longest downstream coordinates to the coordinate sorted bed hash
+	my ($regions) = Sort_bed_hash_by_coordinate($starships);
+	foreach my $contigID (keys %{$regions}) {
+		foreach my $regionID (keys %{$regions->{$contigID}}) {
+			foreach my $position (keys %{$regions->{$contigID}->{$regionID}}) {
+				foreach my $featureID (keys %{$regions->{$contigID}->{$regionID}->{$position}}) {
+					if (exists $boundaries->{$featureID}) { # if this is a captain sequence (ie., is their a candidate insertion associated with it)
+						foreach my $emptyContigID (keys %{$boundaries->{$featureID}}) {
+							my $beginFeatureID = "${featureID}|${emptyContigID}|up";
+							my $endFeatureID = "${featureID}|${emptyContigID}|down";
+							my ($elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand) = @{$boundaries->{$featureID}->{$emptyContigID}};
+							my $insertTag = 'insert';
+
+							#substr is 0 indexed, genomic coords are not
+							my ($emptyGenome) = split/$SEP/, $emptyContigID;
+							my $emptyLength = $emptyEnd - $emptyBegin + 1;
+							my $siteSeq = substr($assemblies->{$emptyGenome}->{$emptyContigID}, $emptyBegin - 1, $emptyLength);
+
+							# ok, somehow, empty strand is always oriented OPPOSITE what it should be... not sure where this error is happening, but since it is consistent, just reverse the signs of emptySite
+							 if ($emptyStrand eq '-') {
+								$emptyStrand = '+';
+							 } else {
+								$emptyStrand = '-';
+							 }
+
+							($siteSeq) = Reverse_complement($siteSeq, $emptyContigID) if ($elementStrand ne $emptyStrand); # orient the insertion site sequence according to the element if the orientations of the element and empty site dont match
+							$siteSeq = lc($siteSeq);
+							$siteSeq = '.' if ((length($siteSeq) > $maxDR) || (length($siteSeq) < $minDR)); # Site sequences longer or shorter than this are not actually DRs, but probably just messy insertion sites
+							
+							if ($elementStrand eq '+') {
+								push @{$regions->{$contigID}->{$regionID}->{$elementEnd}->{$endFeatureID}}, $elementEnd, $elementEnd, $elementStrand, $insertTag, $siteSeq;
+								push @{$regions->{$contigID}->{$regionID}->{$elementBegin}->{$beginFeatureID}}, $elementBegin, $elementBegin, $elementStrand, $insertTag, $siteSeq;
+							} elsif ($elementStrand eq '-') {
+								push @{$regions->{$contigID}->{$regionID}->{$elementBegin}->{$endFeatureID}}, $elementBegin, $elementBegin, $elementStrand, $insertTag, $siteSeq;
+								push @{$regions->{$contigID}->{$regionID}->{$elementEnd}->{$beginFeatureID}}, $elementEnd, $elementEnd, $elementStrand, $insertTag, $siteSeq;
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	# then print, after sorting by coordinate position
+	foreach my $contigID (nsort keys %{$regions}) {
+		foreach my $regionID (nsort keys %{$regions->{$contigID}}) {
+			foreach my $position (sort {$a <=> $b} keys %{$regions->{$contigID}->{$regionID}}) {
+				foreach my $featureID (nsort keys %{$regions->{$contigID}->{$regionID}->{$position}}) {
+					my ($begin, $end, $strand, $idtag, $annotation) = @{$regions->{$contigID}->{$regionID}->{$position}->{$featureID}};
+					$idtag = 'cap' if (exists $boundaries->{$featureID}); # if this is a captain sequence, change the idtag
+					print $OUT "$contigID\t$begin\t$end\t$featureID\t$idtag\t$strand\t$regionID\t$annotation\n";
+				}
+			}
+		}
+	}
+}
+
+sub Insert_alignment_check {
+	my ($refinedBoundaries, $captains, $assemblies, $SEP, $minLinkID, $maxInsertCoverage, $nucmerDefaults, $deltafilterDefaults, $OUTDIR, $PREFIX, $THREADS) = @_;
+	# @{$finalBoundaries{$capID}{$emptyContigID}}, $elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand;
+
+	$THREADS = 1 if (not defined $THREADS);
+
+	# since this step can take a really long time, save each nucmer search to file, and 
+	# re-read file if starting over
+	my ($pass, %checkpointComparisons);	
+	my $alignment_check_search_checkpointFile = "$OUTDIR/checkpoints/$PREFIX.insert.alignment_check_search.checkpoint";
+	if (-f $alignment_check_search_checkpointFile) {
+		$pass = retrieve($alignment_check_search_checkpointFile);
+		
+		# load up all capID - empty contigID comparisons that have already been examined, to avoid re-computing them
+		my %emptyGenomes;
+		foreach my $capID (keys %{$pass}) {
+			foreach my $emptyContigID (keys %{$pass->{$capID}}) {
+				$checkpointComparisons{$capID}{$emptyContigID} = 1; # notice we are now storing emptyContigID, not emptyGenome, in case multiple empty contigs from the same genome are targets
+				my ($emptyGenome) = split/$SEP/, $emptyContigID; #should work for both emptyGenome and emptyContigID
+				$emptyGenomes{$emptyGenome} = 1;
+			}
+		}
+		
+		my $datestring = localtime();
+		print "[$datestring] $alignment_check_search_checkpointFile exists, reading in ".scalar(keys(%{$pass}))." previous searches against ".scalar(keys(%emptyGenomes))." target genomes and continuing from checkpoint..\n";
+	}
+	
+	foreach my $capID (keys %{$refinedBoundaries}) {
+		my ($capGenome) = split/$SEP/, $capID;
+		
+		# cumbersome to retrieve captain contig, but no matter
+		my $capContigID;
+		foreach my $refStarshipID (nsort keys %{$captains->{$capID}}) { # all captains will be associated with at most 1 starship region
+			foreach my $refContigID (nsort keys %{$captains->{$capID}->{$refStarshipID}}) { # all starships will be associated with at most 1 contig
+				$capContigID = $refContigID;
+			}
+		}
+
+		# now iterate through all empty contigs associated with this captain and do a coverage check
+		foreach my $emptyContigID (keys %{$refinedBoundaries->{$capID}}) {
+			my ($emptyGenome) = split/$SEP/, $emptyContigID;
+			next if ($capGenome eq $emptyGenome); # shouldn't happen at this point, but sanity check
+					
+			my ($elementBegin, $elementEnd, $elementStrand) = @{$refinedBoundaries->{$capID}->{$emptyContigID}};
+			
+			my $elementLength = $elementEnd - $elementBegin + 1;
+			# print "$capID\t$starshipID\t$elementLength\n";
+			
+			# give an automatic pass if elementLength is < minStarshipLengthFlag, because these small elements could easily be duplicated on the empty contig somewhere else
+			if ($elementLength < $minStarshipLengthFlag) {
+				push @{$pass->{$capID}->{$emptyContigID}}, @{$refinedBoundaries->{$capID}->{$emptyContigID}};
+				next;
+			}
+			
+			# skip search if this empty contig has already been looked at and is stored in checkpoint
+			next if (exists $checkpointComparisons{$capID}{$emptyContigID});
+
+			my ($elementSeq) = substr($assemblies->{$capGenome}->{$capContigID}, $elementBegin - 1, $elementLength);
+			my $emptyContigLength = length($assemblies->{$emptyGenome}->{$emptyContigID});
+			my ($emptySeq) = substr($assemblies->{$emptyGenome}->{$emptyContigID}, 0, $emptyContigLength);
+			
+			# name files
+			my $refFile = "$OUTDIR/mummerRef.$PREFIX.fa";
+			my $queFile = "$OUTDIR/mummerQue.$PREFIX.fa";
+
+			# print sequence of predicted element
+			my ($queOUT) = Open_FH($queFile);
+			print $queOUT ">$capID\n$elementSeq\n";
+
+			# print entire contig sequence of empty site
+			my ($refOUT) = Open_FH($refFile);
+			print $refOUT ">$emptyContigID\n$emptySeq\n";
+
+			# execute nucmer
+			# notice that empty contig is the 'ref', in nucmer parlance
+			my $datestring = localtime();
+			my $outprefix = "$OUTDIR/${capID}_vs_${emptyContigID}.$PREFIX";
+	
+			my ($nucmerCheck) = system("nucmer $nucmerDefaults -t $THREADS -p $outprefix $queFile $refFile 2>/dev/null");
+			if ($nucmerCheck != 0) { die "\n\n[$datestring] error: could not execute nucmer on commandline for $capID and $emptyContigID, exiting..\n$!\n";}
+	
+			my ($deltaCheck) = system("delta-filter $deltafilterDefaults -i $minLinkID $outprefix.delta > $outprefix.filt.delta 2>/dev/null");
+			if ($deltaCheck != 0) { die "\n\n[$datestring] error: could not execute delta-filter on commandline for $capID and $emptyContigID, exiting..\n$!\n";}
+	
+			my $awkArgs = q{'{z+=1;print $8"\t"$1"\t"$2"\t"$9"\t"$3"\t"$4}'};
+			#print "show-coords -TH $outprefix.filt.delta | sort -k5,5nr | awk $awkArgs | perl -pe 's/\\t\$/\\tcolor=\$color3/' > $outprefix.links.tsv";die;
+			my $nucmerString = `show-coords -TH $outprefix.filt.delta | sort -k5,5nr | awk $awkArgs`;
+			if (not defined $nucmerString) {
+				print "[$datestring] error: could not execute show-coords on the commandline for reference $emptyContigID and query $capID, skipping:\nshow-coords -TH $outprefix.filt.delta | sort -k5,5nr | awk $awkArgs\n";
+				next;
+			}
+
+			system("rm $refFile $queFile $outprefix.delta $outprefix.filt.delta");
+			
+			# return the percentage of the element found in the empty site contig
+			my ($elementCoverage) = Parse_nucmer_coverage_by_query($nucmerString, $elementLength);
+			
+			# filter out this candidate insert if > maxInsertCoverage is found on the empty contig
+			# mark search as complete for checkpointing purposes
+			if ($elementCoverage > $maxInsertCoverage) {
+				push @{$pass->{$capID}->{$emptyContigID}}, 'NA','NA','NA','NA','NA','NA';
+			} else {
+				push @{$pass->{$capID}->{$emptyContigID}}, @{$refinedBoundaries->{$capID}->{$emptyContigID}};
+			}
+		}
+		# update checkpoint file after every captain search
+		store($pass, $alignment_check_search_checkpointFile) if (scalar(keys %{$pass}) > 0);			
+	}
+	
+	# update checkpoint file one final time
+	store($pass, $alignment_check_search_checkpointFile) if (scalar(keys %{$pass}) > 0);
+
+	# make sure no empty searches are returned 
+	my %pass;
+	foreach my $capID (keys %{$pass}) {
+		foreach my $emptyContigID (keys %{$pass->{$capID}}) {
+			my ($check) = @{$pass->{$capID}->{$emptyContigID}};
+			push @{$pass{$capID}{$emptyContigID}}, @{$pass->{$capID}->{$emptyContigID}} if ($check ne 'NA');
+		}
+	}
+	
+	return(\%pass);	
+}
+
+sub Parse_nucmer_coverage_by_query {
+	my ($nucmerString, $elementLength) = @_;
+	my $coverage = 0;
+	my @nucmerLines = split/\n/, $nucmerString;
+	foreach my $line (@nucmerLines) {
+		chomp $line;
+		my ($elementID, $elementHSPbegin, $elementHSPend, $emptyID, $emptyHSPbegin, $emptyHSPend) = split/\t/, $line;
+		$coverage += $elementHSPend - $elementHSPbegin + 1;
+	}
+	my $percCoverage = sprintf("%.2f", $coverage / $elementLength);
+	return($percCoverage);
+}
+
+sub  Remove_redundant_boundaries {
+	my ($starships, $boundaries) = @_;
+	my (%filtered, %observed);
+	foreach my $contigID (keys %{$starships}) {
+		foreach my $regionID (keys %{$starships->{$contigID}}) {
+			my %candidateDRsites;
+			foreach my $featureID (keys %{$starships->{$contigID}->{$regionID}}) {
+				if (exists $boundaries->{$featureID}) { # if this is a candidate captain sequence
+					foreach my $emptyContigID (keys %{$boundaries->{$featureID}}) {
+						my ($elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand) = @{$boundaries->{$featureID}->{$emptyContigID}};
+
+ 						# remove redundant insertion sites using observed hash
+ 						if (exists $observed{$featureID}{"$elementBegin\t$elementEnd"}) {
+ 							# skip  boundaries that have already been observed
+ 							next;
+ 						} else {
+ 							next if ($featureID =~ m/^\s*$/); #ignore empty variables, sometimes this happens
+ 							push @{$filtered{$featureID}{$emptyContigID}}, @{$boundaries->{$featureID}->{$emptyContigID}};
+ 							$observed{$featureID}{"$elementBegin\t$elementEnd"} = 1;
+ 						} 
+						if ($elementEnd < $elementBegin) { # this should not happen because all coords should be in absolute 5'-3'
+							print "Warning: elementEnd=$elementEnd is larger than elementBegin=$elementBegin for $featureID in $regionID, this shouldn't be happening\n";
+						}
+					}
+				}
+			}
+		}
+	}
+	return(\%filtered);
+}
+
+sub Refine_element_boundaries {
+	my ($captainCoordinates, $candidateBoundaries, $emptyBoundaries, $assemblies, $SEP, $lengthRange, $minPercID, $blastnDefaults, $minHSPlength, $threads, $OUTDIR, $PREFIX) = @_;
+	my ($MINDIST, $MAXDIST) = split/-/, $lengthRange;
+
+	# since this step can take a really long time, save each blastn search to file, and 
+	# re-read file if starting over
+	my ($refinedBoundaries, %checkpointComparisons);	
+	my $refined_boundary_search_checkpointFile = "$OUTDIR/checkpoints/$PREFIX.insert.refined_boundary_search.checkpoint";
+	if (-f $refined_boundary_search_checkpointFile) {
+		$refinedBoundaries = retrieve($refined_boundary_search_checkpointFile);
+		
+		# load up all capID - empty contigID comparisons that have already been examined, to avoid re-computing them
+		my %emptyGenomes;
+		foreach my $capID (keys %{$refinedBoundaries}) {
+			foreach my $emptyContigID (keys %{$refinedBoundaries->{$capID}}) {
+				$checkpointComparisons{$capID}{$emptyContigID} = 1; # notice we are now storing emptyContigID, not emptyGenome, in case multiple empty contigs from the same genome are targets
+				my ($emptyGenome) = split/$SEP/, $emptyContigID; #should work for both emptyGenome and emptyContigID
+				$emptyGenomes{$emptyGenome} = 1;
+			}
+		}
+		
+		my $datestring = localtime();
+		print "[$datestring] $refined_boundary_search_checkpointFile exists, reading in ".scalar(keys(%{$refinedBoundaries}))." previous searches against ".scalar(keys(%emptyGenomes))." target genomes and continuing from checkpoint..\n";
+	}
+
+	# name files
+	my $dbPath = "$OUTDIR/emptyDB.$PREFIX";
+	my $dbFasta = "$dbPath.fa";
+	my $elementFile = "$OUTDIR/element.$PREFIX.fa";
+	my $idFile = "$OUTDIR/empty.$PREFIX.ids";
+	
+	# print out all candidate empty contigs to save on IO and create a blastdb (specific empty contigs will be searched using id aliases)
+	my %alreadyPrinted;
+	my ($dbFastaOUT) = Open_FH($dbFasta);
+	foreach my $capID (keys %{$candidateBoundaries}) {
+		foreach my $starshipID (keys %{$candidateBoundaries->{$capID}}) {
+			foreach my $capContigID (keys %{$candidateBoundaries->{$capID}->{$starshipID}}) {
+				foreach my $emptyContigID (keys %{$candidateBoundaries->{$capID}->{$starshipID}->{$capContigID}}) {	
+					next if (exists $alreadyPrinted{$emptyContigID});
+					my ($emptyGenome) = split/$SEP/, $emptyContigID;
+					print $dbFastaOUT ">$emptyContigID\n$assemblies->{$emptyGenome}->{$emptyContigID}\n";
+					$alreadyPrinted{$emptyContigID} = 1;
+				}
+			}
+		}
+	}
+	my ($failcheck) = system("makeblastdb -dbtype nucl -parse_seqids -in $dbFasta -out $dbPath 1>/dev/null");
+	my $datestring = localtime();					
+	if ($failcheck != 0) { die "\n\n[$datestring] error: could not execute makeblastdb on commandline, exiting..\n$!\n";}
+
+	foreach my $capID (keys %{$candidateBoundaries}) {
+		my ($capGenome) = split/$SEP/, $capID;
+		foreach my $starshipID (keys %{$candidateBoundaries->{$capID}}) {
+			foreach my $capContigID (keys %{$candidateBoundaries->{$capID}->{$starshipID}}) {
+
+				my ($capBegin, $capEnd, $capStrand, $capTag) = @{$captainCoordinates->{$capID}->{$starshipID}->{$capContigID}};
+				
+				# print out just the element sequence
+				my ($elementOUT) = Open_FH($elementFile);
+				print $elementOUT ">$capContigID\n$assemblies->{$capGenome}->{$capContigID}\n";
+				
+				# id file with empty contigIDs to search			
+				my ($idOUT) = Open_FH($idFile);
+
+				# hash that stores all candidate boundaries for each unique captain - empty site pair
+				# will be used to correctly parse coordinates from blast output
+				my %boundaryCoordinates;
+				my ($absElementBegin, $absElementEnd) = (100000000000, 0); # grab absolute start and end of element across all empty sites; should be fairly similar and will save on IO
+				
+				foreach my $emptyContigID (keys %{$candidateBoundaries->{$capID}->{$starshipID}->{$capContigID}}) {
+					my ($emptyGenome) = split/$SEP/, $emptyContigID;
+					next if ($capGenome eq $emptyGenome); # shouldn't happen at this point, but sanity check
+										
+					my ($elementBegin, $elementEnd, $elementStrand) = @{$candidateBoundaries->{$capID}->{$starshipID}->{$capContigID}->{$emptyContigID}};
+					my ($emptyBegin, $emptyEnd, $emptyStrand) = @{$emptyBoundaries->{$capID}->{$starshipID}->{$capContigID}->{$emptyContigID}}; # should always exist
+					
+					# skip any empty boundaries that did not pass previous filtering test
+					next if ($emptyBegin eq 'NA');
+
+					# skip search if this empty contig has already been looked at and is stored in checkpoint OR if region not actually located on contigs
+					if ((exists $checkpointComparisons{$capID}{$emptyContigID}) || ($elementBegin eq 'NA')) {
+						
+						# mark this search as complete anyways, for checkpointing purposes
+						# notice here we are pushing in NAs, so if this search already has an array of information, these NA will be tacked onto the end of the array and will thus be ignored when retrieving information from the array later on in this subroutine
+						push @{$refinedBoundaries->{$capID}->{$emptyContigID}}, 'NA', 'NA', 'NA', 'NA', 'NA', 'NA';
+						next;
+					}	
+					
+					# store candidate boundary coordinates for each empty ContigID
+					push @{$boundaryCoordinates{$emptyContigID}}, $elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand;
+					
+					# print empty contigID to search to an idfile,  if it passed all the checks
+					print $idOUT "$emptyContigID\n";
+					
+					$absElementBegin = $elementBegin if ($elementBegin < $absElementBegin);
+					$absElementEnd = $elementEnd if ($elementEnd > $absElementEnd);
+					
+				}	
+
+				# check that information has actually been printed to file
+				next if (-z $idFile);
+				
+				# create db alias with all of the IDs of empty contigs that are to be searched to speed up search
+				my ($alias_check) = system("blastdb_aliastool -seqid_file_in $idFile -seqid_file_out $idFile.alias");
+				my $datestring = localtime();					
+				if ($alias_check != 0) { die "\n\n[$datestring] error: could not execute blastdb_aliastool for captain $capID and $idFile on commandline, exiting..\n$!\n";}
+
+				# execute blast, with element contig as query and empty contigs as subjectDB
+				my $blastString = `blastn -query $elementFile -query_loc ${absElementBegin}-${absElementEnd} -db $dbPath -seqidlist $idFile.alias -num_threads $threads -outfmt 6 $blastnDefaults -perc_identity $minPercID`;
+				if (not defined $blastString) {
+					my $datestring = localtime();
+					print "[$datestring] error: could not execute blastn on the commandline for empty contigs in $idFile vs captain contig $capContigID, skipping:\nblastn -query $elementFile -db $dbPath -seqidlist $idFile.alias -num_threads $threads -outfmt 6 $blastnDefaults -perc_identity $minPercID\n";
+					next;
+				}
+				
+				# parse HSPs based on unique captain contig - empty contig coordinates that we are attempting to refine
+				# Find position of hsp that is closest to begin captain coordinate while upstream of captain begin coordinate
+				# Find position of hsp that is closest to end captain coordinate while downstream of captain end coordinate
+				# these are the best guess for the element begin and end
+				# make sure all search results are in bounds of empty contig coordinates and element coordinates 
+				my ($closestCoordinates) = Parse_closest_HSPs($capBegin, $capEnd, $capStrand, $blastString, $capID, $starshipID, \%boundaryCoordinates, $minHSPlength);
+				
+				foreach my $emptyContigID (keys %{$closestCoordinates}) {
+					my ($closestElementBegin, $closestElementEnd, $elementStrand, $closestEmptyBegin, $closestEmptyEnd, $emptyStrand) = @{$closestCoordinates->{$emptyContigID}};
+
+					if ($closestElementBegin eq 'NA') { # indicates an empty blast or a false positive insertion
+						push @{$refinedBoundaries->{$capID}->{$emptyContigID}}, 'NA', 'NA', 'NA', 'NA', 'NA', 'NA';
+						next;
+					}
+					
+					my $elementLength = $closestElementEnd - $closestElementBegin + 1;
+					my $emptyLength = $closestEmptyEnd - $closestEmptyBegin + 1;
+					if (($elementLength < $MINDIST) || ($elementLength > $MAXDIST)) { # remove hits that are false positives, shouldn't exist at this point due to previous filtering but just a sanity check
+						push @{$refinedBoundaries->{$capID}->{$emptyContigID}}, 'NA', 'NA', 'NA', 'NA', 'NA', 'NA';
+						next;
+					}
+
+					# old filtering options, kept for posterity
+					# my $maxEmptyLength = 0.2 * $elementLength;
+					# next if ($emptyLength > $maxEmptyLength); # remove hits whose empty sites are suspiciously long, relative to the element length
+					
+					# mark any insert boundaries whose length is > $maxEmpty as 'NA'. I've found these to generally be false positives
+					if ($emptyLength <= $maxEmpty) {
+						push @{$refinedBoundaries->{$capID}->{$emptyContigID}}, $closestElementBegin, $closestElementEnd, $elementStrand, $closestEmptyBegin, $closestEmptyEnd, $emptyStrand;
+					} else {
+						# mark this search as complete anyways, for checkpointing purposes
+						push @{$refinedBoundaries->{$capID}->{$emptyContigID}}, 'NA', 'NA', 'NA', 'NA', 'NA', 'NA';
+					}
+				}
+
+				# clean up 
+				system("rm $idFile* $elementFile");
+				
+			}
+		}
+		# update checkpoint file after every captain search
+		store($refinedBoundaries, $refined_boundary_search_checkpointFile) if (scalar(keys %{$refinedBoundaries}) > 0);			
+	}
+
+	# update checkpoint file one last time
+	store($refinedBoundaries, $refined_boundary_search_checkpointFile) if (scalar(keys %{$refinedBoundaries}) > 0);			
+
+	# clean up 
+	system("rm $dbPath*") if (-f $dbFasta);
+	system("rm $idFile*") if (-f $idFile);
+	system("rm $elementFile") if (-f $elementFile);
+
+	# make sure no empty searches are returned 
+	my %refinedBoundaries;
+	foreach my $capID (keys %{$refinedBoundaries}) {
+		foreach my $emptyContigID (keys %{$refinedBoundaries->{$capID}}) {
+			my ($check) = @{$refinedBoundaries->{$capID}->{$emptyContigID}};
+			push @{$refinedBoundaries{$capID}{$emptyContigID}}, @{$refinedBoundaries->{$capID}->{$emptyContigID}} if ($check ne 'NA');
+		}
+	}
+	return(\%refinedBoundaries);
+}
+
+sub Parse_closest_HSPs {
+	my ($capBegin, $capEnd, $capStrand, $blastString, $capID, $starshipID, $boundaryCoords, $minHSPlength) = @_;
+		
+	my %closestCoords;
+
+	my @blastLines = split/\n/, $blastString;
+	return(\%closestCoords) if (scalar @blastLines == 0);
+	
+	my (%closestElementUpstream, %closestElementDownstream, %closestEmptyUpstream, %closestEmptyDownstream);
+	my (%lastObservedUpstreamDist, %lastObservedDownstreamDist);
+	
+	foreach my $emptyContig (keys %{$boundaryCoords}) {
+		$lastObservedUpstreamDist{$emptyContig} = 10000000000000;
+		$lastObservedDownstreamDist{$emptyContig} = 10000000000000;
+	}
+	
+	# element is query, empty contigs are subject
+	foreach my $line (@blastLines) {
+		chomp $line;
+		my ($qseqid, $sseqid, $pident, $hspLength, $mismatch, $gapopen, $qstart, $qend, $sstart, $send, $evalue, $bitscore) = split/\t/, $line;
+		
+		# ammend HSP boundaries based on the coordinates of the region that should actually be searched and is of interest
+		# for element coords
+		my ($elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand) = @{$boundaryCoords->{$sseqid}};
+		if (($qstart < $elementBegin) && ($qend < $elementBegin)) { # skip this HSP if it does not overlap at all with the region of interest
+			next;
+		} elsif (($qstart > $elementEnd) && ($qend > $elementEnd)) { # skip this HSP if it does not overlap at all with the region of interest
+			next;
+		} elsif (($qstart <= $elementBegin) && ($qend >= $elementEnd)) {
+			$qstart = $elementBegin;
+			$qend = $elementEnd;
+		} elsif (($qstart <= $elementBegin) && ($qend <= $elementEnd) && ($qend >= $elementBegin)) {
+			$qstart = $elementBegin;
+		} elsif (($qstart >= $elementBegin) && ($qstart <= $elementEnd) && ($qend >= $elementEnd)) {
+			$qend = $elementEnd;
+		}
+		
+		# for empty coords
+		if (($sstart < $emptyBegin) && ($send < $emptyBegin)) { # skip this HSP if it does not overlap at all with the region of interest
+			next;
+		} elsif (($sstart > $emptyEnd) && ($send > $emptyEnd)) { # skip this HSP if it does not overlap at all with the region of interest
+			next;
+		} elsif (($sstart <= $emptyBegin) && ($send >= $emptyEnd)) {
+			$sstart = $emptyBegin;
+			$send = $emptyEnd;
+		} elsif (($sstart <= $emptyBegin) && ($send <= $emptyEnd) && ($send >= $emptyBegin)) {
+			$sstart = $emptyBegin;
+		} elsif (($sstart >= $emptyBegin) && ($sstart <= $emptyEnd) && ($send >= $emptyEnd)) {
+			$send = $emptyEnd;
+		} 
+		
+		# ignore spurious hits. if these regions were retrieved with $minHSPlength, then at least 1 HSP of minHSPlength should be recovereable from them
+		$hspLength = $send - $sstart + 1;
+		$hspLength = $qend - $qstart + 1 if ($hspLength < ($qend - $qstart + 1));
+		
+		next if ($hspLength < $minHSPlength);
+		
+		# orient subject coordinates in 5'-3' because we know its strand
+		($qstart, $qend) = ($qend, $qstart) if ($qend < $qstart);
+		
+		# troubleshooting
+		# print "$line\n";
+		
+		# Find position of hsp that is closest to begin captain coordinate while upstream of captain begin coordinate
+		# Find position of hsp that is closest to end captain coordinate while downstream of captain end coordinate
+		# this requires finding the HSP with the shortest distances to captain
+		# these are the best guess for the element begin and end
+		if ($capStrand eq '+') {
+			my $currentUpstreamDist = $capBegin - $qend + 1;
+			if (($currentUpstreamDist < $lastObservedUpstreamDist{$sseqid}) && ($currentUpstreamDist > 0)) { # will also ensure that capBegin > sqend 
+				$lastObservedUpstreamDist{$sseqid} = $currentUpstreamDist;
+				$closestElementUpstream{$sseqid} = $qend;
+				$closestEmptyUpstream{$sseqid} = "${sstart}-${send}"
+			}
+			my $currentDownstreamDist = $qstart - $capEnd + 1;
+			if (($currentDownstreamDist < $lastObservedDownstreamDist{$sseqid}) && ($currentDownstreamDist > 0)) { # will also ensure that qstart > capEnd
+				$lastObservedDownstreamDist{$sseqid} = $currentDownstreamDist;
+				$closestElementDownstream{$sseqid} = $qstart;
+				$closestEmptyDownstream{$sseqid} = "${sstart}-${send}"
+			}
+		} elsif ($capStrand eq '-') {
+			my $currentUpstreamDist = $qstart - $capEnd + 1;
+			if (($currentUpstreamDist < $lastObservedUpstreamDist{$sseqid}) && ($currentUpstreamDist > 0)) { # will also ensure that qstart > capEnd 
+				$lastObservedUpstreamDist{$sseqid} = $currentUpstreamDist;
+				$closestElementUpstream{$sseqid} = $qstart;
+				$closestEmptyUpstream{$sseqid} = "${sstart}-${send}"
+			}
+			my $currentDownstreamDist = $capBegin - $qend + 1;
+			if (($currentDownstreamDist < $lastObservedDownstreamDist{$sseqid}) && ($currentDownstreamDist > 0)) { # will also ensure that qend > capBegin
+				$lastObservedDownstreamDist{$sseqid} = $currentDownstreamDist;
+				$closestElementDownstream{$sseqid} = $qend;
+				$closestEmptyDownstream{$sseqid} = "${sstart}-${send}"
+			}
+		}
+	}
+	
+	# figure out orientation of empty site and take the upEnd and downBegin
+	# if empty site does not have a closestEmptyUpstream or closestEmptyDownstream,
+	# then this means that only 1 contiguous HSP was recovered for the entire empty site
+	# this should never happen if its a true empty site: it is a false positive, probably
+	# due to it not being an empty site and instead being a site adjacent to a homologous 
+	# insertion 
+	
+	foreach my $emptyContigID (keys %{$boundaryCoords}) { # notice we are iterating through original list of emptyContigID
+		
+		if ((exists $closestEmptyDownstream{$emptyContigID}) && (exists $closestEmptyUpstream{$emptyContigID})) {
+
+			# retrieve the original element and empty strands
+			my ($null1, $null2, $elementStrand, $null3, $null4, $emptyStrand) = @{$boundaryCoords->{$emptyContigID}};
+
+			my @emptyCoordinates;
+			my ($emptyUpBegin, $emptyUpEnd) = split/-/, $closestEmptyUpstream{$emptyContigID};
+			my ($emptyDownBegin, $emptyDownEnd) = split/-/, $closestEmptyDownstream{$emptyContigID};
+		
+			# make sure the element begin and end are in the 5'-3' coordinate system
+			my ($closestElementBegin, $closestsend) = ($closestElementUpstream{$emptyContigID}, $closestElementDownstream{$emptyContigID});
+			($closestElementBegin, $closestsend) = ($closestsend, $closestElementBegin) if ($closestElementBegin > $closestsend);
+
+			# if coordinates don't overlap, then we have a problem because this means that we likely did not recover
+			# the stretch of sequence that contains the DR. Since the DR is duplicated in the element, the 'true'
+			# DR should be present in the genetic sequence described by both $closestEmptyUpstream && $closestEmptyDownstream
+			# we can do a quick sanity check here, or just filter these cases out later. Let's filter later
+			push @emptyCoordinates, $emptyUpBegin, $emptyUpEnd, $emptyDownBegin, $emptyDownEnd;
+			my @sortedCoordinates = sort {$a <=> $b} @emptyCoordinates;
+			# take the middle 2, which represent the closest internal coordinates regardless of orientation (we don't need to figure out orientation, because we already know it in Refine_boundaries sub
+			my ($first, $closestEmptyBegin, $closestEmptyEnd, $fourth) = @sortedCoordinates;
+
+			push @{$closestCoords{$emptyContigID}}, $closestElementBegin, $closestsend, $elementStrand, $closestEmptyBegin, $closestEmptyEnd, $emptyStrand;
+		
+		} else { # mark search complete for checkpointing purposes
+			push @{$closestCoords{$emptyContigID}}, 'NA', 'NA', 'NA', 'NA', 'NA', 'NA';
+		} 
+	} 
+	
+	return(\%closestCoords);
+}
+
+sub Parse_blast_coverage_by_query {
+	my ($blastString, $queryLength) = @_;
+	my $coverage = 0;
+	my @blastLines = split/\n/, $blastString;
+	foreach my $line (@blastLines) {
+		chomp $line;
+		my ($qseqid, $sseqid, $pident, $hspLength, $mismatch, $gapopen, $qstart, $qend, $sstart, $send, $evalue, $bitscore) = split/\t/, $line;
+		$coverage += $hspLength;
+	}
+	my $percCoverage = sprintf("%.2f", $coverage / $queryLength);
+	return($percCoverage);
+}
+
+sub Filter_empty_boundaries {
+	# only slightly different from sub Identify_element_boundaries to accomodate different hash structures
+	my ($emptyUpstreamHits, $emptyDownstreams, $SEP, $lengthRange, $minPercID, $maxFlankCoverage, $blastnDefaults, $assemblies, $OUTDIR, $PREFIX) = @_;
+	my ($MINDIST, $MAXDIST) = split/-/, $lengthRange;
+	
+	# keep track of insertion sites that have already been searched
+	my %examinedSites;
+
+	# since this step can take a really long time, save each blastn search to file, and 
+	# re-read file if starting over
+	my ($candidates, %checkpointComparisons);	
+	my $empty_boundary_filter_checkpointFile = "$OUTDIR/checkpoints/$PREFIX.insert.empty_boundary_filter.checkpoint";
+	if (-f $empty_boundary_filter_checkpointFile) {
+		$candidates = retrieve($empty_boundary_filter_checkpointFile);
+		
+		# load up all cap genome- empty genome comparisons that have already been examined, to avoid re-computing them
+		my %emptyGenomes;
+		foreach my $capID (keys %{$candidates}) {
+			foreach my $regionID (keys %{$candidates->{$capID}}) {
+				foreach my $capContigID (keys %{$candidates->{$capID}->{$regionID}}) {
+					foreach my $emptyContigID (keys %{$candidates->{$capID}->{$regionID}->{$capContigID}}) {
+						$checkpointComparisons{$capID}{$emptyContigID} = 1; # notice we are now storing emptyContigID, not emptyGenome, in case multiple empty contigs from the same genome are targets
+						my ($emptyGenome) = split/$SEP/, $emptyContigID; #should work for both emptyGenome and emptyContigID
+						$emptyGenomes{$emptyGenome} = 1;
+					}
+				}
+			}
+		}
+		
+		my $datestring = localtime();
+		print "[$datestring] $empty_boundary_filter_checkpointFile exists, reading in ".scalar(keys(%{$candidates}))." previous searches against ".scalar(keys(%emptyGenomes))." target genomes and continuing from checkpoint..\n";
+	}
+
+	my $upFile = "$OUTDIR/upstream.$PREFIX.fa";
+	my $downFile = "$OUTDIR/downstream.$PREFIX.fa";
+		
+	foreach my $capID (keys %{$emptyUpstreamHits}) {
+		my ($capGenome) = split/$SEP/, $capID;
+		foreach my $starshipID (keys %{$emptyUpstreamHits->{$capID}}) {
+			foreach my $capContigID (keys %{$emptyUpstreamHits->{$capID}->{$starshipID}}) {
+				foreach my $emptyContigID (keys %{$emptyUpstreamHits->{$capID}->{$starshipID}->{$capContigID}}) {
+					
+					# skip search if this empty contig has already been looked at and is stored in checkpoint
+					next if (exists $checkpointComparisons{$capID}{$emptyContigID});
+					
+					my ($upstreamemptyBegin, $upstreamemptyEnd, $upstreamemptyStrand, $upstreamemptyTag) = @{$emptyUpstreamHits->{$capID}->{$starshipID}->{$capContigID}->{$emptyContigID}};
+					next if ($upstreamemptyBegin eq 'NA'); # skip regions not actually located on contigs
+					my ($downstreamEmptyBegin, $downstreamEmptyEnd, $downstreamEmptyStrand, $downstreamEmptyTag) = @{$emptyDownstreams->{$capID}->{$starshipID}->{$capContigID}->{$emptyContigID}};
+					
+					# check if downstream hit is actually downstream, and not farther than MAXDIST away
+					# check that the upstream and downstream regions are correctly oriented in the same direction
+					# the strands of the empty upstream and downstream should never differ, because the orientation of the downstream is based on that of the upstream
+					my ($distance);
+					if (($upstreamemptyStrand eq '+') && ($downstreamEmptyStrand eq '+')) {
+						$distance = $downstreamEmptyBegin - $upstreamemptyEnd + 1;
+					} elsif (($upstreamemptyStrand eq '-') && ($downstreamEmptyStrand eq '-')) {
+						$distance = $upstreamemptyBegin - $downstreamEmptyEnd + 1;
+					} 
+					
+					# we have a candidate if true!
+					# maxdist is just here for a sanity check: this will always be true based on how empty up and downstream regions were defined and recovered
+					#print "$capID\t$emptyContigID: $upstreamemptyBegin\t$upstreamemptyEnd\t$downstreamEmptyBegin\t$downstreamEmptyEnd\n";
+					if ((defined $distance) && ($distance <= $MAXDIST)) {
+						
+						# check if the upstream and downstream flanks of the empty site have already been searched (the same empty site will often be identified for multiple elements in a large analysis; based on +/- 500bp overlap in coordinates)
+						my $coverageCheck;
+						if (exists $examinedSites{$emptyContigID}) {
+							foreach my $siteCoordinates (@{$examinedSites{$emptyContigID}}) { # iterate through all examined sites on this contig
+								my ($examinedUpstreamEmptyBegin, $examinedUpstreamEmptyEnd, $examinedDownstreamEmptyBegin, $examinedDownstreamEmptyEnd, $examinedCoverage) = @{$siteCoordinates};
+								$coverageCheck = $examinedCoverage if (($upstreamemptyBegin >= ($examinedUpstreamEmptyBegin - 500)) && ($upstreamemptyBegin <= ($examinedUpstreamEmptyBegin + 500)) && ($upstreamemptyEnd >= ($examinedUpstreamEmptyEnd - 500)) && ($upstreamemptyEnd <= ($examinedUpstreamEmptyEnd + 500)) && ($downstreamEmptyEnd >= ($examinedDownstreamEmptyEnd - 500)) && ($downstreamEmptyEnd <= ($examinedDownstreamEmptyEnd + 500)) && ($downstreamEmptyBegin >= ($examinedDownstreamEmptyBegin - 500)) && ($downstreamEmptyBegin <= ($examinedDownstreamEmptyBegin + 500)));
+							}
+						} 
+						
+						# if not defined, means that we were not able to transfer over coverage status
+						if (not defined $coverageCheck) {
+							# blast upstream vs downstream (can just print out the upstream and downstream sequences, since we are just looking for quick estimate of coverage)
+							my ($emptyGenome) = split/$SEP/, $emptyContigID;
+						
+							my $upSeq = substr($assemblies->{$emptyGenome}->{$emptyContigID}, $upstreamemptyBegin, $upstreamemptyEnd - $upstreamemptyBegin + 1);
+							my ($upOUT) = Open_FH($upFile);
+							print $upOUT ">$emptyContigID.up\n$upSeq\n";
+
+							my $downSeq = substr($assemblies->{$emptyGenome}->{$emptyContigID}, $downstreamEmptyBegin, $downstreamEmptyEnd - $downstreamEmptyBegin + 1);
+							my ($downOUT) = Open_FH($downFile);
+							print $downOUT ">$emptyContigID.down\n$downSeq\n";
+				
+							# execute blast, with empty as query and element as subject
+							my $blastString = `blastn -query $upFile -subject $downFile -outfmt 6 $blastnDefaults -perc_identity $minPercID`;
+							if (not defined $blastString) {
+								my $datestring = localtime();
+								print "[$datestring] error: could not execute blastn on the commandline for $emptyContigID upstream and downstream, skipping:\nblastn -query $upFile -subject $downFile -outfmt 6 $blastnDefaults -perc_identity $minPercID\n";
+								next;
+							}
+						
+							# clean up
+							system("rm $upFile $downFile") if (-f $upFile);
+						
+							# filter out this candidate insert if flanking regions have > maxFlankCoverage
+							my $upstreamLength = $upstreamemptyEnd - $upstreamemptyBegin + 1;
+							($coverageCheck) = Parse_blast_coverage_by_query($blastString, $upstreamLength);
+
+							# now mark this empty site as examined, and to be used as a reference for future comparisons
+							my @siteCoordinates = ($upstreamemptyBegin, $upstreamemptyEnd, $downstreamEmptyBegin, $downstreamEmptyEnd, $coverageCheck);
+							push @{$examinedSites{$emptyContigID}}, \@siteCoordinates;
+
+						}
+												
+						# check coverage; remember, sites that have already been examined had coverageCheck transferred over from previous search
+						if ($coverageCheck > $maxFlankCoverage) {
+							# store search anyways, to prevent having to redo the search
+							push @{$candidates->{$capID}->{$starshipID}->{$capContigID}->{$emptyContigID}}, 'NA', 'NA', 'NA', 'NA', 'NA';
+						
+						} else {
+						
+							# find the absolute begining and ending of empty sequence
+							my ($emptyBegin, $emptyEnd);
+							if (($upstreamemptyStrand eq '+') && ($downstreamEmptyStrand eq '+')) {
+								$emptyBegin = $upstreamemptyBegin;
+								$emptyEnd = $downstreamEmptyEnd;
+							} elsif (($upstreamemptyStrand eq '-') && ($downstreamEmptyStrand eq '-')) {
+								$emptyBegin = $downstreamEmptyBegin;
+								$emptyEnd = $upstreamemptyEnd;
+							} 
+							push @{$candidates->{$capID}->{$starshipID}->{$capContigID}->{$emptyContigID}}, $emptyBegin, $emptyEnd, $upstreamemptyStrand, '.', '.';
+						}
+					}
+				}
+			}
+		}
+		
+		# update checkpoint file after every captain search
+		store($candidates, $empty_boundary_filter_checkpointFile) if (scalar(keys %{$candidates}) > 0);			
+	}
+
+	# clean up
+	system("rm $upFile $downFile") if (-f $upFile);
+
+	# update checkpoint file one last time
+	store($candidates, $empty_boundary_filter_checkpointFile) if (scalar(keys %{$candidates}) > 0);			
+
+	return($candidates);	
+}
+
+
+sub Identify_element_boundaries {
+	my ($elementUpstreams, $elementDownstreamHits, $SEP, $lengthRange) = @_;
+	my %candidates;
+	my ($MINDIST, $MAXDIST) = split/-/, $lengthRange;
+
+	foreach my $capID (keys %{$elementUpstreams}) {
+		my ($capGenome) = split/$SEP/, $capID;
+		foreach my $starshipID (keys %{$elementUpstreams->{$capID}}) {
+			foreach my $capContigID (keys %{$elementUpstreams->{$capID}->{$starshipID}}) {
+				my ($upstreamElementBegin, $upstreamElementEnd, $upstreamElementStrand, $upstreamElementTag) = @{$elementUpstreams->{$capID}->{$starshipID}->{$capContigID}};
+				next if ($upstreamElementBegin eq 'NA'); # skip regions not actually located on contigs
+				
+				# iterate though all hits to empty downstream sequence for this captain
+				if (scalar keys  %{$elementDownstreamHits->{$capID}->{$starshipID}->{$capContigID}} > 0) { # is there at least 1 possible downstream hit?
+					foreach my $emptyContigID (keys %{$elementDownstreamHits->{$capID}->{$starshipID}->{$capContigID}}) {
+						my ($downstreamElementBegin, $downstreamElementEnd, $downstreamElementStrand, $downstreamElementTag) = @{$elementDownstreamHits->{$capID}->{$starshipID}->{$capContigID}->{$emptyContigID}};
+						
+						#print "capContig=$capContigID\tupCoords=${upstreamElementBegin}-${upstreamElementEnd}\t$upstreamElementStrand\tdownCoords=${downstreamElementBegin}-${downstreamElementEnd}\t$downstreamElementStrand\n";
+
+						
+						# check if downstream hit is actually downstream, and not farther than MAXDIST away
+						# if the element and empty site are oriented differently, the upstreamElementStrand and downstreamElementStrand will have different signs
+						# measure distance according to the orientation of the upstreamElementStrand, since we know for sure this is the true orientation of the element
+						# when measuring distance, don't take into account the size of the HSPs/upstream regions
+						my $distance;
+						if (($upstreamElementStrand eq '+') && ($downstreamElementStrand eq '+')) {
+							$distance = $downstreamElementBegin - $upstreamElementEnd + 1;
+						} elsif (($upstreamElementStrand eq '+') && ($downstreamElementStrand eq '-')) {
+							$distance = $downstreamElementBegin - $upstreamElementEnd + 1;
+						} elsif (($upstreamElementStrand eq '-') && ($downstreamElementStrand eq '-')) {
+							$distance = $upstreamElementBegin - $downstreamElementEnd + 1;
+						} elsif (($upstreamElementStrand eq '-') && ($downstreamElementStrand eq '+')) {
+							$distance = $upstreamElementBegin - $downstreamElementEnd + 1;
+						}
+						
+						# we have a candidate if true!
+						# here, however, you should report the 'element begin' and 'end' as including the HSPS
+						# because these flanking regions will be used to refine the element boundaries
+						# mindist is meant as a sanity check to ignore false positives
+						if ((defined $distance) && ($distance <= $MAXDIST) && ($distance >= $MINDIST)) {
+							my ($elementBegin, $elementEnd);
+							if (($upstreamElementStrand eq '+') && ($downstreamElementStrand eq '+')) {
+								$elementBegin = $upstreamElementBegin;
+								$elementEnd = $downstreamElementEnd;
+							} elsif (($upstreamElementStrand eq '+') && ($downstreamElementStrand eq '-')) {
+								$elementBegin = $upstreamElementBegin;
+								$elementEnd = $downstreamElementEnd;
+							} elsif (($upstreamElementStrand eq '-') && ($downstreamElementStrand eq '-')) {
+								$elementBegin = $downstreamElementBegin;
+								$elementEnd = $upstreamElementEnd;
+							} elsif (($upstreamElementStrand eq '-') && ($downstreamElementStrand eq '+')) {
+								$elementBegin = $downstreamElementBegin;
+								$elementEnd = $upstreamElementEnd;
+							}
+							push @{$candidates{$capID}{$starshipID}{$capContigID}{$emptyContigID}}, $elementBegin, $elementEnd, $upstreamElementStrand, '.', '.';
+						}
+					}
+				}
+			}
+		}
+	}
+	return(\%candidates);	
+}
+
+sub Empty_downstream_search {
+	my ($emptyDownstreams, $assemblies, $SEP, $minPercID, $minHSPlength, $blastnDefaults, $OUTDIR, $PREFIX, $threads) = @_;
+
+	# since this step can take a really long time, save each blastn search to file, and 
+	# re-read file if starting over
+	my ($elementDownstreamHits, %checkpointComparisons);	
+	my $element_downstream_search_checkpointFile = "$OUTDIR/checkpoints/$PREFIX.insert.empty_downstream_search.checkpoint";
+	if (-f $element_downstream_search_checkpointFile) {
+		$elementDownstreamHits = retrieve($element_downstream_search_checkpointFile);
+		
+		# load up all capID - empty contigID comparisons that have already been examined, to avoid re-computing them
+		my %emptyGenomes;
+		foreach my $capID (keys %{$elementDownstreamHits}) {
+			foreach my $regionID (keys %{$elementDownstreamHits->{$capID}}) {
+				foreach my $capContigID (keys %{$elementDownstreamHits->{$capID}->{$regionID}}) {
+					foreach my $emptyContigID (keys %{$elementDownstreamHits->{$capID}->{$regionID}->{$capContigID}}) {
+						$checkpointComparisons{$capID}{$emptyContigID} = 1; # notice we are now storing emptyContigID, not emptyGenome, in case multiple empty contigs from the same genome are targets
+						my ($emptyGenome) = split/$SEP/, $emptyContigID; #should work for both emptyGenome and emptyContigID
+						$emptyGenomes{$emptyGenome} = 1;
+					}
+				}
+			}
+		}
+		
+		my $datestring = localtime();
+		print "[$datestring] $element_downstream_search_checkpointFile exists, reading in ".scalar(keys(%{$elementDownstreamHits}))." previous searches against ".scalar(keys(%emptyGenomes))." target genomes and continuing from checkpoint..\n";
+	}
+	
+	# name files
+	my $elementFile = "$OUTDIR/element.$PREFIX.fa";
+	my $emptyFile = "$OUTDIR/empty.$PREFIX.fa";
+	my $dbPath = "$OUTDIR/elementDB.$PREFIX";
+	my $dbFasta = "$dbPath.fna";
+	
+	# create a blastdb of all candidate element contigs
+	my %alreadyPrinted;
+	my ($dbFastaOUT) = Open_FH($dbFasta);
+	foreach my $capID (keys %{$emptyDownstreams}) {
+		my ($capGenome) = split/$SEP/, $capID;
+		foreach my $starshipID (keys %{$emptyDownstreams->{$capID}}) {
+			foreach my $capContigID (keys %{$emptyDownstreams->{$capID}->{$starshipID}}) {
+				next if (exists $alreadyPrinted{$capContigID});
+				print $dbFastaOUT ">$capContigID\n$assemblies->{$capGenome}->{$capContigID}\n";
+				$alreadyPrinted{$capContigID} = 1;
+			}
+		}
+	}
+	my ($failcheck) = system("makeblastdb -dbtype nucl -parse_seqids -in $dbFasta -out $dbPath 1>/dev/null");
+	my $datestring = localtime();					
+	if ($failcheck != 0) { die "\n\n[$datestring] error: could not execute makeblastdb on commandline, exiting..\n$!\n";}
+
+	foreach my $capID (keys %{$emptyDownstreams}) {
+		my ($capGenome) = split/$SEP/, $capID;
+		foreach my $starshipID (keys %{$emptyDownstreams->{$capID}}) {
+			foreach my $capContigID (keys %{$emptyDownstreams->{$capID}->{$starshipID}}) {
+				
+				# iterate through each emptyContig candidate and print each candidate empty downstream region that will be blasted against this capContig to a multifasta
+				my ($emptyOUT) = Open_FH($emptyFile);
+				my %downstreamStrands;
+				foreach my $emptyContigID (keys %{$emptyDownstreams->{$capID}->{$starshipID}->{$capContigID}}) {
+					my ($emptyGenome) = split/$SEP/, $emptyContigID;
+					next if ($capGenome eq $emptyGenome); # shouldn't happen at this point, but sanity check
+					
+					my ($downstreamBegin, $downstreamEnd, $downstreamStrand, $downstreamTag) = @{$emptyDownstreams->{$capID}->{$starshipID}->{$capContigID}->{$emptyContigID}};
+					
+					# skip search if this empty contig has already been looked at and is stored in checkpoint OR if region not actually located on contigs
+					if ((exists $checkpointComparisons{$capID}{$emptyContigID}) || ($downstreamBegin eq 'NA')) {
+						
+						# mark this search as complete anyways, for checkpointing purposes
+						# notice here we are pushing in NAs, so if this search already has an array of information, these NA will be tacked onto the end of the array and will thus be ignored when retrieving information from the array later on in this subroutine
+						push @{$elementDownstreamHits->{$capID}->{$starshipID}->{$capContigID}->{$emptyContigID}}, 'NA', 'NA', 'NA', 'NA', 'NA';
+						next;
+					}	
+					
+					my $downstreamLength = $downstreamEnd - $downstreamBegin + 1;
+					$downstreamStrands{$emptyContigID} = $downstreamStrand;
+					
+					# print out downstream region of interest on empty contig
+					my $downstreamSeq = substr($assemblies->{$emptyGenome}->{$emptyContigID}, $downstreamBegin - 1, $downstreamLength);
+					print $emptyOUT ">$emptyContigID\n$downstreamSeq\n";
+				}
+				
+				# check that information has actually been printed to file
+				next if (-z $emptyFile);
+
+				# print out the contig containing candidate element to restrict blastn search by
+				my $idFile = "$OUTDIR/element.$PREFIX.ids";
+				my ($idOUT) = Open_FH($idFile);
+				print $idOUT "$capContigID\n"; # capContigID is the only sequence we are searching
+				
+				# this helps prevent an ambiguous error from blastdb_aliastool
+				sleep(1);
+				
+				# create db alias to optimize up search
+				my ($alias_check) = system("blastdb_aliastool -seqid_file_in $idFile -seqid_file_out $idFile.alias");
+				my $datestring = localtime();					
+				if ($alias_check != 0) { 
+					print "[$datestring] error: could not execute blastdb_aliastool for captain $capID empty downstream search on commandline, skipping\n";
+					next;
+				} 
+
+				# execute blast
+				my $blastString = `blastn -query $emptyFile -db $dbPath -seqidlist $idFile.alias -num_threads $threads -outfmt 6 $blastnDefaults -perc_identity $minPercID`;
+				if (not defined $blastString) {
+					print "[$datestring] error: could not execute blastn on the commandline for empty downstream regions against subject genome $capGenome, skipping:\nblastn -query $emptyFile -db $dbPath -seqidlist $idFile.alias -num_threads $threads -outfmt 6 $blastnDefaults -perc_identity $minPercID\n";
+					next;
+				} 
+				# Find best HSP (the longest) per QUERY sequence vs the capContig
+				# coordinates are oriented in 5'-3', and tag is 'upstream'
+				my ($longestHSPs) = Parse_longest_HSP_per_query($blastString, $SEP, \%downstreamStrands, $minHSPlength);
+				system("rm $idFile*");
+				
+				foreach my $emptyContigID (keys %{$emptyDownstreams->{$capID}->{$starshipID}->{$capContigID}}) { # notice we iterate through the original hash here in order to look at every possible emptyContig and store it as searched if necessary
+					if (exists $longestHSPs->{$emptyContigID}) { # now check that at least 1 HSP was found for this empty contig
+						my ($sstart, $ssend, $sstrand) = @{$longestHSPs->{$emptyContigID}->{$capContigID}}; # notice since the only subject is capContigID, we can access its keys directly
+						push @{$elementDownstreamHits->{$capID}->{$starshipID}->{$capContigID}->{$emptyContigID}}, $sstart, $ssend, $sstrand, "emptyDown", '.';
+					} else {
+				
+						# mark this search as complete anyways, for checkpointing purposes
+						push @{$elementDownstreamHits->{$capID}->{$starshipID}->{$capContigID}->{$emptyContigID}}, 'NA', 'NA', 'NA', 'NA', 'NA';
+					}
+				}
+
+				# clean up 
+				system("rm $emptyFile");
+				system("rm $elementFile") if (-f $elementFile);
+			}
+		}
+		# update checkpoint file after every captain search
+		store($elementDownstreamHits, $element_downstream_search_checkpointFile) if (scalar(keys %{$elementDownstreamHits}) > 0);			
+	}
+	
+	# update checkpoint file one last time
+	store($elementDownstreamHits, $element_downstream_search_checkpointFile) if (scalar(keys %{$elementDownstreamHits}) > 0);			
+
+	# make sure no empty searches are returned 
+	my %elementDownstreamHits;
+	foreach my $capID (keys %{$elementDownstreamHits}) {
+		foreach my $regionID (keys %{$elementDownstreamHits->{$capID}}) {
+			foreach my $capContigID (keys %{$elementDownstreamHits->{$capID}->{$regionID}}) {
+				foreach my $emptyContigID (keys %{$elementDownstreamHits->{$capID}->{$regionID}->{$capContigID}}) {
+					my ($check) = @{$elementDownstreamHits->{$capID}->{$regionID}->{$capContigID}->{$emptyContigID}};
+					push @{$elementDownstreamHits{$capID}{$regionID}{$capContigID}{$emptyContigID}}, @{$elementDownstreamHits->{$capID}->{$regionID}->{$capContigID}->{$emptyContigID}} if ($check ne 'NA');
+				}
+			}
+		}
+	}
+	# clean up 
+	system("rm $emptyFile") if (-f $emptyFile);
+	system("rm $elementFile") if (-f $elementFile);
+	system("rm $dbPath*") if (defined $threads);
+	
+	return(\%elementDownstreamHits);
+}
+
+sub Parse_downstream_region_from_empty {
+	# empty downstream regions have the same ID as their associated upstream region
+	
+	my ($emptyUpstreams, $assemblies, $downstreamRange, $SEP) = @_;
+	my %downstreams;
+	my ($minOffset, $maxOffset) = split/-/, $downstreamRange;
+	foreach my $capID (keys %{$emptyUpstreams}) {
+		my ($capGenome) = split/$SEP/, $capID;
+		foreach my $starshipID (keys %{$emptyUpstreams->{$capID}}) {
+			foreach my $capContigID (keys %{$emptyUpstreams->{$capID}->{$starshipID}}) {
+				
+				# since we found the best HSP per genome, there will only ever be one HSP per contig
+				foreach my $emptyContigID (keys %{$emptyUpstreams->{$capID}->{$starshipID}->{$capContigID}}) {
+					my ($emptyGenome) = split/$SEP/, $emptyContigID;
+					my ($downBegin, $downEnd);
+
+					my ($upBegin, $upEnd, $upStrand, $tag) = @{$emptyUpstreams->{$capID}->{$starshipID}->{$capContigID}->{$emptyContigID}};
+					# ensure that downstream coordinates are actually on the contig
+					# orient the downstream coordinates relative to the upstream region's orientation
+					if ($upStrand eq '+') {
+						$downBegin = $upEnd + $minOffset;
+						$downEnd = $upEnd + $maxOffset;
+					} elsif ($upStrand eq '-') {
+						$downBegin = $upBegin - $maxOffset;
+						$downEnd = $upBegin - $minOffset;
+					} 
+
+					# make sure coordinates are actually on the contig
+					# covers all possible conditions, whether cap is + or -
+					my $contigLength = length($assemblies->{$emptyGenome}->{$emptyContigID});
+					$downBegin = 1 if ($downBegin < 0);
+					$downEnd = $contigLength if ($downEnd > $contigLength);
+				
+					# downstream region does not exist if its end is located off of the contig, or if it starts at position 1
+					# downstream region does not exist if its beginning is located off of the contig
+					# downstream region does not exist if it is not at least 2 bp long
+					if (($downEnd < 2) || ($downBegin > $contigLength) || (($downEnd - $downBegin) < 2)) {
+						push @{$downstreams{$capID}{$starshipID}{$capContigID}{$emptyContigID}}, 'NA', 'NA', 'NA', 'emptyDOWN','.';
+					} else { # downstream region is located on contig!	 
+						push @{$downstreams{$capID}{$starshipID}{$capContigID}{$emptyContigID}}, $downBegin, $downEnd, $upStrand, 'emptyDOWN', '.';
+					}
+				}
+			}
+		}
+	}
+	return(\%downstreams);
+}
+
+sub Element_upstream_search {
+	my ($elementUpstreams, $assemblies, $SEP, $minPercID, $minHSPlength, $blastnDefaults, $OUTDIR, $PREFIX, $taxa, $taxaExclude, $ome2assemblyPath, $dbPath, $threads) = @_;
+	
+	# since this step can take a really long time, save each blastn search to file, and 
+	# re-read file if starting over
+	my ($emptyUpstreamHits, %checkpointComparisons);	
+	my $element_upstream_search_checkpointFile = "$OUTDIR/checkpoints/$PREFIX.insert.element_upstream_search.checkpoint";
+	if (-f $element_upstream_search_checkpointFile) {
+		$emptyUpstreamHits = retrieve($element_upstream_search_checkpointFile);
+		
+		# load up all cap genome- empty genome comparisons that have already been examined, to avoid re-computing them
+		my %emptyGenomes;
+		foreach my $capID (keys %{$emptyUpstreamHits}) {
+			foreach my $regionID (keys %{$emptyUpstreamHits->{$capID}}) {
+				foreach my $capContigID (keys %{$emptyUpstreamHits->{$capID}->{$regionID}}) {
+					foreach my $emptyContigID (keys %{$emptyUpstreamHits->{$capID}->{$regionID}->{$capContigID}}) {
+						my ($emptyGenome) = split/$SEP/, $emptyContigID; #should work for both emptyGenome and emptyContigID
+						$checkpointComparisons{$capID}{$emptyGenome} = 1;
+						$emptyGenomes{$emptyGenome} = 1;
+					}
+				}
+			}
+		}
+		
+		my $datestring = localtime();
+		print "[$datestring] $element_upstream_search_checkpointFile exists, reading in ".scalar(keys(%{$emptyUpstreamHits}))." previous searches against ".scalar(keys(%emptyGenomes))." target genomes and continuing from checkpoint..\n";
+	}
+	
+	# print out list of all contigs in all assemblies (this represents the complete set of contigs to search)
+	# the IO on printing large lists can add up, so try to save some time here by anticipating what needs to be searched
+	# retrieve any and all coordinates of regions upstream of candidate captains in the candidate "empty genome" so they can be ignored while searching for best HSP
+	my $completeIdFile = "$OUTDIR/allEmpties.$PREFIX.ids";
+	my ($completeIdOUT) = Open_FH($completeIdFile);
+	foreach my $emptyGenome (keys %{$assemblies}) {
+		foreach my $emptyContigID (keys %{$assemblies->{$emptyGenome}}) {
+			print $completeIdOUT "$emptyContigID\n";
+		}
+	}
+
+	# stores coordinates of upstream all candidate captains so they can be ignored during search
+	my %forbiddenCoords; 
+	foreach my $queCap (keys %{$elementUpstreams}) {
+		foreach my $queStarship (keys %{$elementUpstreams->{$queCap}}) {
+			foreach my $queContigID (keys %{$elementUpstreams->{$queCap}->{$queStarship}}) {
+				my ($forbiddenBegin, $forbiddenEnd) = @{$elementUpstreams->{$queCap}->{$queStarship}->{$queContigID}};
+				next if ($forbiddenBegin eq 'NA');
+				$forbiddenCoords{$queContigID}{"${forbiddenBegin}-${forbiddenEnd}"} = 1;
+			}
+		}
+	}
+
+	foreach my $capID (keys %{$elementUpstreams}) {
+		
+		my ($capGenome) = split/$SEP/, $capID;
+		
+		foreach my $starshipID (keys %{$elementUpstreams->{$capID}}) {
+			
+			foreach my $capContigID (keys %{$elementUpstreams->{$capID}->{$starshipID}}) {
+				my ($upstreamBegin, $upstreamEnd, $capStrand, $capTag) = @{$elementUpstreams->{$capID}->{$starshipID}->{$capContigID}};
+				next if ($upstreamBegin eq 'NA'); # skip regions not actually located on contigs
+
+				if (not defined $upstreamBegin || not defined $upstreamEnd) {
+					# first check that the upstream boundaries exist
+					my $datestring = localtime();
+					print "[$datestring] warning: marking search for $capID incomplete. Can't find upstream coordinates for $capID, but they should exist\n";
+					next;
+				}
+					
+				# iterate through each empty genome to gather genome-specific information:
+				# skip those that have been examined already, restrict by taxonomy file (if provided), store forbidden coordinates, print id alias file
+				my %emptyGenomesToSearch; # stores the final list of empty genomes that will be searched
+				my $partialSearchCheck = 0;
+				foreach my $emptyGenome (keys %{$assemblies}) {
+					
+					# store in emptyUpstreamHit so that it gets saved the next time the checkpoint file is written
+					if ($capGenome eq $emptyGenome) {
+						push @{$emptyUpstreamHits->{$capID}->{$starshipID}->{$capContigID}->{$emptyGenome}}, 'NA', 'NA', 'NA', 'NA', 'NA' if (not exists $emptyUpstreamHits->{$capID}->{$starshipID}->{$capContigID}->{$emptyGenome});
+						next;
+					}
+
+					# if a checkpoint exists for at least 1 empty genome for this captain, skip any genomes that have been searched already and assume that a search has already been completed, so mark this captain to print out list of remaining empty genomes to search
+					# store in emptyUpstreamHit so that it gets saved the next time the checkpoint file is written
+					if (exists $checkpointComparisons{$capID}) {
+						$partialSearchCheck = 1;
+						
+						# skip search if this empty genome has already been looked at and is stored in checkpoint
+						if (exists $checkpointComparisons{$capID}{$emptyGenome}) {
+							push @{$emptyUpstreamHits->{$capID}->{$starshipID}->{$capContigID}->{$emptyGenome}}, 'NA', 'NA', 'NA', 'NA', 'NA' if (not exists $emptyUpstreamHits->{$capID}->{$starshipID}->{$capContigID}->{$emptyGenome});;
+							next;
+						}
+					}
+					
+					# if a taxonomy file was provided, assume that we will not be searching the whole database
+					# restrict searches by taxonomic ID, if a taxonomy file was provided
+					if (defined $taxa) {
+						$partialSearchCheck = 1;
+						if (not exists $taxa->{$capGenome}) {
+							print "no taxonomic ID for $capGenome (check --taxonomy file?), skipping taxonomic filtering..\n";
+						} elsif (not exists $taxa->{$emptyGenome}) {
+							print "no taxonomic ID for $emptyGenome (check --taxonomy file?), skipping taxonomic filtering..\n";
+						} else {
+							next if (($taxaExclude->{$capGenome} eq $taxaExclude->{$emptyGenome}) && ($taxaExclude->{$capGenome} ne '.'));
+							next if ($taxa->{$capGenome} ne $taxa->{$emptyGenome});
+						}
+					}
+										
+					# gather up a list of all empty genomes to search for this captain, given the prior criteria for conducting a search
+					$emptyGenomesToSearch{$emptyGenome} = 1;
+					
+				} 
+				# end of empty genome iteration
+
+				# check if there are any genomes to search for this captain (there may be none, depending on taxonomy file and checkpoints)
+				if (scalar %emptyGenomesToSearch > 0) {
+
+					# print out whole element contig, then restrict search by upstream sequence coordinates
+					my $elementFile = "$OUTDIR/element.$PREFIX.fa";				
+					if (not defined $assemblies->{$capGenome}->{$capContigID}) {
+						my $datestring = localtime();
+						print "[$datestring] warning: can't find sequence for contig $capContigID in genome $capGenome, skipping..\n";
+						next;
+					}
+					my ($elementOUT) = Open_FH($elementFile);
+					print $elementOUT ">$capContigID\n$assemblies->{$capGenome}->{$capContigID}\n";
+			
+					# check if we need to do a partial database search and print out contigIDs to specifically search; otherwise use the complete list of contigIDs that already exists
+					my $idFile;
+					my $partialIdFile = "$OUTDIR/partialEmpties.$PREFIX.ids";
+					my ($partialIdOUT) = Open_FH($partialIdFile);
+					if ($partialSearchCheck == 1) {
+						$idFile = $partialIdFile; # determine which ID file should be used; switch to using partial id file if serach check passes
+						foreach my $emptyGenome (keys %emptyGenomesToSearch) {
+							foreach my $emptyContigID (keys %{$assemblies->{$emptyGenome}}) {
+								print $partialIdOUT "$emptyContigID\n";
+							}
+						}
+					} else {
+						$idFile = $completeIdFile;
+					}
+				
+					# create db alias with all of the IDs of empty contigs that are to be searched to speed up search
+					my ($alias_check) = system("blastdb_aliastool -seqid_file_in $idFile -seqid_file_out $idFile.alias");
+					my $datestring = localtime();					
+					if ($alias_check != 0) { die "\n\n[$datestring] error: could not execute blastdb_aliastool for captain $capID and $idFile on commandline, exiting..\n$!\n";}
+				
+					# execute blast for this captain against all empty genomes to be examined
+					my $blastString = `blastn -query $elementFile -query_loc ${upstreamBegin}-${upstreamEnd} -db $dbPath -seqidlist $idFile.alias -outfmt 6 -num_threads $threads $blastnDefaults -perc_identity $minPercID`;
+					if (not defined $blastString) {
+						print "[$datestring] error: could not execute blastn on the commandline for $capID upstream region, skipping:\nblastn -query $elementFile -query_loc ${upstreamBegin}-${upstreamEnd} -db $dbPath -seqidlist $idFile.alias -outfmt 6 -num_threads $threads $blastnDefaults -perc_identity $minPercID\n";
+						next;
+					}
+
+					# Find best HSP (the longest) per GENOME 
+					# Ignore any coordinates that overlap with upstream region of any other captain sequences across all other genomes
+					# coordinates are oriented in 5'-3', and tag is 'upstream'
+					my ($longestHSPs) = Parse_longest_HSP_per_genome($blastString, $SEP, $capStrand, \%forbiddenCoords, $minHSPlength);
+				
+					# update emptyUpstreamHits hash with all the HSP searches from this captain against these empty genomes
+					if (scalar keys %{$longestHSPs} > 0) {
+						foreach my $emptyContigID (keys %{$longestHSPs}) {
+							my ($sstart, $ssend, $sstrand) = @{$longestHSPs->{$emptyContigID}};
+							push @{$emptyUpstreamHits->{$capID}->{$starshipID}->{$capContigID}->{$emptyContigID}}, $sstart, $ssend, $sstrand, "emptyUP", '.';
+						}
+					} else {
+
+						# mark this search as complete for all empty genomes that were examined, even if no HSPs were found for this captain
+						# notice emptyGenome is being used as a key instead of emptyContigID. This is so that the emptyGenomes are stored in the checkpoints file
+					
+						foreach my $emptyGenome (keys %emptyGenomesToSearch) {
+							push @{$emptyUpstreamHits->{$capID}->{$starshipID}->{$capContigID}->{$emptyGenome}}, 'NA', 'NA', 'NA', 'NA', 'NA';
+						}
+					} 
+					# clean up 
+					system("rm $elementFile");
+					system("rm $partialIdFile*") if (-f $partialIdFile);
+				}
+			}
+
+		}
+
+		# update checkpoint file after every captain search
+		store($emptyUpstreamHits, $element_upstream_search_checkpointFile) if (scalar(keys %{$emptyUpstreamHits}) > 0);
+	}
+	
+	# update checkpoint file one final time
+	store($emptyUpstreamHits, $element_upstream_search_checkpointFile) if (scalar(keys %{$emptyUpstreamHits}) > 0);
+
+	# clean up 
+	system("rm $completeIdFile*");
+	
+	# make sure no empty searches that were used to mark the captain search as complete are returned 
+	my %emptyUpstreamHits;
+	foreach my $capID (keys %{$emptyUpstreamHits}) {
+		foreach my $regionID (keys %{$emptyUpstreamHits->{$capID}}) {
+			foreach my $capContigID (keys %{$emptyUpstreamHits->{$capID}->{$regionID}}) {
+				foreach my $emptyContigID (keys %{$emptyUpstreamHits->{$capID}->{$regionID}->{$capContigID}}) {
+					my ($check) = @{$emptyUpstreamHits->{$capID}->{$regionID}->{$capContigID}->{$emptyContigID}};
+					push @{$emptyUpstreamHits{$capID}{$regionID}{$capContigID}{$emptyContigID}}, @{$emptyUpstreamHits->{$capID}->{$regionID}->{$capContigID}->{$emptyContigID}} if ($check ne 'NA');
+				}
+			}
+		}
+	}
+	return(\%emptyUpstreamHits);
+}
+
+sub Parse_longest_HSP_per_query {
+	my ($blastString, $SEP, $qStrands, $minHSPlength) = @_;
+	my @blastLines = split/\n/, $blastString;
+	my (%longestHSPinfo, %longestHSPlength);
+	
+	# return empty hash if no blast results
+	return(\%longestHSPinfo) if (scalar @blastLines == 0);
+	
+	foreach my $line (@blastLines) {
+		chomp $line;		
+		my ($qseqid, $sseqid, $pident, $hspLength, $mismatch, $gapopen, $qstart, $qend, $sstart, $send, $evalue, $bitscore) = split/\t/, $line;
+
+		next if ($hspLength < $minHSPlength);
+
+# 		# check whether subject coords fall into a forbidden region; if so, skip them
+# 		my $forbiddenFail = 0;
+# 		if (defined $forbiddenCoords && exists $forbiddenCoords->{$sseqid}) {
+# 			($sstart, $send) = ($send, $sstart) if ($send < $sstart); # ensure coordinates are in 5'-3' for comparison
+# 			foreach my $forbiddenRange (keys %{$forbiddenCoords->{$sseqid}}) {
+# 				my ($forbiddenBegin, $forbiddenEnd) = split/-/, $forbiddenRange;
+# 				
+# 				# 4 possible ways coordinates could overlap, captured by these 3 rules (5' overlap, 3' overlap, forbidden inside subject, subject inside forbidden
+# 				if (($sstart >= $forbiddenBegin) && ($sstart <= $forbiddenEnd)) {
+# 					$forbiddenFail = 1;
+# 				} elsif (($send >= $forbiddenBegin) && ($send <= $forbiddenEnd)) {
+# 					$forbiddenFail = 1;
+# 				} elsif (($forbiddenBegin >= $sstart) && ($forbiddenBegin <= $send)) {
+# 					$forbiddenFail = 1;
+# 				}
+# 			}
+# 		}
+# 		next if ($forbiddenFail == 1);
+		
+		# if it passes, initialize length counter for this genome if it doesn't exist
+		my ($sgenome) = split/$SEP/, $sseqid;
+		my ($qgenome) = split/$SEP/, $qseqid;
+		next if ($sgenome eq $qgenome);
+		
+		if (not exists $longestHSPlength{$qseqid}{$sgenome}) {
+			$longestHSPlength{$qseqid}{$sgenome} = 0;
+		}
+		# then check if its the longest
+		if ($hspLength > $longestHSPlength{$qseqid}{$sgenome}) {
+			$longestHSPinfo{$qseqid}{$sgenome} = $line;
+			$longestHSPlength{$qseqid}{$sgenome} = $hspLength;
+		}
+	}
+	
+	my %results;
+	if (scalar keys %longestHSPinfo > 0) {
+		foreach my $qseqid1 (keys %longestHSPinfo) {
+			foreach my $sgenome (keys %{$longestHSPinfo{$qseqid1}}) {
+				my ($qseqid2, $sseqid, $pident, $hspLength, $mismatch, $gapopen, $qstart, $qend, $sstart, $send, $evalue, $bitscore) = split/\t/, $longestHSPinfo{$qseqid1}{$sgenome};
+
+				# define what the reverse strand should look like
+				my $reverseStrand;
+				if ($qStrands->{$qseqid1} eq '+') {
+					$reverseStrand = '-';
+				} elsif ($qStrands->{$qseqid1} eq '-') {
+					$reverseStrand = '+';
+				}
+
+				# figure out orientation of HSP in subject genome
+				# and make sure coordinates are always in the absolute 5'-3' direction
+				# since blast coordinates are never reversed for the query, we need to define the orientation
+				# of the subject sequence based on the orientation of the query, which is itself defined based on the
+				# captain orientation
+				my $sstrand = $qStrands->{$qseqid1};
+				if ($send < $sstart) {
+					($sstart, $send) = ($send, $sstart);
+					$sstrand = $reverseStrand;
+				}
+				push @{$results{$qseqid1}{$sseqid}}, $sstart, $send, $sstrand;
+			}
+		}
+	}
+	return(\%results);
+}
+
+sub Parse_longest_HSP_per_genome {
+	my ($blastString, $SEP, $qStrand, $forbiddenCoords, $minHSPlength) = @_;
+	my @blastLines = split/\n/, $blastString;
+	my (%longestHSPinfo, %longestHSPlength);
+	
+	# return empty hash if no blast results
+	return(\%longestHSPinfo) if (scalar @blastLines == 0);
+	
+	# define what the reverse strand should look like
+	my $reverseStrand;
+	if ($qStrand eq '+') {
+		$reverseStrand = '-';
+	} elsif ($qStrand eq '-') {
+		$reverseStrand = '+';
+	}
+		
+	foreach my $line (@blastLines) {
+		chomp $line;		
+		my ($qseqid, $sseqid, $pident, $hspLength, $mismatch, $gapopen, $qstart, $qend, $sstart, $send, $evalue, $bitscore) = split/\t/, $line;
+		#print "$line\n" if ($qseqid eq 'AnidSP260548_JAAFYL010000042.1');
+		#print "$line\n" if ($qseqid eq 'Proq2_HG792015.1');
+		#print "$line\n" if ($qseqid eq 'Tasp2_CP072830.1');
+
+		next if ($hspLength < $minHSPlength);
+
+		# check whether subject coords fall into a forbidden region; if so, skip them
+		my $forbiddenFail = 0;
+		if (defined $forbiddenCoords && exists $forbiddenCoords->{$sseqid}) {
+			($sstart, $send) = ($send, $sstart) if ($send < $sstart); # ensure coordinates are in 5'-3' for comparison
+			foreach my $forbiddenRange (keys %{$forbiddenCoords->{$sseqid}}) {
+				my ($forbiddenBegin, $forbiddenEnd) = split/-/, $forbiddenRange;
+				
+				# 4 possible ways coordinates could overlap, captured by these 3 rules (5' overlap, 3' overlap, forbidden inside subject, subject inside forbidden
+				if (($sstart >= $forbiddenBegin) && ($sstart <= $forbiddenEnd)) {
+					$forbiddenFail = 1;
+				} elsif (($send >= $forbiddenBegin) && ($send <= $forbiddenEnd)) {
+					$forbiddenFail = 1;
+				} elsif (($forbiddenBegin >= $sstart) && ($forbiddenBegin <= $send)) {
+					$forbiddenFail = 1;
+				}
+			}
+		}
+		next if ($forbiddenFail == 1);
+		
+		# if it passes, initialize length counter for this genome if it doesn't exist
+		my ($sgenome) = split/$SEP/, $sseqid;
+		my ($qgenome) = split/$SEP/, $qseqid;
+		next if ($sgenome eq $qgenome);
+		
+		if (not exists $longestHSPlength{$sgenome}) {
+			$longestHSPlength{$sgenome} = 0;
+		}
+		# then check if its the longest
+		if ($hspLength > $longestHSPlength{$sgenome}) {
+			$longestHSPinfo{$sgenome} = $line;
+			$longestHSPlength{$sgenome} = $hspLength;
+		}
+	}
+	
+	my %results;
+	if (scalar keys %longestHSPinfo > 0) {
+		foreach my $sgenome (keys %longestHSPinfo) {
+			my ($qseqid, $sseqid, $pident, $hspLength, $mismatch, $gapopen, $qstart, $qend, $sstart, $send, $evalue, $bitscore) = split/\t/, $longestHSPinfo{$sgenome};
+	
+			# figure out orientation of HSP in subject genome
+			# and make sure coordinates are always in the absolute 5'-3' direction
+			# since blast coordinates are never reversed for the query, we need to define the orientation
+			# of the subject sequence based on the orientation of the query, which is itself defined based on the
+			# captain orientation
+			my $sstrand = $qStrand;
+			if ($send < $sstart) {
+				($sstart, $send) = ($send, $sstart);
+				$sstrand = $reverseStrand;
+			}
+			push @{$results{$sseqid}}, $sstart, $send, $sstrand;
+		}
+	}
+	return(\%results);
+}
+
+sub Parse_longest_HSP {
+	my ($blastString, $qStrand, $forbiddenCoords, $minHSPlength) = @_;
+	my @blastLines = split/\n/, $blastString;
+	my $longestHSP;
+	my $longestHSPlength = 0;
+	
+	# define what the reverse strand should look like
+	my $reverseStrand;
+	if ($qStrand eq '+') {
+		$reverseStrand = '-';
+	} elsif ($qStrand eq '-') {
+		$reverseStrand = '+';
+	}
+		
+	return('NA') if (scalar @blastLines == 0);
+	
+	foreach my $line (@blastLines) {
+		chomp $line;
+		my ($qseqid, $sseqid, $pident, $hspLength, $mismatch, $gapopen, $qstart, $qend, $sstart, $send, $evalue, $bitscore) = split/\t/, $line;
+		next if ($hspLength < $minHSPlength);
+
+		# check whether subject coords fall into a forbidden region; if so, skip them
+		my $forbiddenFail = 0;
+		if (defined $forbiddenCoords && exists $forbiddenCoords->{$sseqid}) {
+			($sstart, $send) = ($send, $sstart) if ($send < $sstart); # ensure coordinates are in 5'-3' for comparison
+			foreach my $forbiddenRange (keys %{$forbiddenCoords->{$sseqid}}) {
+				my ($forbiddenBegin, $forbiddenEnd) = split/-/, $forbiddenRange;
+				
+				# 4 possible ways coordinates could overlap, captured by these 3 rules (5' overlap, 3' overlap, forbidden inside subject, subject inside forbidden
+				if (($sstart >= $forbiddenBegin) && ($sstart <= $forbiddenEnd)) {
+					$forbiddenFail = 1;
+				} elsif (($send >= $forbiddenBegin) && ($send <= $forbiddenEnd)) {
+					$forbiddenFail = 1;
+				} elsif (($forbiddenBegin >= $sstart) && ($forbiddenBegin <= $send)) {
+					$forbiddenFail = 1;
+				}
+			}
+		}
+		next if ($forbiddenFail == 1);
+		
+		# if it passes, then check if its the longest
+		if ($hspLength > $longestHSPlength) {
+			$longestHSP = $line;
+			$longestHSPlength = $hspLength;
+		}
+	}
+	return('NA') if (not defined $longestHSP);
+
+	my ($qseqid, $sseqid, $pident, $hspLength, $mismatch, $gapopen, $qstart, $qend, $sstart, $send, $evalue, $bitscore) = split/\t/, $longestHSP;
+	
+	# figure out orientation of HSP in subject genome
+	# and make sure coordinates are always in the absolute 5'-3' direction
+	# since blast coordinates are never reversed for the query, we need to define the orientation
+	# of the subject sequence based on the orientation of the query, which is itself defined based on the
+	# captain orientation
+	my $sstrand = $qStrand;
+	if ($send < $sstart) {
+		($sstart, $send) = ($send, $sstart);
+		$sstrand = $reverseStrand;
+	}
+	return($sseqid, $sstart, $send, $sstrand);
+}
+
+sub Opts_check {
+	my ($opts) = @_;
+	usage() if (exists $opts->{'h'});
+	usage("\nError: no arguments provided\n") if (scalar keys %{$opts} == 0);
+	usage("\nError: please provide a file to --assembly\n") if (not defined $opts->{'assembly'});
+	usage("\nError: the file provided to --assembly does not exist\n") if (! -f $opts->{'assembly'});
+	usage("\nError: please provide a file to --bed\n") if (not defined $opts->{'bed'});
+	usage("\nError: the file provided to --bed does not exist\n") if (! -f $opts->{'bed'});
+	usage("\nError: please provide a string to --prefix\n") if (not defined $opts->{'prefix'});
+	usage("\nError: please provide a string to --idtag\n") if (not defined $opts->{'idtag'});
+	usage("\nError: please provide a directory to --outdir\n") if (not defined $opts->{'outdir'});
+	usage("\nError: the directory provided to --outdir does not exist\n") if (! -d $opts->{'outdir'});
+	if (defined $opts->{'taxonomy'}) {
+		usage("\nError: the file provided to --taxonomy does not exist\n") if (! -f $opts->{'taxonomy'});
+	}
+	if (defined $opts->{'database'}) {
+		usage("\nError: the blastn database provided to --database not exist\n") if (! -f "$opts->{'database'}.ndb" && ! -f "$opts->{'database'}.nin" && ! -f "$opts->{'database'}.00.nin");
+		if (not defined $opts->{'threads'}) {
+			$opts->{'threads'} = 2;
+		}
+	} else {
+		usage("\nError: please provide a blastn database path to --database\n") if (not defined $opts->{'database'});
+	}
+
+	if (not defined $opts->{'separator'}) {
+		$opts->{'separator'} = '_';
+	} elsif ($opts->{'separator'} eq ':') {
+		usage("\nError: the separator character cannot be ':'\n");
+	} elsif ($opts->{'separator'} eq ';') {
+		usage("\nError: the separator character cannot be ';'\n");
+	} elsif ($opts->{'separator'} eq '|') {
+		usage("\nError: the separator character cannot be '|'\n");
+	}
+	if (defined $opts->{'separator'}) {
+		$opts->{'separator'} = quotemeta($opts->{'separator'});	# to allow splitting on special characters, like '.'
+	}
+	if (not defined $opts->{'pid'}) {
+		$opts->{'pid'} = '90';
+	}
+	if (not defined $opts->{'upstream'}) {
+		$opts->{'upstream'} = '0-17000';
+	}
+	if (not defined $opts->{'downstream'}) {
+		$opts->{'downstream'} = '0-14000';
+	}
+	if (not defined $opts->{'length'}) {
+		$opts->{'length'} = '2000-700000';
+	}
+	# blastn parameters
+	# dc-megablast Discontiguous megablast used to find more distant (e.g., interspecies) sequences, hopefully will help with larger gaps and highly evolving content
+	if (not defined $opts->{'blastopts'}) {
+		$opts->{'blastopts'} = '-task dc-megablast -evalue 0.0001 -max_target_seqs 1000000';
+	}
+	if (not defined $opts->{'hsp'}) {
+		$opts->{'hsp'} = '1000';
+	}
+	if (not defined $opts->{'nucmeropts'}) {
+		$opts->{'nucmeropts'} = '--mum';
+	}
+	if (not defined $opts->{'deltafilteropts'}) {
+		$opts->{'deltafilteropts'} = "-m -l $opts->{hsp} -i $opts->{pid}";
+	} else {
+		$opts->{'deltafilteropts'} .= " -l $opts->{hsp} -i $opts->{pid}";
+	}
+	if (not defined $opts->{'insertcov'}) {
+		$opts->{'insertcov'} = '0.25';
+	}
+	if (not defined $opts->{'flankcov'}) {
+		$opts->{'flankcov'} = '0.25';
+	}
+}
+

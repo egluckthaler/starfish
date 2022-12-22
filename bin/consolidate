@@ -1,0 +1,325 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use Data::Dumper;
+use File::Basename;
+use Getopt::Long qw(:config auto_abbrev no_ignore_case);
+use FileHandle;
+use Sort::Naturally;
+$|=1;
+# Fishtank lib
+use Fishtank::Utils qw(Gff_gene_hash Fasta_hash_nospace Annotation_hash Open_FH Format_check_fasta Format_check_gff);
+
+sub usage {
+	my $message = shift;
+	my $usage = qq/
+usage: starfish consolidate [args]
+
+combine new and existing gene annotations.
+
+Required:
+-o, --outdir      DIR    output directory.
+
+Required, with defaults:
+-s, --separator   STR    character separating genomeID from featureID.
+                         (default: '_')
+-n, --nameField   STR    GFF3 attribute field where gene features are named.
+                         (default: 'Name=')
+
+At least one pair of old and new files:
+-g, --oldGff      FILE   GFF3 file of existing gene coordinates.
+-G, --newGff      FILE   GFF3 file of new gene coordinates.
+-p, --oldProtein  FILE   FASTA file of existing amino acid sequences.
+                         (matching -g)
+-P, --newProtein  FILE   FASTA file of new amino acid sequences.
+                         (matching -G)
+-a, --oldAnn      FILE   3 column tsv: sequenceID (matching -g), fieldID, ann.
+-A, --newAnn      FILE   3 column tsv: sequenceID (matching -G), fieldID, ann.
+
+Optional:
+--noCheck                skip format checking.
+-h, --help               print more details and exit.
+
+/;
+	if (not defined $message) {
+		$message = $usage;
+	} else {
+		$message = "$message\nuse -h for more details\n\n" ;
+	}	
+	die($message);
+}
+
+main: {
+
+	# parse and check options
+	my %opts;
+	GetOptions(\%opts, 
+		'oldGff|oldgff|g=s',
+		'oldProtein|oldprotein|p=s',
+		'oldAnn|oldann|a=s',
+		'newGff|newgff|G=s',
+		'newProtein|newprotein|P=s',
+		'newAnn|newann|A=s',
+		'separator|s=s',
+		'nameField|namefield|n=s',
+		'outdir|o=s',
+		'force|f',
+		'noCheck|nocheck',
+		'h|help');
+	Opts_check(\%opts);
+
+	my $datestring = localtime();
+
+	######################
+	#### FORMAT CHECK ####
+	######################
+
+	# check sequence IDs in fastas and gffs are correctly labeled
+	if (not defined $opts{'noCheck'}) {
+
+		$datestring = localtime();
+		print "[$datestring] checking formatting..\n";
+
+		Format_check_fasta($opts{'oldProtein'}, $opts{'separator'}) if (defined $opts{'oldProtein'});
+		Format_check_fasta($opts{'newProtein'}, $opts{'separator'}) if (defined $opts{'newProtein'});
+		Format_check_gff($opts{'oldGff'}, $opts{'separator'}, $opts{'nameField'}) if (defined $opts{'oldGff'});
+		Format_check_gff($opts{'newGff'}, $opts{'separator'}, $opts{'nameField'}) if (defined $opts{'newGff'});
+	}
+
+	##############################
+	#### CONSOLIDATE PROTEINS ####
+	##############################
+
+	if (defined $opts{'oldProtein'}) {
+
+		$datestring = localtime();
+		print "[$datestring] consolidating amino acid sequences from $opts{'oldProtein'} and $opts{'newProtein'}..\n";
+
+		my ($oldProts) = Fasta_hash_nospace($opts{'oldProtein'});
+		my ($newProts) = Fasta_hash_nospace($opts{'newProtein'});
+		my ($protFileName) = fileparse($opts{'newProtein'}, (".aa.fa", ".faa", ".fas", ".filtered.fa", ".fa", ".fasta"));
+		my $protOutput = "$opts{'outdir'}/$protFileName.consolidated.faa";
+		Consolidate_proteins($oldProts, $opts{'separator'}, $newProts, $protOutput);
+	}
+	
+	##########################
+	#### CONSOLIDATE GFFS ####
+	##########################
+
+	if (defined $opts{'oldGff'}) {
+
+		$datestring = localtime();
+		print "[$datestring] consolidating GFF gene coordinates from $opts{'oldGff'} and $opts{'newGff'}..\n";
+
+		my ($oldGenes) = Gff_gene_hash($opts{'oldGff'}, $opts{'nameField'});
+		my ($newGenes) = Gff_gene_hash($opts{'newGff'}, $opts{'nameField'});
+		my ($gffFileName) = fileparse($opts{'newGff'}, (".gff", ".gff3"));
+		my $gffOutput = "$opts{'outdir'}/$gffFileName.consolidated.gff";
+		Consolidate_gffs($oldGenes, $opts{'separator'}, $newGenes, $gffOutput);
+	}
+	
+	#################################
+	#### CONSOLIDATE ANNOTATIONS ####
+	#################################
+
+	if (defined $opts{'oldAnn'}) {
+
+		$datestring = localtime();
+		print "[$datestring] consolidating gene annotations from $opts{'oldAnn'} and $opts{'newAnn'}..\n";
+
+		my ($oldAnns) = Annotation_hash($opts{'oldAnn'});
+		my ($newAnns) = Annotation_hash($opts{'newAnn'});
+		my ($annFileName) = fileparse($opts{'newAnn'}, (".txt"));
+		my $annOutput = "$opts{'outdir'}/$annFileName.consolidated.txt";
+		Consolidate_annotations($oldAnns, $opts{'separator'}, $newAnns, $annOutput);
+	}
+
+	$datestring = localtime();
+	print "[$datestring] done\n";
+
+}
+
+sub	Consolidate_annotations {
+	my ($oldAnns, $SEP, $newAnns, $annOutput) = @_;
+	my ($OUT) = Open_FH($annOutput);
+	my %replaced;
+	my $SEPprint = $SEP;
+	$SEPprint =~ s/\\//g;
+
+	# first check for any metaeuk Anns that overlap with MULTIPLE existing Anns
+	foreach my $seqID (keys %{$newAnns}) {
+		my ($genomeID, $mergedFeatureID) = split/$SEP/, $seqID;
+		if ($mergedFeatureID =~ m/:/) { # ':' should only be present if this metaeuk Ann overlaps with MULTIPLE existing Anns, see 'annotate' script
+			my %annotationArrays;
+			foreach my $newAnnField (keys %{$newAnns->{$seqID}}) {
+				push @{$annotationArrays{$newAnnField}}, @{$newAnns->{$seqID}->{$newAnnField}};
+				my (@featureIDs) = split/:/, $mergedFeatureID; # for metaeuk Anns that overlap multiple existing Anns, featureIDs were concatenated with ':', see 'annotate' script
+				foreach my $featureID (@featureIDs) { # existing Anns that overlap with the same metaeuk Ann have identical Ann lines corresponding to the new metaeuk coordinates
+					my $ogSeqID = "${genomeID}${SEPprint}$featureID";
+					$replaced{$ogSeqID} = 1; # store all overlapping existing Anns as observed
+					# add any annotations associated with old genes to the new metaeuk gene that overlaps them
+					if (exists $oldAnns->{$ogSeqID}) {
+						foreach my $oldAnnField (keys %{$oldAnns->{$ogSeqID}}) {
+							push @{$annotationArrays{$oldAnnField}}, @{$oldAnns->{$ogSeqID}->{$oldAnnField}};
+						}					
+					}
+				}
+			}
+			foreach my $annField (nsort keys %annotationArrays) {
+				my $annotationString = join(",", @{$annotationArrays{$annField}});
+				print $OUT "$seqID\t$annField\t$annotationString\n"; # print out new Ann line
+				$replaced{$seqID} = 1; # store the metaeuk Ann as observed
+			}
+		}
+	}
+
+	# then print out all old Anns with and without overlap to at most 1 new Ann
+	foreach my $seqID (keys %{$oldAnns}) {
+		my %annotationArrays;
+		foreach my $oldAnnField (keys %{$oldAnns->{$seqID}}) {
+			push @{$annotationArrays{$oldAnnField}}, @{$oldAnns->{$seqID}->{$oldAnnField}};
+			if (exists $newAnns->{$seqID}->{$oldAnnField} && not exists $replaced{$seqID}) { # by cross-referencing against %replaced, we ensure that any metaeuk Anns that overlap with multiple existing Anns will only have their info printed once
+				$replaced{$seqID} = 1;
+				push @{$annotationArrays{$oldAnnField}}, @{$oldAnns->{$seqID}->{$oldAnnField}}; # add any annotations associated with old genes to the new metaeuk gene that overlaps them
+				my $annotationString = join(",", @{$annotationArrays{$oldAnnField}});
+				print $OUT "$seqID\t$oldAnnField\t$annotationString\n"; # print out new annotation line, if oldAnn is in newAnn
+			} elsif (not exists $replaced{$seqID}) {
+				my $annotationString = join(",", @{$annotationArrays{$oldAnnField}});
+				print $OUT "$seqID\t$oldAnnField\t$annotationString\n"; # print out old annotation line, if this old gene does not overlap with the new gene
+			}
+		}
+	}	
+	
+	# print out all new Anns without overlap
+	foreach my $seqID (keys %{$newAnns}) {
+		if (not exists $replaced{$seqID}) {
+			foreach my $annField (keys %{$newAnns->{$seqID}}) {
+				my $annotationString = join(",", @{$newAnns->{$seqID}->{$annField}});
+				print $OUT "$seqID\t$annField\t$annotationString\n"; # print out new annotation line, if not previously printed
+			}
+		}
+	}	
+}
+
+sub	Consolidate_gffs {
+	my ($oldGenes, $SEP, $newGenes, $gffOutput) = @_;
+	my ($OUT) = Open_FH($gffOutput);
+	my %replaced;
+	my $SEPprint = $SEP;
+	$SEPprint =~ s/\\//g;
+
+	# first check for any metaeuk genes that overlap with MULTIPLE existing genes
+	foreach my $contigID (keys %{$newGenes}) {
+		foreach my $newGene (keys %{$newGenes->{$contigID}}) {
+			my ($genomeID, $mergedFeatureID) = split/$SEP/, $newGene;
+			if ($mergedFeatureID =~ m/:/) { # '.' should only be present if this metaeuk gene overlaps with MULTIPLE existing genes, see 'annotate' script
+				my (@featureIDs) = split/:/, $mergedFeatureID; # for metaeuk genes that overlap multiple existing genes, featureIDs were concatenated with '.', see 'annotate' script
+				foreach my $featureID (@featureIDs) { # existing genes that overlap with the same metaeuk gene have identical gff lines corresponding to the new metaeuk coordinates
+					my $ogSeqID = "${genomeID}${SEPprint}$featureID";
+					$replaced{$ogSeqID} = 1; # store all overlapping existing genes as observed
+				}
+				print $OUT "$newGenes->{$contigID}->{$newGene}\n"; # print out new gff line
+				$replaced{$newGene} = 1; # store the metaeuk gene as observed
+			}
+		}
+	}
+
+	# then print out all old Genes with and without overlap to at most 1 existing gene
+	foreach my $contigID (keys %{$oldGenes}) {
+		foreach my $oldGene (keys %{$oldGenes->{$contigID}}) {
+			if (exists $newGenes->{$contigID}->{$oldGene} && not exists $replaced{$oldGene}) { # by cross-referencing against %replaced, we ensure that any metaeuk genes that overlap with multiple existing genes will only have their info printed once
+				$replaced{$oldGene} = 1;
+				print $OUT "$newGenes->{$contigID}->{$oldGene}\n"; # print out new gff line, if oldGene is in newGene
+			} elsif (not exists $replaced{$oldGene}) {
+				print $OUT "$oldGenes->{$contigID}->{$oldGene}\n"; # print out old gff line, if not
+			}
+		}	
+	}
+	
+	# then print out all new Genes without overlap
+	foreach my $contigID (keys %{$newGenes}) {
+		foreach my $newGene (keys %{$newGenes->{$contigID}}) {
+			if (not exists $replaced{$newGene}) {
+				print $OUT "$newGenes->{$contigID}->{$newGene}\n"; # print out new gff line, if not previously printed
+			}
+		}
+	}
+	
+}
+
+sub Consolidate_proteins {
+	my ($oldProts, $SEP, $newProts, $protOutput) = @_;
+	my ($OUT) = Open_FH($protOutput);
+	my %replaced;
+	my $SEPprint = $SEP;
+	$SEPprint =~ s/\\//g;
+	
+	# first check for any metaeuk genes that overlap with MULTIPLE existing genes
+	foreach my $newProt (keys %{$newProts}) {
+		my ($genomeID, $mergedFeatureID) = split/$SEP/, $newProt;
+		if ($mergedFeatureID =~ m/:/) { # '.' should only be present if this metaeuk Prot overlaps with MULTIPLE existing Prots, see 'annotate' script
+			my (@featureIDs) = split/:/, $mergedFeatureID; # for metaeuk Prots that overlap multiple existing Prots, featureIDs were concatenated with '.', see 'annotate' script
+			foreach my $featureID (@featureIDs) { # existing Prots that overlap with the same metaeuk Prot have identical gff lines corresponding to the new metaeuk coordinates
+				my $ogSeqID = "${genomeID}${SEPprint}$featureID";
+				$replaced{$ogSeqID} = 1; # store all overlapping existing Prots as observed
+			}
+			print $OUT ">$newProt\n$newProts->{$newProt}\n"; # print out new protein sequence
+			$replaced{$newProt} = 1; # store the metaeuk Prot as observed
+		}
+	}
+
+	# then print out all old prots with and without overlap to at most 1 existing gene
+	foreach my $oldProt (keys %{$oldProts}) {
+		if (exists $newProts->{$oldProt} && not exists $replaced{$oldProt}) {
+			$replaced{$oldProt} = 1;
+			print $OUT ">$oldProt\n$newProts->{$oldProt}\n"; # print out new sequence, if oldProt is in newProt
+		} elsif (not exists $replaced{$oldProt}) {
+			print $OUT ">$oldProt\n$oldProts->{$oldProt}\n"; # print out old sequence, if not
+		}
+	}	
+	
+	# print out all new prots without overlap
+	foreach my $newProt (keys %{$newProts}) {
+		if (not exists $replaced{$newProt}) {
+			print $OUT ">$newProt\n$newProts->{$newProt}\n"; # print out new sequence, if not previously printed
+		}
+	}	
+}
+
+sub Opts_check {
+	my ($opts) = @_;
+	usage() if (exists $opts->{'h'});
+	usage("\nError: no arguments provided\n") if (scalar keys %{$opts} == 0);
+	usage("\nError: please provide a directory to --outdir\n") if (not defined $opts->{'outdir'});
+	usage("\nError: the directory provided to --outdir does not exist\n") if (! -d $opts->{'outdir'});
+	if (defined $opts->{'oldProtein'}) {
+		usage("\nError: the file provided to --oldProtein does not exist\n") if (! -f $opts->{'oldProtein'});
+		usage("\nError: please provide a file to --newProtein\n") if (not defined $opts->{'newProtein'});
+		usage("\nError: the file provided to --newProtein does not exist\n") if (! -f $opts->{'newProtein'});
+	}
+	if (defined $opts->{'oldGff'}) {
+		usage("\nError: the file provided to --oldGff does not exist\n") if (! -f $opts->{'oldGff'});
+		usage("\nError: please provide a file to --newGff\n") if (not defined $opts->{'newGff'});
+		usage("\nError: the file provided to --newGff does not exist\n") if (! -f $opts->{'newGff'});
+	}
+	if (defined $opts->{'oldAnn'}) {
+		usage("\nError: the file provided to --oldAnn does not exist\n") if (! -f $opts->{'oldAnn'});
+		usage("\nError: please provide a file to --newAnn\n") if (not defined $opts->{'newAnn'});
+		usage("\nError: the file provided to --newAnn does not exist\n") if (! -f $opts->{'newAnn'});
+	}	
+	if (not defined $opts->{'separator'}) {
+		$opts->{'separator'} = '_';
+	} elsif ($opts->{'separator'} eq ':') {
+		usage("\nError: the separator character cannot be ':'\n");
+	} elsif ($opts->{'separator'} eq ';') {
+		usage("\nError: the separator character cannot be ';'\n");
+	} elsif ($opts->{'separator'} eq '|') {
+		usage("\nError: the separator character cannot be '|'\n");
+	}
+	if (defined $opts->{'separator'}) {
+		$opts->{'separator'} = quotemeta($opts->{'separator'});	# to allow splitting on special characters, like '.'
+	}
+	if (not defined $opts->{'nameField'}) {
+		$opts->{'nameField'} = 'Name=';
+	}
+}

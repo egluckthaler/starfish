@@ -1,0 +1,155 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use Data::Dumper;
+use File::Basename;
+use FileHandle;
+$|=1;
+
+sub usage {
+	my $message = shift;
+	my $usage = qq/
+STARship FInder SHell v1.0: a modular workflow for large mobile element discovery
+
+usage: starfish <command> [args]
+
+Gene finder module:
+   annotate           de novo HMM-validated gene annotation with metaeuk.
+   consolidate        combine new and existing gene annotations.
+   sketch             identify genomic neighborhoods containing genes of interest.
+
+Element finder module:
+   insert             predict element boundaries and insertion sites. 
+   flank              annotate flanking repeats at element boundaries.
+   summarize          pick element boundaries, identify overlaps, and name sites.
+
+Region finder module:
+   dereplicate        situate element, site, and fragmented haplotypes in
+                      genomic regions using flanking orthologs.
+    
+Visualization commands:
+   pair-viz           execute element- element\/site\/region alignments,
+                      with optional circos visualization.
+   locus-viz          execute element\/region alignments with nucmer and
+                      generate synteny schematics with gggenomes.
+   genome-viz         visualize elements and sites in a genome with circos.
+
+Auxiliary commands:
+   sim                calculate k-mer similarity between captains or elements.
+   group              group captains or elements into families based on k-mers.
+   extend             extend downstream element boundary using BLASTn alignments.
+   augment            de novo gene annotation with metaeuk and a profile database.
+   cargo              define element pangenomes and calculate cargo-based
+                      similarities between elements.
+   format             format fasta and gff files (assumes genomeIDs assigned).
+   format-ncbi        format ncbi assemblies and assign genomeIDs.
+   dereplicate-hood   situate neighborhoods in genomic regions using
+                      flanking orthologs.
+
+To learn more about a command, type starfish <command> -h
+
+See \/utils for useful standalone scripts
+
+/;
+	if (not defined $message) {
+		$message = $usage;
+	} else {
+		$message = "$message\nuse -h for more details\n\n" ;
+	}	
+	die($message);
+}
+
+main: {
+
+	# parse and check options
+	my $COMMAND = shift @ARGV;
+	my $ARGS = join(" ", @ARGV);
+	Opts_check($COMMAND);
+	my ($starfishEXE, $starfishDIR) = fileparse($0);
+	my $datestring = localtime();
+	
+	# starfish lib
+	my $starfishLIB = "$starfishDIR/lib/";
+	
+	if ($COMMAND eq 'flank') {
+		usage("\n[$datestring] error: the \'flank\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/flank");
+		print "[$datestring] executing command: $starfishDIR/bin/flank $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/flank $ARGS");
+	} elsif ($COMMAND eq 'extend') {
+		usage("\n[$datestring] error: the \'extend\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/extend");
+		print "[$datestring] executing command: $starfishDIR/bin/extend $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/extend $ARGS");
+	} elsif ($COMMAND eq 'insert') {
+		usage("\n[$datestring] error: the \'insert\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/insert");
+		print "[$datestring] executing command: $starfishDIR/bin/insert $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/insert $ARGS");
+	} elsif ($COMMAND eq 'summarize') {
+		usage("\n[$datestring] error: the \'summarize\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/summarize");
+		print "[$datestring] executing command: $starfishDIR/bin/summarize $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/summarize $ARGS");
+	} elsif ($COMMAND eq 'sim') {
+		usage("\n[$datestring] error: the \'sim\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/sim");
+		print "[$datestring] executing command: $starfishDIR/bin/sim $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/sim $ARGS");
+	} elsif ($COMMAND eq 'group') {
+		usage("\n[$datestring] error: the \'group\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/group");
+		print "[$datestring] executing command: $starfishDIR/bin/group $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/group $ARGS");
+	} elsif ($COMMAND eq 'dereplicate') {
+		usage("\n[$datestring] error: the \'dereplicate\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/dereplicate");
+		print "[$datestring] executing command: $starfishDIR/bin/dereplicate $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/dereplicate $ARGS");
+	} elsif ($COMMAND eq 'cargo') {
+		usage("\n[$datestring] error: the \'cargo\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/cargo");
+		print "[$datestring] executing command: $starfishDIR/bin/cargo $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/cargo $ARGS");
+	} elsif ($COMMAND eq 'pair-viz') {
+		usage("\n[$datestring] error: the \'pair-viz\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/pair-viz");
+		print "[$datestring] executing command: $starfishDIR/bin/pair-viz $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/pair-viz $ARGS");
+	} elsif ($COMMAND eq 'locus-viz') {
+		usage("\n[$datestring] error: the \'locus-viz\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/locus-viz");
+		print "[$datestring] executing command: $starfishDIR/bin/locus-viz $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/locus-viz $ARGS");
+	} elsif ($COMMAND eq 'genome-viz') {
+		usage("\n[$datestring] error: the \'genome-viz\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/genome-viz");
+		print "[$datestring] executing command: $starfishDIR/bin/genome-viz $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/genome-viz $ARGS");
+	} elsif ($COMMAND eq 'format') {
+		usage("\n[$datestring] error: the \'format\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/format");
+		print "[$datestring] executing command: $starfishDIR/bin/format $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/format $ARGS");
+	} elsif ($COMMAND eq 'format-ncbi') {
+		usage("\n[$datestring] error: the \'format-ncbi\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/format-ncbi");
+		print "[$datestring] executing command: $starfishDIR/bin/format-ncbi $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/format-ncbi $ARGS");
+	} elsif ($COMMAND eq 'annotate') {
+		usage("\n[$datestring] error: the \'annotate\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/annotate");
+		print "[$datestring] executing command: $starfishDIR/bin/annotate $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/annotate $ARGS");
+	} elsif ($COMMAND eq 'consolidate') {
+		usage("\n[$datestring] error: the \'consolidate\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/consolidate");
+		print "[$datestring] executing command: $starfishDIR/bin/consolidate $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/consolidate $ARGS");
+	} elsif ($COMMAND eq 'sketch') {
+		usage("\n[$datestring] error: the \'sketch\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/sketch");
+		print "[$datestring] executing command: $starfishDIR/bin/sketch $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/sketch $ARGS");
+	} elsif ($COMMAND eq 'augment') {
+		usage("\n[$datestring] error: the \'augment\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/augment");
+		print "[$datestring] executing command: $starfishDIR/bin/augment $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/augment $ARGS");
+	}  elsif ($COMMAND eq 'dereplicate-hood') {
+		usage("\n[$datestring] error: the \'dereplicate-hood\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/dereplicate-hood");
+		print "[$datestring] executing command: $starfishDIR/bin/dereplicate-hood $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/dereplicate-hood $ARGS");
+	} 
+}
+
+sub Opts_check {
+	my ($COMMAND) = @_;
+	usage() if (not defined $COMMAND);
+	usage() if ($COMMAND =~ m/^help$|^-h$|^--help$/);
+	usage("\nError: please specify a valid command\n") if ($COMMAND !~ m/^sim$|^group$|^dereplicate$|^flank$|^extend$|^summarize$|^insert$|^cargo$|^pair-viz$|^locus-viz$|^genome-viz$|^format$|^format-ncbi$|^annotate$|^consolidate$|^sketch$|^augment$|^dereplicate-hood$/);
+}
+

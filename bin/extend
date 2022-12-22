@@ -1,0 +1,720 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use Data::Dumper;
+use File::Basename;
+use Getopt::Long qw(:config auto_abbrev no_ignore_case);
+use Sort::Naturally;
+use FileHandle;
+use Storable;
+$|=1;
+# Fishtank lib
+use Fishtank::Utils qw(Commandline_check Sort_bed_hash_by_coordinate Parse_upstream_region_from_gene Parse_known_elements Reverse_gene_hash Filter_in_first_key Parse_duf3435_from_regions Fasta_hash_many_files Glofish_bed_hash dim_0_hash Open_FH);
+
+sub usage {
+	my $message = shift;
+	my $usage = qq/
+usage: starfish extend [args]
+
+extend downstream element boundary using BLASTn alignments.
+
+Required:
+-a, --assembly    FILE   2 column tsv with: assembly name, path to assembly FASTA.
+-q, --query       FILE   BED file with feature coordinates of mobile elements.
+                         (output by starfish summarize)
+-t, --target      FILE   BED file with coordinates of candidate captain tyrs.
+                         (output by starfish sketch)
+-i, --idtag       STR    tag used to identify tyrs in --target.
+-g, --group       FILE   MCL-formatted group file with tyr geneIDs.
+-x, --prefix      STR    prefix for naming all output files.
+-o, --outdir      DIR    output directory.
+
+Required, with defaults:
+--hsp             INT    min HSP length for BLASTn alignments.
+                         (default: 5000)
+--pid             INT    min percent identity of HSPs.
+                         (default: 90)
+--gap             INT    max gap between adjacent HSPs before extension terminates.
+                         (in bp; default: 20000)
+--max             INT    max length of extended elements.
+                         (in bp; default: 1000000)
+--min             INT    min length of extended elements.
+                         (in bp; default: 15000)
+--blastopts       STR    options to pass to BLASTn.
+                         (default: '-task dc-megablast -evalue 0.0001
+                         -max_target_seqs 1000000')
+--upstream        INT    bp to begin aligning upstream of tyrs.
+                         (default: 10000)
+
+Optional:
+-h, --help               print more details and exit
+
+/;
+	if (not defined $message) {
+		$message = $usage;
+	} else {
+		$message = "$message\nuse -h for more details\n\n" ;
+	}	
+	die($message);
+}
+
+main: {
+
+	# parse and check options
+	my %opts;
+	GetOptions(\%opts, 
+		'assembly|a=s',
+		'target|t=s',
+		'query|q=s',
+		'idtag|i=s',
+		'prefix|x=s',
+		'outdir|o=s',
+		'gap=i',
+		'group|g=s',
+		'max=i',
+		'min=i',
+		'pid=i',
+		'hsp=i',
+		'blastopts=s',
+		'h|help');
+	Opts_check(\%opts);
+
+	# check dependencies
+	my @commandlines = ("blastn");
+	Commandline_check(\@commandlines);
+
+	print "Key parameters:
+--hsp         $opts{'hsp'}
+--pid         $opts{'pid'}
+--gap         $opts{'gap'}
+--max         $opts{'max'}
+--min         $opts{'min'}
+--blastopts   $opts{'blastopts'}
+--upstream    $opts{'upstream'}\n\n";
+
+	#######################################
+	#### FORMAT CHECK AND READ IN DATA ####
+	#######################################
+
+		my $datestring = localtime();		
+		print "[$datestring] reading in data..\n";
+
+		# Parse info from bedFile
+		# structured: {contigID}{regionID}{geneID} = [begin, end, strand, tag, annotation]
+		my ($targetFeatures) = Glofish_bed_hash($opts{'target'});
+	
+		# Parse the coordinates and direction of the candidate captain DUF3435 gene
+		# and any DUF3435s in regions that contain a feature annotated with 'cap' will also not be returned 
+		# Each region can have up to two candidate captains:
+		#   in the 5'-3' direction, the most upstream DUF3435 sequence that is also on the + strand (if the most upstream DUF3435 is on the - strand, no putative captain is returned)
+		#   in the 3'-5' direction, the most downstream DUF3435 sequence that is also on the - strand (if the most downstream DUF3435 is on the + strand, no putative captain is returned)
+		my ($candidateCaptains) = Parse_duf3435_from_regions($targetFeatures, $opts{'idtag'});
+
+		# Parse the coordinates of any elements with 'cap' DUF3435 genes
+		# elementBegin and elementEnd are the upmost and downmost coordinates associated with this captain
+		# structured: knownElements{contigID}{regionID}{capID} = [elementBegin, elementEnd, strand, tag, ann]
+		my ($queryFeatures) = Glofish_bed_hash($opts{'query'});
+		my ($knownElements) = Parse_known_elements($queryFeatures);
+
+		# Load up all assembly sequences into a single hash
+		# Structured: {contigID} = sequence
+		my ($assemblyPaths) = dim_0_hash($opts{'assembly'}, "\t", "1");
+		my ($assemblies) = Fasta_hash_many_files($assemblyPaths);
+
+		# Filter out contigs that don't have any candidate captain regions or known elements to speed up iterations
+		my %filteredContigs;
+		foreach my $contigID (keys %{$queryFeatures}) {
+			$filteredContigs{$contigID} = 1;
+		}
+		foreach my $contigID (keys %{$targetFeatures}) {
+			$filteredContigs{$contigID} = 1;
+		}
+		($assemblies) = Filter_in_first_key($assemblies, \%filteredContigs);
+		
+		# remove any candidateCaptain from candidateCaptains that is found within the boundaries of a known element
+		($candidateCaptains) = Filter_out_nested_captains($candidateCaptains, $knownElements);
+		
+		# Extract upstream flank of all captain sequences
+		# upstream regions have the same ID as their captain
+		# coordinate will be 'NA' if upstream region is located completely off of contig
+		my ($upstreams) = Parse_upstream_region_from_gene($candidateCaptains, $assemblies, "0-$opts{'upstream'}");
+
+		# Reverse gene hashes for easier parsing based on geneID
+		# structured: upstreams{geneID}{starshipID}{contigID} = [begin, end, strand, up]
+		# Structured: known{captainID}{starshipID}{contigID} = [elementBegin, elementEnd, capStrand, tag, annotation]
+		($candidateCaptains) = Reverse_gene_hash($candidateCaptains);
+		($knownElements) = Reverse_gene_hash($knownElements); # swap the first and last keys for easier parsing
+		($upstreams) = Reverse_gene_hash($upstreams); # swap the first and last keys for easier parsing
+		
+		my ($allDUF3435s) = Combine_gene_hashes($candidateCaptains, $knownElements);
+		
+		# parse all tyrosine recombinase groups
+		my ($tyr2fam) = Parse_group_file_by_member($opts{'group'});
+		
+		# make checkpoint directory for good filekeeping
+		system("mkdir $opts{'outdir'}/checkpoints") if (! -d "$opts{'outdir'}/checkpoints");
+
+		
+	##################################
+	#### KNOWN ELEMENT ALIGNMENTS ####
+	##################################
+
+		my ($longestBoundaries, $capVSknown);
+		if (scalar keys %{$knownElements} > 0) {
+
+			$datestring = localtime();		
+			print "[$datestring] searching for valid comparisons between ".scalar(keys %{$candidateCaptains})." candidate captains and ".scalar(keys %{$knownElements})." known captains..\n";
+			
+			# If any elements with known boundaries are present in .bed, use them as references
+			# and align all other elements to them in order to try and get a longer alignment
+			# but only compare elements whose captains are in the same family
+			# structured: {refGeneID}{KnownGeneID} = knownElementLength
+			my ($capVSknown) = Identify_known_pairs($knownElements, $candidateCaptains, $tyr2fam);
+
+			# add the boundaries of known elements to the upstream hash
+			my ($boundaryMods) = Combine_gene_hashes($knownElements, $upstreams);
+
+			$datestring = localtime();		
+			print "[$datestring] extending boundaries of ".scalar(keys %{$capVSknown})." candidate captains with valid comparisons through downstream alignments..\n";
+			my ($knownBoundaries) = Extend_regions_by_HSP($capVSknown, $allDUF3435s, $boundaryMods, $assemblies, $opts{'gap'}, $opts{'pid'}, $opts{'hsp'}, $opts{'blastopts'}, $opts{'max'}, $opts{'min'}, $opts{'outdir'}, $opts{'prefix'}, "known");
+
+			# structured: @{$longestBoundary{$refGeneID}}, $downstreamBegin, $downstreamEnd, $refStrand, $queElementID
+			($longestBoundaries) = Find_longest_boundaries($knownBoundaries) if (defined $knownBoundaries && scalar keys %{$knownBoundaries} > 0);
+			
+			$datestring = localtime();		
+			print "[$datestring] found ".scalar(keys %{$longestBoundaries})." candidate elements with alignments to at least 1 other known element\n";
+
+			# print out all known element alignment coordinates to a file for manual review
+			my $knownStatsOutfile = "$opts{'outdir'}/$opts{'prefix'}.extend.stats";
+			Print_stats($candidateCaptains, $knownElements, $longestBoundaries, $capVSknown, $knownStatsOutfile);
+			
+		} else {
+			$datestring = localtime();		
+			print "[$datestring] no elements with known boundaries found in $opts{'bed'}, so cannot attempt known element alignments\n";
+		}
+
+	###################################
+	#### IDENTIFY CAPTAINS & PRINT ####
+	###################################
+
+	if (scalar keys %{$longestBoundaries} > 0) { # were any new boundaries found?
+		# Identify a single candidate captain for each starship region based on downstream length
+		# the logic here is that the candidate with the longest downstream length is most likely
+		# the actual captain
+		# structured:  $capBoundaries{$refGeneID}, $downstreamBegin, $downstreamEnd, $refStrand, $queGeneID
+		my ($capBoundaries) = Identify_candidate_captains($targetFeatures, $longestBoundaries);
+
+		# Identify and print the end coordinate of longest downstream region as the downstream boundary
+		# Print some summary statistics based on this script's specific findings
+		# Integrate candidate starship boundaries (begining is captain sequence, end is longest extended downstream region) into the provided bed file
+		my $bedOutfile = "$opts{'outdir'}/$opts{'prefix'}.extend.bed";
+		Print_bed($targetFeatures, $capBoundaries, $knownElements, $bedOutfile);
+
+		$datestring = localtime();		
+		print "[$datestring] found extended boundaries for ".scalar(keys(%{$capBoundaries}))." candidate captains out of ".scalar(keys(%{$longestBoundaries}))." input candidate captains\n";
+	} else {
+		$datestring = localtime();		
+		print "[$datestring] no boundaries found for any of the candidate DUF3435 captains in $opts{'bed'}, so no results to print\n";
+	}
+
+	$datestring = localtime();		
+	print "[$datestring] done\n";
+
+}
+
+sub Print_stats {
+	my ($captains, $knownElements, $boundaries, $capVSknown, $outfile) = @_;
+	my ($OUT) = Open_FH($outfile, "#elementContigID\telementID\telementCaptainID\telementBegin\telementEnd\telementLength\telementStrand\treferenceElementID\treferenceElementLength\n");
+	
+	foreach my $featureID (nsort keys %{$captains}) {
+		next if (exists $knownElements->{$featureID}); # ignore printing out stats for known elements, since their bounds were not extended
+		foreach my $refStarshipID (keys %{$captains->{$featureID}}) { # all captains will be associated with at most 1 starship region
+			foreach my $refContigID (keys %{$captains->{$featureID}->{$refStarshipID}}) { # all captains will be associated with at most 1 contig
+				if (exists $boundaries->{$featureID}) { # was this captain assigned a boundary?
+					my ($downstreamBegin, $downstreamEnd, $refStrand, $idtag, $queGeneID) = @{$boundaries->{$featureID}};
+					my $downstreamLength = $downstreamEnd - $downstreamBegin + 1;
+					foreach my $queStarshipID (keys %{$knownElements->{$queGeneID}}) { # all captains will be associated with at most 1 starship region
+						my $queStarshipLength = $capVSknown->{$featureID}->{$queGeneID};
+						$queStarshipLength = '.' if (not defined $queStarshipLength);
+						print $OUT "$refContigID\t$refStarshipID\t$featureID\t$downstreamBegin\t$downstreamEnd\t$downstreamLength\t$refStrand\t$queStarshipID\t$queStarshipLength\n";
+					}
+				} 
+			}
+		}
+	}
+}
+
+sub Print_bed {
+	my ($starships, $boundaries, $knownElements, $outfile) = @_;
+	my ($OUT) = Open_FH($outfile);
+	
+	# add longest downstream coordinates to the coordinate sorted bed hash
+	my ($regions) = Sort_bed_hash_by_coordinate($starships);
+	foreach my $contigID (keys %{$regions}) {
+		foreach my $regionID (keys %{$regions->{$contigID}}) {
+			foreach my $position (keys %{$regions->{$contigID}->{$regionID}}) {
+				foreach my $featureID (keys %{$regions->{$contigID}->{$regionID}->{$position}}) {
+					if (exists $boundaries->{$featureID}) { # if this is a captain sequence, add its boundaries to regions hash
+						my ($downstreamBegin, $downstreamEnd, $refStrand, $idtag, $queGeneID) = @{$boundaries->{$featureID}};
+						my $queElementID;
+						foreach my $queStarshipID (keys %{$knownElements->{$queGeneID}}) { # all captains will be associated with at most 1 starship region
+							$queElementID = $queStarshipID;
+						}
+						my $upFeatureID = "${featureID}|$queElementID|up";
+						my $downFeatureID = "${featureID}|$queElementID|down";
+						if ($refStrand eq '+') {
+							push @{$regions->{$contigID}->{$regionID}->{$downstreamEnd}->{$downFeatureID}}, $downstreamEnd, $downstreamEnd, $refStrand, $idtag, ".";
+							push @{$regions->{$contigID}->{$regionID}->{$downstreamBegin}->{$upFeatureID}}, $downstreamBegin, $downstreamBegin, $refStrand, $idtag, ".";
+						} elsif ($refStrand eq '-') {
+							push @{$regions->{$contigID}->{$regionID}->{$downstreamBegin}->{$downFeatureID}}, $downstreamBegin, $downstreamBegin, $refStrand, $idtag, ".";
+							push @{$regions->{$contigID}->{$regionID}->{$downstreamEnd}->{$upFeatureID}}, $downstreamEnd, $downstreamEnd, $refStrand, $idtag, ".";
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	# then print, after sorting by coordinate position
+	foreach my $contigID (nsort keys %{$regions}) {
+		foreach my $regionID (nsort keys %{$regions->{$contigID}}) {
+			foreach my $position (sort {$a <=> $b} keys %{$regions->{$contigID}->{$regionID}}) {
+				foreach my $featureID (nsort keys %{$regions->{$contigID}->{$regionID}->{$position}}) {
+					my ($begin, $end, $strand, $idtag, $annotation) = @{$regions->{$contigID}->{$regionID}->{$position}->{$featureID}};
+					$idtag = 'cap' if (exists $boundaries->{$featureID}); # if this is a captain sequence, change the idtag
+					print $OUT "$contigID\t$begin\t$end\t$featureID\t$idtag\t$strand\t$regionID\t$annotation\n";
+				}
+			}
+		}
+	}
+}
+
+sub Find_longest_boundaries {
+	my ($boundaries) = @_;
+	my %longest;
+	foreach my $geneID (keys %{$boundaries}) {
+		
+		# only look at the longest length
+		foreach my $length (sort {$b <=> $a} keys %{$boundaries->{$geneID}}) {
+			next if ($length == 0);
+			push @{$longest{$geneID}}, @{$boundaries->{$geneID}->{$length}};
+			last;
+		}
+	}
+	return(\%longest);
+}
+
+sub Identify_candidate_captains {
+	my ($starships, $boundaries) = @_;
+	my %captains;
+	foreach my $contigID (keys %{$starships}) {
+		foreach my $regionID (keys %{$starships->{$contigID}}) {
+			
+			# find the captain sequence with the longest boundaries
+			my $longestCapSeq;
+			my $longestDownstreamLength = 0;
+			foreach my $featureID (keys %{$starships->{$contigID}->{$regionID}}) {
+				if (exists $boundaries->{$featureID}) { # if this is a candidate captain sequence
+					my ($boundaryBegin, $boundaryEnd) = @{$boundaries->{$featureID}};
+					my $downstreamLength = $boundaryEnd - $boundaryBegin + 1;
+					if ($downstreamLength > $longestDownstreamLength) {
+						$longestCapSeq = $featureID;  #identify the longest captain
+						$longestDownstreamLength = $downstreamLength; #update with the currently longest observed downstream seq
+					}
+				}
+			}
+			if (defined $longestCapSeq && exists $boundaries->{$longestCapSeq}) { # if this is a candidate captain sequence with a boundary
+				push @{$captains{$longestCapSeq}}, @{$boundaries->{$longestCapSeq}};
+			}
+		}
+	}
+	return(\%captains);
+}
+
+
+sub Identify_known_pairs {
+	# Structured: {captainID}{starshipID}{contigID} = [elementBegin, elementEnd, capStrand, tag, annotation]
+	my ($knownElements, $captains, $tyr2fam) = @_;
+
+	my %pairs;
+	foreach my $refCaptain (keys %{$captains}) {
+		next if (exists $knownElements->{$refCaptain}); # ignore captains whose boundaries we already know
+		foreach my $knownCaptain (keys %{$knownElements}) {
+			next if ($refCaptain eq $knownCaptain);
+			if ((exists $tyr2fam->{$refCaptain}) && (exists $tyr2fam->{$knownCaptain}) && ($tyr2fam->{$knownCaptain} eq $tyr2fam->{$refCaptain})) {
+				my $knownElementLength;
+				foreach my $elementID (keys %{$knownElements->{$knownCaptain}}) {
+					foreach my $contigID (keys %{$knownElements->{$knownCaptain}->{$elementID}}) {
+						my ($elementBegin, $elementEnd) = @{$knownElements->{$knownCaptain}->{$elementID}->{$contigID}};
+						$knownElementLength = $elementEnd - $elementBegin + 1;
+					}
+				}
+				$pairs{$refCaptain}{$knownCaptain} = $knownElementLength;
+			}
+		}
+	}
+	return(\%pairs);	
+}
+
+sub Combine_gene_hashes {
+	# input: {geneID}{regionID}{contigID} = [elementBegin, elementEnd, capStrand, tag, annotation]
+	my ($genehash1, $genehash2) = @_;
+	my %updatedBoundaries;
+	
+	foreach my $geneID (keys %{$genehash1}) {
+		foreach my $regionID (keys %{$genehash1->{$geneID}}) {
+			foreach my $contigID (keys %{$genehash1->{$geneID}->{$regionID}}) {
+				push @{$updatedBoundaries{$geneID}{$regionID}{$contigID}}, @{$genehash1->{$geneID}->{$regionID}->{$contigID}};
+			}
+		}
+	}
+
+	foreach my $geneID (keys %{$genehash2}) {
+		foreach my $regionID (keys %{$genehash2->{$geneID}}) {
+			foreach my $contigID (keys %{$genehash2->{$geneID}->{$regionID}}) {
+				push @{$updatedBoundaries{$geneID}{$regionID}{$contigID}}, @{$genehash2->{$geneID}->{$regionID}->{$contigID}};
+			}
+		}
+	}
+	
+	return(\%updatedBoundaries);	
+}
+
+sub Extract_downstream_sequence {
+	my ($geneBegin, $geneEnd, $geneStrand, $contigSeq, $maxSeqLength) = @_;
+	
+	# grab --max sequence downstream of gene (sign depends on gene strand), including gene
+	# make sure region end is still on the contig
+	my $contigLength = length($contigSeq);
+	my ($seqBegin, $seqEnd);
+	if ($geneStrand eq '+') {
+		$seqBegin = $geneBegin;
+		$seqEnd = $geneBegin + $maxSeqLength;
+		$seqEnd = $contigLength if ($seqEnd > $contigLength);
+	} elsif ($geneStrand eq '-') {
+		$seqEnd = $geneEnd;
+		$seqBegin = $geneEnd - $maxSeqLength;
+		$seqBegin = 1 if ($seqBegin < 1);
+	}
+	my $geneSeq = substr($contigSeq, $seqBegin - 1, $seqEnd - $seqBegin + 1);
+	return($geneSeq, $seqBegin, $seqEnd);
+}
+
+sub Parse_hsps_by_ref {
+	my ($blastString, $minHSPlength) = @_;
+	my %hsps;
+	my @blastLines = split/\n/, $blastString;
+	my $hspCount = 0;
+	foreach my $line (@blastLines) {
+		chomp $line;
+		my ($qseqid, $sseqid, $pident, $hspLength, $mismatch, $gapopen, $qstart, $qend, $sstart, $send, $evalue, $bitscore) = split/\t/, $line;
+		next if ($hspLength < $minHSPlength);
+		$hspCount++;
+		
+		# make sure coordinates are always in the 5'-3' direction
+		($qstart, $qend) = ($qend, $qstart) if ($qend < $qstart);
+		
+		$hsps{$qstart}{$hspCount} = "${qstart}-${qend}";
+	}
+	return(\%hsps);
+}
+
+sub Extend_downstream_by_hsp {
+	my ($allHsps, $geneStrand, $MERGEDIST) = @_;
+	
+	# first, rearrange allHSPs so that HSPs are coded by begin position if geneStrand = + or by end position if geneStrand = -
+	my %sortedAllHSPs;
+	if ($geneStrand eq '+') {
+		foreach my $beginPos (keys %{$allHsps}) {
+			foreach my $hspID (keys %{$allHsps->{$beginPos}}) {
+				$sortedAllHSPs{$beginPos}{$hspID} =  $allHsps->{$beginPos}->{$hspID};
+			}
+		}
+	} elsif ($geneStrand eq '-') {
+		foreach my $beginPos (keys %{$allHsps}) {
+			foreach my $hspID (keys %{$allHsps->{$beginPos}}) {
+				my ($hspBegin, $hspEnd) = split/-/, $allHsps->{$beginPos}->{$hspID};
+				$sortedAllHSPs{$hspEnd}{$hspID} = $allHsps->{$beginPos}->{$hspID};			
+			}
+		}
+	}
+	
+	
+	# then return array of sorted hsps, sorted by begin position if geneStrand = + or by end position if geneStrand = -
+	my @queryCoords;
+	if ($geneStrand eq '+') {
+		foreach my $sortPos (sort {$a <=> $b} keys %sortedAllHSPs) {
+			foreach my $hspID (keys %{$sortedAllHSPs{$sortPos}}) {
+				push @queryCoords, $sortedAllHSPs{$sortPos}{$hspID}; # hsps in array will be in order in which they appear on the contig, according to begin position
+			}
+		}
+	} elsif ($geneStrand eq '-') {
+		foreach my $sortPos (sort {$b <=> $a} keys %sortedAllHSPs) { # reverse sort
+			foreach my $hspID (keys %{$sortedAllHSPs{$sortPos}}) {
+				push @queryCoords, $sortedAllHSPs{$sortPos}{$hspID}; # hsps in array will be in reverse order in which they appear on the contig, according to end position
+			}
+		}
+	}
+		
+	# extend downstream neighborhood if a gap between hsps smaller than MERGEDIST is encountered; stop once a gap larger than MERGEDIST is encountered to save on computation
+	my ($downstreamBegin, $downstreamEnd) = ('NA','NA');
+	if (scalar @queryCoords > 0) { #ensure hsps exist, otherwise, return NA
+		my $current_queryInfo = shift @queryCoords;
+		my ($currentBegin, $currentEnd) = split("-", $current_queryInfo);
+		
+		($downstreamBegin, $downstreamEnd) = ($currentBegin, $currentEnd); # downstreamBegin and downstream end will always be based on first encountered HSP
+		
+		# iterate through the rest of the hsps, if any exist
+		# order of iteration depends on geneStrand
+		while (scalar @queryCoords > 0) {
+			my $next_queryInfo = shift @queryCoords;
+			my ($nextBegin, $nextEnd) = split("-", $next_queryInfo);
+			my ($interDistBegin, $interDistEnd);
+			if ($geneStrand eq '+') { # update downstreamEnd if +
+				$interDistBegin = $nextBegin - $downstreamEnd - 1;
+				$interDistEnd = $nextEnd - $downstreamEnd - 1;
+				if (($interDistBegin <= $MERGEDIST) && ($interDistBegin > 0)) { # interdist may be 0 if an HSP is completely enveloped by another, this ensure that this does not update the boundary
+					$downstreamEnd = $nextEnd;
+				} elsif (($interDistEnd <= $MERGEDIST) && ($interDistEnd > 0)) { # in the case of a partially overlapping HSP, where the nextBegin < downstreamEnd, but nextEnd > downstreamEnd
+					$downstreamEnd = $nextEnd;
+				}
+				last if ($interDistBegin > $MERGEDIST);
+			} elsif ($geneStrand eq '-') { # update downstreamBegin if -
+				$interDistEnd = $downstreamBegin - $nextEnd - 1;
+				$interDistBegin = $downstreamBegin - $nextBegin - 1;
+				if (($interDistEnd <= $MERGEDIST) && ($interDistEnd > 0)) {  # interdist may be 0 if an HSP is completely enveloped by another, this ensure that this does not update the boundary
+					$downstreamBegin = $nextBegin;
+				} elsif (($interDistBegin <= $MERGEDIST) && ($interDistBegin > 0)) {  # in the case of a partially overlapping HSP, where the nextBegin < downstreamBegin, but nextEnd > downstreamBegin
+					$downstreamBegin = $nextBegin;
+				}
+				last if ($interDistEnd > $MERGEDIST);
+			} 
+		}
+	}
+	return($downstreamBegin, $downstreamEnd);
+}
+
+sub Extend_regions_by_HSP {
+	my ($refQuePairs, $startingPoints, $boundaryMods, $assemblies, $gapDist, $minPID, $minHSP, $blastopts, $maxStarshipLength, $minStarshipLength, $OUTDIR, $PREFIX, $checkTag) = @_;
+	# ref is the candidate captain; que is the known captain/other captain against which candidate is being compared, depending on what hash goes into refQuePairs
+	# refQuePairs is used to filter comparisons of interest from startingPoints and boundaryMods and provides the amount of sequence to extract from the query sequence
+	# startingPoints is used to get initial search position
+	# boundaryMods is used to modify search position based on some coordinate of interest (either upstream, or a known element)
+
+	# since this step can take a really long time, save each blastn search to file, and 
+	# re-read file if starting over
+	my $boundaries;	
+	my $align_regions_checkpointFile = "$OUTDIR/checkpoints/$PREFIX.extend-blast.${checkTag}_extend_regions_by_HSP.checkpoint";
+	if (-f $align_regions_checkpointFile) {
+		$boundaries = retrieve($align_regions_checkpointFile);
+		my $datestring = localtime();
+		print "[$datestring] $align_regions_checkpointFile exists, reading in ".scalar(keys(%{$boundaries}))." previous searches and continuing from checkpoint..\n";
+	}
+
+	foreach my $refGeneID (keys %{$refQuePairs}) {
+		
+		# check if this captain's search is stored in checkpoint
+		next if ((defined $boundaries) && (exists $boundaries->{$refGeneID}));
+		
+		# a little cumbersome to retrieve the ref coordinates, but no matter
+		# if captain upstream coordinates are available, use those instead in order 
+		# to include both the upstream and captain sequences in the blastn search
+		my ($refBegin, $refEnd, $refStrand, $refTag, $refContig);
+		foreach my $refRegionID (keys %{$startingPoints->{$refGeneID}}) {
+			foreach my $refContigID (keys %{$startingPoints->{$refGeneID}->{$refRegionID}}) {
+				$refContig = $assemblies->{$refContigID};
+				($refBegin, $refEnd, $refStrand, $refTag) = @{$startingPoints->{$refGeneID}->{$refRegionID}->{$refContigID}};
+				my ($upBegin, $upEnd, $upStrand, $upTag) = @{$boundaryMods->{$refGeneID}->{$refRegionID}->{$refContigID}};
+				
+				# modify refBegin or refEnd, depending on strand, to include the upstream sequence in blastn coordinates
+				# if an upstream region is defined, then coordinates will start from there. Otherwise, coordinates will start from whats in the captains hash
+				if ($upBegin ne 'NA') {
+					if ($refStrand eq '+') {
+						$refBegin = $upBegin;
+					} elsif ($refStrand eq '-') {
+						$refEnd = $upEnd;
+					}
+				}
+			}
+		}
+				
+		# name files
+		my $refFile = "$OUTDIR/blastRef.$PREFIX.fa";
+		my $queFile = "$OUTDIR/blastQue.$PREFIX.fa";
+
+		# print entire ref contig sequence and restrict blast search to downstream coordinates
+		my ($refOUT) = Open_FH($refFile);
+		my ($refSeq, $refSeqBegin, $refSeqEnd) = Extract_downstream_sequence($refBegin, $refEnd, $refStrand, $refContig, $maxStarshipLength);
+		print $refOUT ">$refGeneID\n$refContig\n";
+
+		foreach my $queGeneID (keys %{$refQuePairs->{$refGeneID}}) {
+			
+			#next unless ($queGeneID eq 'mp247_02876');
+			
+			# a little cumbersome to retrieve query coordinates, but no matter
+			my ($queBegin, $queEnd, $queStrand, $queTag, $queContig, $queStarship);
+			foreach my $queRegionID (keys %{$startingPoints->{$queGeneID}}) {
+				foreach my $queContigID (keys %{$startingPoints->{$queGeneID}->{$queRegionID}}) {
+					$queContig = $assemblies->{$queContigID};
+					$queStarship = $queRegionID;
+					($queBegin, $queEnd, $queStrand, $queTag) = @{$startingPoints->{$queGeneID}->{$queRegionID}->{$queContigID}};
+					my ($upBegin, $upEnd, $upStrand, $upTag) = @{$boundaryMods->{$queGeneID}->{$queRegionID}->{$queContigID}};
+					
+					# modify queBegin or queEnd, depending on strand, to include the upstream sequence in blastn coordinates
+					if ($upBegin ne 'NA') {
+						if ($queStrand eq '+') {
+							$queBegin = $upBegin;
+						} elsif ($queStrand eq '-') {
+							$queEnd = $upEnd;
+						}
+					}
+				}
+			}
+			
+			# skip any starships located on the same contig to avoid aligning nested elements to the element they are nested in (ie., themselves)
+			next if ($queContig eq $refContig);
+
+			# print entire que contig sequence and restrict blast search to downstream coordinates
+			my ($queOUT) = Open_FH($queFile);
+			my ($queSeq, $queSeqBegin, $queSeqEnd) = Extract_downstream_sequence($queBegin, $queEnd, $queStrand, $queContig, $refQuePairs->{$refGeneID}->{$queGeneID}); # notice here that the length of query sequence we are extracting depends on the maximum allowed based on the pairs hash
+			print $queOUT ">$queGeneID\n$queContig\n";
+			
+			# execute blast
+			# notice that refGene (not known or candidate) is the 'query', in blast parlance
+			my $blastString = `blastn -query $refFile -query_loc ${refSeqBegin}-${refSeqEnd} -subject $queFile -subject_loc ${queSeqBegin}-${queSeqEnd} -outfmt 6 $blastopts -perc_identity $minPID`;
+			usage("Error: could not execute blastn on the commandline for reference $refGeneID and query $queGeneID\nblastn -query $refFile -query_loc ${refSeqBegin}-${refSeqEnd} -subject $queFile -subject_loc ${queSeqBegin}-${queSeqEnd} -outfmt 6 $blastopts -perc_identity $minPID\n") if (not defined $blastString);
+			
+			# trouble shooting
+			# print "-query_loc ${refSeqBegin}-${refSeqEnd} -subject $queFile -subject_loc ${queSeqBegin}-${queSeqEnd}\n$blastString";
+			
+			# recover HSPs based on refGene (query) coordinates
+			# structured: $hsps{$qstart}{$hspCount} = "${qstart}-${qend}";
+			my ($hsps) = Parse_hsps_by_ref($blastString, $minHSP);
+			
+			# extend downstream from the most upstream HSP, HSP by HSP, until an HSP greater than $gapDist (--gap) away is encountered
+			my ($downstreamBegin, $downstreamEnd) = Extend_downstream_by_hsp($hsps, $refStrand, $gapDist);
+
+			next if ($downstreamBegin eq 'NA'); # will happen if no hsps are found
+			
+			# Sanity check: make sure that the candidate element boundary begins upstream of the captain sequence (useful for potentially filtering out spurious extend boundaries)
+			if ($refStrand eq '+') {
+				if ($refEnd < $downstreamBegin) {
+					next;
+				}
+			} elsif ($refStrand eq '-') {
+				if ($downstreamEnd < $refBegin) {
+					next;
+				}
+			}
+
+			# store all downstream coordinates for each candidate ref captain (which now should include small region upstream of captain as well, if they aligned)
+			my $downstreamLength = $downstreamEnd - $downstreamBegin + 1;
+			
+			# ignore any alignments larger than the maximum expected size of starships
+			# we also don't care if multiple alignments against different known queries produce the same length alignment
+			if (($downstreamLength <= $maxStarshipLength) && ($downstreamLength >= $minStarshipLength)) {
+				push @{$boundaries->{$refGeneID}->{$downstreamLength}}, $downstreamBegin, $downstreamEnd, $refStrand, 'extend', $queGeneID;
+			}
+			system("rm $queFile");
+		}
+		
+		# update checkpoint file after every ref captain search to avoid repeating it, regardless if anything was found or not
+		push @{$boundaries->{$refGeneID}->{'0'}}, 'NA', 'NA', 'NA', 'NA', 'NA' if (scalar(keys %{$boundaries}) == 0);
+		store($boundaries, $align_regions_checkpointFile);
+
+		system("rm $refFile");
+		system("rm $queFile") if (-f $queFile);
+	}
+	return($boundaries);	
+}
+
+# remove any candidateCaptain from candidateCaptains that is nested within a known element
+sub Filter_out_nested_captains {
+	my ($candidateCaptains, $knownElements) = @_;
+
+	my (%filteredCaptains);
+	foreach my $contigID (keys %{$candidateCaptains}) {
+		foreach my $regionID (keys %{$candidateCaptains->{$contigID}}) {
+			foreach my $candidateCapID (keys %{$candidateCaptains->{$contigID}->{$regionID}}) {
+				my ($capBegin, $capEnd) = @{$candidateCaptains->{$contigID}->{$regionID}->{$candidateCapID}};
+				my $nestedCheck = 0;
+				
+				# if no other known element is on this contig, then the candidate is not nested in a known element
+				if (exists $knownElements->{$contigID}) {
+					foreach my $elementID (keys %{$knownElements->{$contigID}}) {
+						foreach my $elementCapID (keys %{$knownElements->{$contigID}->{$elementID}}) {
+							my ($elementBegin, $elementEnd) = @{$knownElements->{$contigID}->{$elementID}->{$elementCapID}};
+
+							# check for complete nestedness
+							if (($capBegin >= $elementBegin) && ($capBegin <= $elementEnd) && ($capEnd >= $elementBegin) && ($capEnd <= $elementEnd)) {
+								$nestedCheck = 1;
+							} 
+						}
+					}
+				} 
+				# only load into new hash if the check passes
+				push @{$filteredCaptains{$contigID}{$regionID}{$candidateCapID}}, @{$candidateCaptains->{$contigID}->{$regionID}->{$candidateCapID}} if ($nestedCheck == 0);
+			}
+		}
+	}		
+	return(\%filteredCaptains);	
+}
+
+sub Parse_group_file_by_member {
+	my ($clusteringOutfile) = @_;
+	my $datestring = localtime();					
+	my %member2group;
+	open (my $IN, '<', $clusteringOutfile) or usage("\n\n[$datestring] error: cannot read $clusteringOutfile, exiting\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		my (@members) = split/\s+/, $line;
+		my $group = shift @members;
+		$group =~ s/:$//;
+		
+		foreach my $member (@members) {
+			$member2group{$member} = $group;
+		}
+	}
+	return(\%member2group);	
+}
+
+sub Opts_check {
+	my ($opts) = @_;
+	usage() if (exists $opts->{'h'});
+	usage("\nError: no arguments provided\n") if (scalar keys %{$opts} == 0);
+	usage("\nError: please provide a file to --assembly\n") if (not defined $opts->{'assembly'});
+	usage("\nError: the file provided to --assembly does not exist\n") if (! -f $opts->{'assembly'});
+	usage("\nError: please provide a file to --group\n") if (not defined $opts->{'group'});
+	usage("\nError: the file provided to --group does not exist\n") if (! -f $opts->{'group'});
+	usage("\nError: please provide a file to --query\n") if (not defined $opts->{'query'});
+	usage("\nError: the file provided to --query does not exist\n") if (! -f $opts->{'query'});
+	usage("\nError: please provide a file to --target\n") if (not defined $opts->{'target'});
+	usage("\nError: the file provided to --target does not exist\n") if (! -f $opts->{'target'});
+	usage("\nError: please provide a string to --prefix\n") if (not defined $opts->{'prefix'});
+	usage("\nError: please provide a string to --idtag\n") if (not defined $opts->{'idtag'});
+	usage("\nError: please provide a directory to --outdir\n") if (not defined $opts->{'outdir'});
+	usage("\nError: the directory provided to --outdir does not exist\n") if (! -d $opts->{'outdir'});
+	if (not defined $opts->{'upstream'}) {
+		$opts->{'upstream'} = '10000';
+	}
+	if (not defined $opts->{'gap'}) {
+		$opts->{'gap'} = '20000';
+	}
+	if (not defined $opts->{'hsp'}) {
+		$opts->{'hsp'} = '5000';
+	}
+	if (not defined $opts->{'pid'}) {
+		$opts->{'pid'} = '90';
+	}
+	if (not defined $opts->{'max'}) {
+		$opts->{'max'} = '1000000';
+	}
+	if (not defined $opts->{'min'}) {
+		$opts->{'min'} = '15000';
+	}
+	# blastn parameters
+	# dc-megablast Discontiguous megablast used to find more distant (e.g., interspecies) sequences, hopefully will help with larger gaps and highly evolving content
+	if (not defined $opts->{'blastopts'}) {
+		$opts->{'blastopts'} = '-task dc-megablast -evalue 0.0001 -max_target_seqs 1000000';
+	}
+}

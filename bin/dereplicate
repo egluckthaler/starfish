@@ -1,0 +1,2481 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use Data::Dumper;
+use File::Basename;
+use Getopt::Long qw(:config auto_abbrev no_ignore_case);
+use Sort::Naturally;
+use Storable;
+use FileHandle;
+use POSIX;
+$|=1;
+# Fishtank lib
+use Fishtank::Utils qw(Gff_sortable_gene_hash Filter_out_first_key Filter_in_first_key Filter_out_value Fasta_hash_many_files dim_1_hash dim_0_hash Open_FH);
+
+sub usage {
+	my $message = shift;
+	my $usage = qq/
+usage: starfish dereplicate [args]
+
+situate element, site, and frag haplotypes in genomic regions using flanking orthologs.
+
+Required:
+-e, --element       FILE   MCL-formatted group file with element IDs.
+                           (e.g., output by starfish group)
+-t, --tagged        FILE   BED or GFF3 file of genes commonly found in elements
+                           but not currently associated with any elements.
+                           (e.g., non-captain tyrs)
+-F, --feat          FILE   elements.feat file.
+                           (output by starfish summarize)
+-S, --stats         FILE   named.stats file.
+                           (output by starfish summarize)
+-O, --orthologs     FILE   MCL-formatted group file of all genes in all genomes.
+-g, --gff           FILE   2 column tsv: genome code, path to gene GFF.
+-x, --prefix        STR    prefix for naming all output files.
+-o, --outdir        DIR    output directory.
+
+Required, with defaults:
+-s, --separator     STR    character separating genomeID from featureID.
+                           (default: '_')
+-n, --nameField     STR    GFF3 attribute field where gene features are named.
+                           (default: 'Name=')
+-f, --flanking      INT    number of flanking OGs up- and downstream of
+                           neighborhoods for determining region homology.
+                           (default: 6)
+-M, --mismatching   INT    max number of OG mismatches when grouping into regions.
+                           (default: 1)
+-d, --distance      INT    max length of up- and downstream sequence to search for
+                           flanking OGs.
+                           (in bp; default: 600000)
+--emptyconstant     FLT    multiplier controlling max length of empty haplotypes
+                           at a region with respect to ref element.
+                           (default: 2.0)
+--fragconstant      FLT    multiplier controlling max length of fragmented
+                           haplotypes at a region with respect to ref element.
+                           (default: 2.0)
+--minrepeat         INT    min length of repeats to parse from --repeats.
+                           (default: 250)
+--mergecount        FLT    min fraction of haplotypes that must overlap between
+                           2 regions to merge them.
+                           (default: 0.5)
+--mergelength       FLT    min fraction of bp overlap between two haplotypes to
+                           consider them overlapping.
+                           (default: 0.25)
+
+Optional:
+--repeats           FILE   2 column tsv: genome code, path to repeat GFF.
+                           (repeats will be ignored when comparing flanks)
+--maxfrag                  consider any empty haplotype with at least 
+                           1 element-associated OG as fragmented.
+--restrict                 do not use element-associated OGs for determining
+                           region homology.
+-h, --help                 print more details and exit.
+
+/;
+	if (not defined $message) {
+		$message = $usage;
+	} else {
+		$message = "$message\nuse -h for more details\n\n" ;
+	}	
+	die($message);
+}
+
+main: {
+
+	# parse and check options
+	my %opts;
+	GetOptions(\%opts, 
+		'feat|F=s',
+		'assembly|a=s',
+		'stats|S=s',
+		'prefix|x=s',
+		'outdir|o=s',
+		'element|e=s',
+		'tagged|t=s',
+		'gff|g=s',
+		'nameField|namefield|n=s',
+		'separator|s=s',
+		'orthologs|O=s',
+		'flanking|f=i',
+		'distance|d=i',
+		'mismatching|M=i',
+        'fragconstant=s',
+        'emptyconstant=s',
+        'minrepeat=i',
+        'mergecount=s',
+        'mergelength=s',
+		'repeats|r=s',
+		'reverse',
+		'maxfrag',
+		'restrict',
+		'h|help');
+	Opts_check(\%opts);
+
+	#######################################
+	#### FORMAT CHECK AND READ IN DATA ####
+	#######################################
+
+		my $datestring = localtime();
+		print "\n[$datestring] reading in data..\n";
+
+		# read in relevant info for insert and flank element metadata
+		# structured: $element2feat{$starshipID}}, $start-stop, $contigID, $boundaryType
+		# structured: $captainIDs{$tyrID} = 1
+		# structured: $contig2element{$contigID}{$starshipID} = $range;
+		my ($element2feat, $contig2element, $captainIDs) = Parse_element_features($opts{'feat'});
+		
+		# read in relevant info for site metadata
+		# structured: $site2feat{$siteID}}, $start-stop, $contigID
+		# structured: $element2site{$elementID}{$siteID} = ref/alt
+		my ($site2feat, $element2site) = Parse_site_features($opts{'stats'});
+
+		# read in element families
+		# structured: elementID = groupID
+		my ($element2group) = Parse_group_file_by_member($opts{'element'});
+		
+		# parse all non-insert, non-flank captain tyrs and also all tagged genes to be used to filter candidate empty sites into fragged sites, potentially
+		# structured: @{$featureID} = $range, $contigID
+		my ($tyr2feat, $tag2feat);
+		if ($opts{'tagged'} =~ m/.bed$/) {
+			($tyr2feat, $tag2feat) = Parse_tagged_genes_from_bed($opts{'tagged'}, $captainIDs);
+		} elsif ($opts{'tagged'} =~ m/.gff[3]*$/) {
+			($tyr2feat, $tag2feat) = Parse_tagged_genes_from_gff($opts{'tagged'}, $opts{'nameField'}); # currently no way to identify tyr genes if a gff is provided
+		} else {
+			$datestring = localtime();
+			usage("\n[$datestring] error: could not guess file type for $opts{tagged}: it should end in either .bed, .gff or .gff3\n");
+		}
+		
+		# read in each gene's OG
+		my ($gene2og) = Parse_group_file_by_member($opts{'orthologs'});
+		
+		# read in each OG's genes, and count the number of genomes its present in
+		# structured: og2gene{og} = \@genes;
+		# structured: og2signal{og} = # of genomes with OG;
+		my ($og2gene, $og2signal) = Parse_group_file_by_og($opts{'orthologs'}, $opts{'separator'});
+
+		# parse all gff info by contigID and by geneID
+		# structured: {contig}{begin}{seqID} = seqID\tline
+		my ($ome2gff) = dim_1_hash($opts{'gff'}, "\t", "0:1");
+		
+		# if --restrict request, filter out any starship associated OG from og2gene and og2signal
+		if (defined $opts{'restrict'}) {
+
+			print "[$datestring] --restrict requested, so removing all OGs found in elements from --orthologs..\n";
+
+			# need a temporary contig2gene/starship2gene to be able to parse genes inside of starships with --restrict, a little annoying
+			my %starship2gene;
+			foreach my $ome (keys %{$ome2gff}) {
+				my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'});
+				foreach my $contig (keys %{$gffInfo}) {
+					if (exists $contig2element->{$contig}) { # we only care about starship-associated contigs for now
+						foreach my $pos (keys %{$gffInfo->{$contig}}) {
+							foreach my $seqID (nsort keys %{$gffInfo->{$contig}->{$pos}}) {
+								$starship2gene{$contig}{$pos}{$seqID} = $gffInfo->{$contig}->{$pos}->{$seqID};
+							}
+						}
+					}
+				}
+			}
+			my ($starshipOGs) = Parse_internal_OGs($element2feat, \%starship2gene, $gene2og);
+			($og2gene) = Filter_out_first_key($og2gene, $starshipOGs);
+			($og2signal) = Filter_out_first_key($og2signal, $starshipOGs);
+		}
+		
+		# mark all coordinates in starships as restricted coordinates
+		# will ensure that all elements nested within each other end up in the same region
+		# kind of a weird structure, since to speed up evaluation we don't we dont really care about the coordinate span (see repeats below)
+		my ($restrictedCoords) = Restrict_starship_coords($element2feat);
+		
+		# parse repeat file, if provided, and add coordinates to the restrictedCoords
+		# structured: {contigID}{coordinate} = 1, where coordinate is every single position where exists a repeat
+		if (defined $opts{'repeats'}) {
+			my ($ome2repeatGFF) = dim_1_hash($opts{'repeats'}, "\t", "0:1");
+			($restrictedCoords) = Parse_repeat_GFF($ome2repeatGFF, $restrictedCoords, $opts{'minrepeat'});
+		}
+		
+		# some hacks to increase speed: MAXSIGNAL will be used to determine if nearest flanking regions are saturated with OGs with the highest possible signal
+		my ($MAXSIGNAL) = Parse_max_ogsignal($og2signal);
+		
+		# parse all genes in gff and ignore any gene that overlaps with a restricted coordinate, or that doesn't have an OG with signal
+		my (%contig2gene, %gene2pos);
+		foreach my $ome (keys %{$ome2gff}) {
+			my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'});
+			foreach my $contig (keys %{$gffInfo}) {
+				foreach my $pos (keys %{$gffInfo->{$contig}}) {
+					foreach my $seqID (keys %{$gffInfo->{$contig}->{$pos}}) {
+						
+						next if (not exists $gene2og->{$seqID});
+						next if (not exists $og2signal->{$gene2og->{$seqID}});
+						
+						my ($null1, $null2, $null3, $null4, $featBegin, $featEnd) = split/\t/, $gffInfo->{$contig}->{$pos}->{$seqID};
+						my $featMid = $featBegin + int(($featEnd - $featBegin) / 2);
+						
+						# this is where we skip features whose beginning, middle or end overlap with a restricted coordinate
+						if (defined $restrictedCoords) {
+							next if (exists $restrictedCoords->{$contig}->{$featBegin} || exists $restrictedCoords->{$contig}->{$featEnd} || exists $restrictedCoords->{$contig}->{$featMid});
+						}
+						$contig2gene{$contig}{$pos}{$seqID} = $gffInfo->{$contig}->{$pos}->{$seqID};
+						push @{$gene2pos{$seqID}}, $contig, $featBegin, $featEnd;
+					}
+				}
+			}
+		}
+
+	##############################
+	#### PARSE ELEMENT FLANKS ####
+	##############################
+
+		$datestring = localtime();
+		print "[$datestring] parsing $opts{'flanking'} flanking OGs within $opts{distance}bp of the up and downstream boundaries of ".scalar(keys %{$element2feat})." elements..\n";
+		print "[$datestring] --reverse requested, so parsing flanking OGs from the ends of the up and downstream regions instead of starting from the element boundaries..\n" if (defined $opts{'reverse'});
+		
+		# parse the FLANKING nearest OGs to each element, within a max of DISTANCE between each OG and the element boundaries
+		# only elements with at least (2*flanking) - mismatching OGs will be returned
+		# structured: {elementID} = \@OGs, \@unsortedCoords
+		my ($element2og, $focalOGs) = Parse_flanking_OGs($element2feat, \%contig2gene, $gene2og, $og2signal, $opts{'flanking'}, $opts{'distance'}, $opts{'mismatching'}, $opts{'reverse'}, $MAXSIGNAL);
+
+		$datestring = localtime();
+		my $failedFlankCount =  scalar(keys %{$element2feat}) - scalar(keys %{$element2og});
+		print "[$datestring] failed to retrieve the flanking haplotypes of $failedFlankCount elements with fewer than ". ($opts{'flanking'} - $opts{'mismatching'}) ." OGs on at least one flank\n";
+
+		# compare the OGs flanking each element
+		# structured: {regionGroupID} = \@elementIDs
+		$datestring = localtime();
+		print "[$datestring] grouping the flanks of the remaining ".scalar(keys %{$element2og})." elements into homologous region groups, allowing for a maximum of $opts{mismatching} OG mismatches..\n";
+		my ($region2elementTemp) = Group_homologous_flanking_regions_by_ogs($element2og, $opts{'mismatching'});
+		
+		# do one more pass of the --mismatching based grouping algorithm, because based on the sequential grouping method, some elements in groups may still show similarity to each other
+		my ($region2element, $multiMemberGroupCount) = Consolidate_regions_by_ogs($region2elementTemp, $element2og, $element2feat, $opts{'mismatching'});
+		my $singletonMemberGroupCount = scalar(keys %{$region2element}) - $multiMemberGroupCount;
+		
+		$datestring = localtime();
+		print "[$datestring] grouped element flanks into ".scalar(keys %{$region2element})." homologous region groups, where $multiMemberGroupCount region groups have >1 element and $singletonMemberGroupCount have 1\n";
+
+	########################################
+	#### PARSE EMPTY HOMOLOGOUS REGIONS ####
+	########################################
+	
+		$datestring = localtime();
+		print "[$datestring] searching for haplotypes missing element insertions but with homology to region groups..\n";
+		
+		# determine the minimum number of flanking OGs for empty regions
+		# because we parse these regions as a consecutive string, the max flank and min flank will be 2x the user-submitted specification
+		my $minFlankingOGsEmpty = (2* $opts{'flanking'}) - (2 * $opts{'mismatching'});
+		my $maxFlankingOGsEmpty = (2* $opts{'flanking'});
+		my $doubleFlankingDistance = 2 * $opts{'distance'};
+		
+		# for each gene that has an OG in the element flanks, find the up and downstream string of OGs with the highest signal within 2x $opts{'distance'} (max 2x --flanking for contiguous empty sites)
+		# structured: {gene}{up/down} = \@OGs, \@coords, $contigID
+		my ($gene2neighboringOGsFull) = Parse_neighboring_OG_strings($gene2og, \%contig2gene, $focalOGs, $og2signal, $doubleFlankingDistance, $minFlankingOGsEmpty, $maxFlankingOGsEmpty, $opts{'reverse'}, $MAXSIGNAL);
+
+		# search for each homologous region's consensus OG pattern in each genome NOT present in the homologous region group already
+		# but ignore any empty haplotypes that overlap with an existing element to ensure that regions with elements are only ever present as element haplotypes
+		# also, as a sanity check: make sure the empty region never exceeds $opts{emptyconstant} * element flanking region length, this helps filter out false positive empty regions that are entirely homologous to the 'element'
+		# structured: {regionID}{contigID} = \@OGs, \@unsortedCoords
+		my ($region2emptyTemp, $emptyHaplotypeCount) = Group_homologous_empty_regions_by_ogs($og2gene, $element2og, $region2element, $element2feat, $contig2element, $gene2neighboringOGsFull, $opts{'separator'}, $minFlankingOGsEmpty, $opts{'emptyconstant'});
+		
+		# check if any candidate empty sites actually contain genes that are usually associated with starships, but not currently associated with any elements
+		# structured: @{$featureID} = $range, $contigID
+		# to be comprehensive (in case not all starship-associated genes were included in --tagged), also check if any sites contain genes in OGs found in Starships
+		# once again, this filter may prove to be too conservative, resulting in almost no empty regions detected. make it optional with --maxfrag
+		if (defined $opts{'maxfrag'}) {
+			$datestring = localtime();
+			print "[$datestring] --maxfrag requested, so parsing all OGs found in elements and adding them to --tagged..\n";
+			my ($restrictedOGs) = Parse_internal_OGs($element2feat, \%contig2gene, $gene2og);
+			($tag2feat) = Add_restricted_OGs_to_tagged($tag2feat, $restrictedOGs, $og2gene, \%gene2pos);
+		}
+		my ($regionsWithTags, $taggedTagCount, $taggedHaplotypeCount) = Cross_reference_tagged_genes($region2emptyTemp, $tag2feat);
+		
+		# remove all regions with tagged genes from region2empty, and update the empty region count
+		# structured: {regionID}{contigID} = \@OGs, \@unsortedCoords
+		my ($region2empty, $region2taggedFrags) = Parse_tagged_regions_from_empty($region2emptyTemp, $regionsWithTags);
+				
+		$emptyHaplotypeCount = $emptyHaplotypeCount - $taggedHaplotypeCount;
+			
+		$datestring = localtime();
+		print "[$datestring] found $emptyHaplotypeCount empty haplotypes distributed across ".scalar(keys(%{$region2empty}))." homologous region groups..\n";
+		
+	#############################################
+	#### PARSE FRAGMENTED HOMOLOGOUS REGIONS ####
+	#############################################
+	
+		$datestring = localtime();
+		print "[$datestring] searching for fragmented haplotypes missing element insertions and empty sites but with homology to known region groups..\n";
+		
+		# for each gene that has an OG in the element flanks, find the up and downstream OG string (max --flanking)
+		# structured: {gene}{up/down} = \@OGs, \@coords, $contigID
+		# since we are combining the scores of upstream and downstream OG strings rather than evaluating contiguous OG strings, we shouldn't evaluate the 2x --flanking neighboring set of OGs, just the closest --flanking of them
+		my ($gene2neighboringOGsHalf) = Parse_neighboring_OG_strings($gene2og, \%contig2gene, $focalOGs, $og2signal, $opts{'distance'}, $opts{'flanking'} - $opts{'mismatching'}, $opts{'flanking'}, $opts{'reverse'}, $MAXSIGNAL);
+
+		# search for each homologous region's consensus OG pattern in each genome NOT present in the homologous region group already
+		# but ignore any empty haplotypes that overlap with an existing element to ensure that regions with elements are only ever present as element haplotypes
+		# we use minFlankingOGsEmpty as the minimum threshold for flanking OGs because each fragmented flank is combined into a single string, kinda like how the OG string for empty sites was previously evaluated
+		# will also merge info from $region2taggedFrags with region2fragmented, and this will be reflected in the count
+		# structured: {regionID}{contigID} = \@OGs, \@unsortedCoords
+		my ($region2fragmented, $fragHaplotypeCount) = Group_homologous_fragmented_regions_by_ogs(\%gene2pos, $og2gene, $element2og, $element2feat, $contig2element, $region2element, $region2empty, $region2taggedFrags, $gene2neighboringOGsHalf, $opts{'separator'}, $minFlankingOGsEmpty, $opts{'fragconstant'});
+		
+		$datestring = localtime();
+		print "[$datestring] found $fragHaplotypeCount fragmented haplotypes across ".scalar(keys(%{$region2fragmented}))." homologous region groups..\n";
+
+	###################################################
+	#### MERGE REGIONS WITH OVERLAPPING HAPLOTYPES ####
+	###################################################
+	
+		$datestring = localtime();
+		print "[$datestring] merging regions where >=".($opts{'mergecount'} * 100)."% of empty or frag haplotypes overlap by >=".($opts{'mergelength'} * 100)."% of their length..\n";
+
+		($region2element, $region2empty, $region2fragmented, $singletonMemberGroupCount, $multiMemberGroupCount, $emptyHaplotypeCount, $fragHaplotypeCount) = Merge_regions_by_haplotype($region2element, $region2empty, $region2fragmented, $opts{'mergecount'}, $opts{'mergelength'});
+
+		# reorganize region hashes so that regions are named in increasing order based first on how many total haplotypes, then based on how many element haplotypes
+		# needs to be rewritten
+		($region2element, $region2empty, $region2fragmented) = Rename_regions_by_groupsize($region2element, $region2empty, $region2fragmented);
+
+		$datestring = localtime();
+		my $emptyHaploRegionCount = scalar(keys(%{$region2empty}));
+		my $fragHaploRegionCount = scalar(keys(%{$region2fragmented}));
+		print "[$datestring] after merging: grouped element flanks into ".scalar(keys %{$region2element})." homologous region groups, where $multiMemberGroupCount region groups have >1 element and $singletonMemberGroupCount have 1\n";
+		print "[$datestring] after merging: found $emptyHaplotypeCount empty haplotypes distributed across $emptyHaploRegionCount homologous region groups..\n";
+		print "[$datestring] after merging: found $fragHaplotypeCount fragmented haplotypes across $fragHaploRegionCount homologous region groups..\n";
+
+
+	########################
+	#### VALIDATE SITES ####
+	########################
+		
+		# validate the insertion sites: make sure that regions that contain both an empty insertion site AND a starship element are also validated, should happen based on how hashes are iterated through
+		# structured: {regionID}{siteID} = siteContigID
+		$datestring = localtime();
+		print "[$datestring] cross-referencing the coordinates of ".scalar(keys %{$site2feat})." element insertion sites with empty and fragmented haplotypes..\n";
+		
+		my ($region2validatedSites, $validatedSiteCount) = Validate_insertion_sites($element2site, $region2element, $region2empty, $region2fragmented, $site2feat, $element2feat);
+		
+		$datestring = localtime();
+		print "[$datestring] validated $validatedSiteCount insertion sites found inside empty and fragmented haplotypes\n";
+
+	#######################
+	#### VALIDATE TYRS ####
+	#######################
+		
+		# validate the location: make sure that regions that contain both an empty insertion site AND a starship element are also validated, should happen based on how hashes are iterated through
+		# structured: {regionID}{tyrID} = contigID
+		$datestring = localtime();
+		print "[$datestring] cross-referencing the coordinates of ".scalar(keys %{$tyr2feat})." tyrs not associated with elements with the coordinates of fragmented haplotypes..\n";
+		
+		my ($region2validatedTyr, $validatedTyrCount) = Cross_reference_tagged_genes($region2fragmented, $tyr2feat);
+		
+		$datestring = localtime();
+		print "[$datestring] found $validatedTyrCount tyrs inside fragmented haplotypes\n";
+
+	#####################
+	#### DEREPLICATE ####
+	#####################
+
+		$datestring = localtime();
+		print "[$datestring] choosing one representative element per element family at each of the ".scalar(keys %{$region2element})." homologous region groups..\n";
+		
+		# do some minor reorganization
+		# structured: {regionID}{elementGroupID}{elementID} = 1;
+		my ($region2elementGroup) = Parse_element_groups_in_regions($region2element, $element2group);
+		
+		# for each region, pick one representative element per element family
+		# representatives with validated insertion sites will be prioritized
+		# structured: $dereplicatedElements{$regionID}{$elementGroupID}{$refElementID} = $refSiteID/ 1 if no refSiteID
+		# if multiple sites are associated with a ref, it will pick the ref site
+		my ($dereplicatedElements, $dereplicatedValidatedCount) = Dereplicate_elements_in_regions($region2elementGroup, $element2feat, $element2site, $region2validatedSites);
+
+	#######################
+	#### PRINT RESULTS ####
+	#######################
+		
+		# modify prefix, if --reverse and/or --maxfrag were specified
+		my $PREFIX = $opts{'prefix'};
+		$PREFIX = "$PREFIX.maxfrag" if (defined $opts{'maxfrag'});
+		$PREFIX = "$PREFIX.rev" if (defined $opts{'reverse'});
+		$PREFIX = "$PREFIX.restrict" if (defined $opts{'restrict'});
+		
+		# print results per region of all elements and empties
+		# return a haplotype2og hash structured: {regionID}{elementID/emptyID/fragID}{OGid} = 1 (sorry to have to do this, but its the simplest way to get this info
+		my $regionOutfile = "$opts{'outdir'}/$PREFIX.fog$opts{'flanking'}.d$opts{'distance'}.m$opts{'mismatching'}.regions.txt";
+		my ($haplotype2OGs) = Print_region_results($region2elementGroup, $element2og, $element2feat, $region2empty, $region2fragmented, $region2validatedTyr, $site2feat, $region2validatedSites, $opts{'separator'}, $regionOutfile);
+
+		# print human readable dereplicated results for elements
+		my $dereplicatedOutfile = "$opts{'outdir'}/$PREFIX.fog$opts{'flanking'}.d$opts{'distance'}.m$opts{'mismatching'}.dereplicated.txt";
+		Print_dereplicated_results($region2elementGroup, $dereplicatedElements, $dereplicatedOutfile);
+		
+		# print a genotyping summary report, including minimum number of mismatches observed within each region, across all elements, frags and empties
+		# will also print out some summary stats of element and empty count to STDOUT
+		$datestring = localtime();
+		print "[$datestring] found ".scalar(keys %{$dereplicatedValidatedCount})." regions with at least 1 cross-referenced element-insertion site pair\n";
+
+		# outsourced the printing of this function to utils/summarizeDereplicate.pl
+		my $summaryOutfile = "$opts{'outdir'}/$PREFIX.fog$opts{'flanking'}.d$opts{'distance'}.m$opts{'mismatching'}.summary.txt";
+		my ($singletonEmptyCount, $multiEmptyCount, $singletonCount, $multiCount) = Print_summary_report($region2elementGroup, $element2og, $region2empty, $region2fragmented, $region2validatedSites, $dereplicatedValidatedCount, $opts{'separator'}, $summaryOutfile);
+
+		# format data into matrix
+		my ($starship2region, $genome2region, $regionIDs) = Format_starship_matrix($region2elementGroup, $region2empty, $region2fragmented, $region2validatedTyr, $opts{'separator'});
+
+		# print a starship x region genotyping matrix
+		# will include tyrs found inside fragmented regions
+		my $starshipMatrixOutfile = "$opts{'outdir'}/$PREFIX.fog$opts{'flanking'}.d$opts{'distance'}.m$opts{'mismatching'}.element.mat";
+		Print_matrix($starship2region, $regionIDs, $starshipMatrixOutfile);
+
+		# print a starship x region genotyping matrix
+		my $genomeMatrixOutfile = "$opts{'outdir'}/$PREFIX.fog$opts{'flanking'}.d$opts{'distance'}.m$opts{'mismatching'}.genome.mat";
+		Print_matrix($genome2region, $regionIDs, $genomeMatrixOutfile);
+
+		# make sure multiple elements from the same genome OR multiple empty haplotypes OR multiple fragmented haplotypes from the same genome are not present in each group
+		Homologous_region_sanity_check($region2elementGroup, $region2empty, $opts{'separator'});
+
+		# I dont think we need to print out a BED formatted file of regions data, but here would be the place to do it
+		# contigID, begin, end, regionID, element/frag/empty tag, ., elementID=xxx;elementFam=xxx
+
+		# calculate pairwise Jaccard similarity between all insert, empty and fragmented haplotypes
+		# get a sense for how different regions are related to one another by calculating the mean jaccard distance between each region
+		# structured: {$region1}{$region2} = medianSim
+		$datestring = localtime();
+		print "[$datestring] calculating median Jaccard similarity between all haplotypes and all regions..\n";
+		my $haploJaccardOutfile = "$opts{'outdir'}/$PREFIX.fog$opts{'flanking'}.d$opts{'distance'}.m$opts{'mismatching'}.haplotype_jaccard.sim";
+		my $regionJaccardOutfile = "$opts{'outdir'}/$PREFIX.fog$opts{'flanking'}.d$opts{'distance'}.m$opts{'mismatching'}.region_jaccard.sim";
+		Print_median_Jaccard_sim($haplotype2OGs, $haploJaccardOutfile, $regionJaccardOutfile);
+
+		$datestring = localtime();					
+		print "[$datestring] benchmarking: $failedFlankCount\t".scalar(keys %{$element2og})."\t".scalar(keys %{$region2element})."\t$emptyHaplotypeCount\t$emptyHaploRegionCount\t$fragHaplotypeCount\t$fragHaploRegionCount\t$validatedSiteCount\t".scalar(keys %{$dereplicatedValidatedCount})."\t$singletonEmptyCount\t$multiEmptyCount\t$singletonCount\t$multiCount\n";
+		print "[$datestring] done\n";
+
+}
+
+sub Print_matrix {
+	my ($row2region, $regionIDs, $outfile) = @_;
+	my ($OUT) = Open_FH($outfile);
+	
+	# print header
+	print $OUT "#Names";
+	foreach my $regionID (nsort keys %{$regionIDs}) {
+		print $OUT "\t$regionID";
+	}
+	print $OUT "\n";
+	
+	# print row data
+	foreach my $rowID (nsort keys %{$row2region}) {
+		print $OUT "$rowID";
+		foreach my $regionID (nsort keys %{$regionIDs}) { # make sure every region gets printed
+			if (exists $row2region->{$rowID}->{$regionID}) {
+				print $OUT "\t$row2region->{$rowID}->{$regionID}";
+			} else {
+				print $OUT "\t0";
+			}
+		}
+		print $OUT "\n";
+	}
+}
+
+sub Format_starship_matrix {
+	my ($region2elementGroup, $region2empty, $region2fragmented, $region2validatedTyr, $SEP) = @_;
+	my (%starship2region, %ome2region, %regionIDs);
+	
+	foreach my $regionID (keys %{$region2elementGroup}) {
+		
+		# element info, where element symbolized by 2
+		foreach my $elementGroupID (keys %{$region2elementGroup->{$regionID}}) {
+			foreach my $elementID (keys %{$region2elementGroup->{$regionID}->{$elementGroupID}}) {
+				$starship2region{$elementID}{$regionID} = 2;
+				my ($omeID)= split/$SEP/, $elementID;
+				$ome2region{$omeID}{$regionID} = 2;
+				$regionIDs{$regionID} = 1;
+			}
+		}
+		
+		# empty info, where empty symbolized by -1
+		foreach my $emptyContigID (keys %{$region2empty->{$regionID}}) {
+			my ($omeID)= split/$SEP/, $emptyContigID;
+			$ome2region{$omeID}{$regionID} = -1;
+		}
+
+		# fragmented info, where frag symbolized by 1
+		foreach my $fragmentedContigID (keys %{$region2fragmented->{$regionID}}) {
+		
+			my ($omeID)= split/$SEP/, $fragmentedContigID;
+			$ome2region{$omeID}{$regionID} = 1;
+			
+			# check if this fragmented contig contains a tyr
+			foreach my $validatedTyrID (keys %{$region2validatedTyr->{$regionID}}) {
+				if ($fragmentedContigID eq $region2validatedTyr->{$regionID}->{$validatedTyrID}) {
+					$starship2region{$validatedTyrID}{$regionID} = 1;
+				}
+			}
+		}
+	}
+	return(\%starship2region, \%ome2region, \%regionIDs);	
+}
+
+sub Print_summary_report {
+	my ($region2elementGroup, $element2og, $region2empty, $region2fragmented, $region2validatedSites, $dereplicatedValidatedCount, $SEP, $summaryOutfile) = @_;
+	my ($singletonEmptyCount, $multiEmptyCount, $singletonCount, $multiCount) = (0,0,0,0);
+	#my ($OUT) = Open_FH($summaryOutfile);
+	
+	#print $OUT "#regionID\tmaxMismatching\tstarshipElements\tstarshipFamilies\trefsWithValidatedSites\temptyRegions\temptyInsertionSites\tfragmentedRegions\tfragmentedInsertionSites\tomesWithElement\tomesWithEmpty\tomesWithFrag\n";
+
+	foreach my $regionID (nsort keys %{$region2elementGroup}) {
+		my ($elementCount, $familyCount, $emptyRegionCount, $fragmentedRegionCount, $emptySiteCount, $fragmentedSiteCount, $validatedCount, $maxMismatches) = (0,0,0,0,0,0,0,0);
+		my (%genomeElementCount, %genomeEmptyCount, %genomeFragCount); # keep track of how many genomes have at least 1 of each allele at this region
+		my %OGstrings;
+		
+		# gather element info
+		foreach my $elementGroupID (nsort keys %{$region2elementGroup->{$regionID}}) {
+			$familyCount++;	
+			foreach my $elementID (nsort keys %{$region2elementGroup->{$regionID}->{$elementGroupID}}) {
+				$elementCount++;
+				my ($omeID) = split/$SEP/, $elementID;
+				$genomeElementCount{$omeID} = 1;
+				my $OGstring = join(",", @{$element2og->{$elementID}[0]});
+				$OGstring =~ s/\.,//;
+				$OGstrings{$OGstring} = 1; # we want identical strings to be present only once
+			}
+		}
+				
+		# gather empty info
+		# structured: {regionID}{contigID} = \@OGs, \@unsortedCoords
+		foreach my $emptyContigID (nsort keys %{$region2empty->{$regionID}}) {
+			
+			$emptyRegionCount++;
+			my ($omeID) = split/$SEP/, $emptyContigID;
+			$genomeEmptyCount{$omeID} = 1;
+						
+			my $OGstring = join(",", @{$region2empty->{$regionID}->{$emptyContigID}[0]});
+			$OGstrings{$OGstring} = 1; # we want identical strings to be present only once
+
+			# check if this contig has insertion sites
+			foreach my $validatedSiteID (keys %{$region2validatedSites->{$regionID}}) {
+				if ($emptyContigID eq $region2validatedSites->{$regionID}->{$validatedSiteID}) {
+					$emptySiteCount++;
+				}
+			}
+		}
+
+		# gather fragmented info
+		# structured: {regionID}{contigID} = \@OGs, \@unsortedCoords
+		foreach my $fragmentedContigID (nsort keys %{$region2fragmented->{$regionID}}) {
+			
+			$fragmentedRegionCount++;
+			my ($omeID) = split/$SEP/, $fragmentedContigID;
+			$genomeFragCount{$omeID} = 1;
+						
+			my $OGstring = join(",", @{$region2fragmented->{$regionID}->{$fragmentedContigID}[0]});
+			$OGstring =~ s/\.,//;
+			$OGstrings{$OGstring} = 1; # we want identical strings to be present only once
+
+			# check if this contig has insertion sites
+			foreach my $validatedSiteID (keys %{$region2validatedSites->{$regionID}}) {
+				if ($fragmentedContigID eq $region2validatedSites->{$regionID}->{$validatedSiteID}) {
+					$fragmentedSiteCount++;
+				}
+			}
+		}
+
+
+		# calculate the maximum observed mismatches between any two OGstrings
+		my %observedPairs;
+		foreach my $OGstring1 (keys %OGstrings) {
+			my (@OGs1) = split/,/, $OGstring1;
+			foreach my $OGstring2 (keys %OGstrings) {
+				next if ($OGstring1 eq $OGstring2);
+				next if (exists $observedPairs{$OGstring1}{$OGstring2});
+				$observedPairs{$OGstring1}{$OGstring2} = 1;
+				$observedPairs{$OGstring2}{$OGstring1} = 1;
+				my (@OGs2) = split/,/, $OGstring2;
+				my $mismatches = 0;
+				foreach my $OG1 (@OGs1) {
+					my $matchFound = 0;
+					foreach my $OG2 (@OGs2) {
+						$matchFound = 1 if ($OG1 eq $OG2);
+					}
+					$mismatches++ if ($matchFound == 0);
+				}
+				$maxMismatches = $mismatches if ($mismatches > $maxMismatches);
+			}
+		}	
+
+		$validatedCount = $dereplicatedValidatedCount->{$regionID} if (defined $dereplicatedValidatedCount->{$regionID});
+		my $omesWithElement = scalar (keys %genomeElementCount);
+		my $omesWithEmpty = scalar (keys %genomeEmptyCount);
+		my $omesWithFrag = scalar (keys %genomeFragCount);
+		#print $OUT "$regionID\t$maxMismatches\t$elementCount\t$familyCount\t$validatedCount\t$emptyRegionCount\t$emptySiteCount\t$fragmentedRegionCount\t$fragmentedSiteCount\t$omesWithElement\t$omesWithEmpty\t$omesWithFrag\n";		
+	
+		$singletonEmptyCount++ if (($omesWithElement == 1) && (($omesWithEmpty >= 1) || ($omesWithFrag >= 1)));
+		$multiEmptyCount++ if (($omesWithElement > 1) && (($omesWithEmpty >= 1) || ($omesWithFrag >= 1)));
+		$singletonCount++ if (($omesWithElement == 1) && (($omesWithEmpty == 0) && ($omesWithFrag == 0)));
+		$multiCount++ if (($omesWithElement > 1) && (($omesWithEmpty == 0) && ($omesWithFrag == 0)));
+	}	
+	my $datestring = localtime();					
+	print "[$datestring] found $singletonEmptyCount regions with 1 element and >=1 empty\/fragmented haplotype\n";
+	print "[$datestring] found $multiEmptyCount regions with >1 element and >=1 empty\/fragmented haplotype\n";
+	print "[$datestring] found $singletonCount regions with 1 element and 0 empty\/fragmented haplotypes\n";
+	print "[$datestring] found $multiCount regions with >1 element and 0 empty\/fragmented haplotypes\n";
+	return($singletonEmptyCount, $multiEmptyCount, $singletonCount, $multiCount);
+}
+
+sub Homologous_region_sanity_check {
+	my ($region2elementGroup, $region2empty, $SEP) = @_;
+	
+	foreach my $regionID (nsort keys %{$region2elementGroup}) {
+	
+		my %omeTracker;
+		
+		# parse all omes with elements
+		foreach my $elementGroupID (nsort keys %{$region2elementGroup->{$regionID}}) {
+			foreach my $elementID (nsort keys %{$region2elementGroup->{$regionID}->{$elementGroupID}}) {
+				my ($elementOmeID)= split/$SEP/, $elementID;
+				$omeTracker{$elementOmeID}++;
+			}
+		}
+		
+		# parse all omes with empty haplotypes
+		foreach my $emptyContigID (nsort keys %{$region2empty->{$regionID}}) {
+			my ($emptyOmeID)= split/$SEP/, $emptyContigID;
+			$omeTracker{$emptyOmeID}++;
+		}
+		
+		foreach my $omeID (nsort keys %omeTracker) {
+			if ($omeTracker{$omeID} > 1) {
+				my $datestring = localtime();					
+				print "[$datestring] warning: $omeID is represented >1 times in $regionID, but it should only be present once\n";
+			}
+		}
+	}
+}
+
+sub Print_median_Jaccard_sim {
+	my ($haplotype2OGs, $haploJaccardOutfile, $regionJaccardOutfile) = @_;
+	my $haplotypeOUT = Open_FH($haploJaccardOutfile);
+	print $haplotypeOUT "#queryRegion\ttargetRegion\tqueryHaplotype\ttargetHaplotype\tjaccardSim\n";
+	my $regionOUT = Open_FH($regionJaccardOutfile);
+	print $regionOUT "#queryRegion\ttargetRegion\tmedianJaccardSim\n";
+
+	my %observedPairs;
+	foreach my $regionP (keys %{$haplotype2OGs}) {
+		foreach my $regionQ (keys %{$haplotype2OGs}) { # we ultimately do want self-comparisons so we know how each haplotype within each region relates to each other
+			next if ($regionP ne $regionQ); # skip non-self comparisons temporarily while conducting benchmarking tests
+			next if (exists $observedPairs{"$regionP|$regionQ"}); #skip observed pairwise interactions
+			$observedPairs{"$regionP|$regionQ"} = 1; #mark pair as observed
+			$observedPairs{"$regionQ|$regionP"} = 1; #mark pair as observed
+			my @sims;
+			
+			# do all pairwise comparisons between all haplotypes in regionP and regionQ
+			foreach my $haplotypeP (keys %{$haplotype2OGs->{$regionP}}) {
+				foreach my $haplotypeQ (keys %{$haplotype2OGs->{$regionQ}}) {
+					next if (exists $observedPairs{"$regionP|$regionQ|$haplotypeP|$haplotypeQ"}); #skip observed pairwise interactions
+					$observedPairs{"$regionP|$regionQ|$haplotypeP|$haplotypeQ"} = 1; #mark pair in this region as observed
+					$observedPairs{"$regionQ|$regionP|$haplotypeQ|$haplotypeP"} = 1; #mark pair in this region as observed
+
+					#calculate Jaccard similarity based on distinct OGs, duplicates are ignored
+					my $distinctP = $haplotype2OGs->{$regionP}->{$haplotypeP};
+					my $distinctQ = $haplotype2OGs->{$regionQ}->{$haplotypeQ};
+		
+					my ($J_SIM) = Calculate_Jaccard_similarity($distinctP, $distinctQ);
+					push @sims, $J_SIM;
+					print $haplotypeOUT "$regionP\t$regionQ\t$haplotypeP\t$haplotypeQ\t$J_SIM\n";
+				}
+			}
+			
+			# calculate median sim
+			my $median;
+			my $mid = int @sims/2;
+			my @sorted_sims = nsort @sims;
+			if (@sims % 2) {
+				$median = $sorted_sims[ $mid ];
+			} else {
+				$median = ($sorted_sims[$mid-1] + $sorted_sims[$mid])/2;
+			} 
+			
+			# print
+			print $regionOUT "$regionP\t$regionQ\t$median\n";
+		}
+	}
+}
+
+sub Calculate_Jaccard_similarity {
+	my ($distinctP, $distinctQ) = @_;
+	my $Npq = 0; #distinct annotations in common
+	my $Np = 0; #distinct annotations in region P
+	my $Nq = 0; #distinct annotations in region Q
+	my %distincts; #track all distinct annotations in set
+	foreach my $ogP (keys %{$distinctP}) {
+		$distincts{$ogP} = 1;
+		$Np++;
+		if (exists $distinctQ->{$ogP}) { #if OG is present in other region
+			$Npq++;
+		} 
+	}
+	foreach my $ogQ (keys %{$distinctQ}) {
+		$distincts{$ogQ} = 1;
+		$Nq++;
+	}
+	my $J_SIM;
+	if ($Np == 0 && $Nq == 0) {
+		$J_SIM = 0;
+	} else {
+		$J_SIM = ($Npq / ($Np + $Nq - $Npq));
+	}
+	return($J_SIM, \%distincts);	
+}
+
+sub Print_dereplicated_results {
+	my ($region2elementGroup, $dereplicatedElements, $dereplicatedOutfile) = @_;
+	my $OUT = Open_FH($dereplicatedOutfile);
+	
+	# header
+	print $OUT "#regionID\telementGroupID\trefElementID\trefSiteID\totherElementIDs\n";
+
+	# structured: {siteGroupID}{elementGroupID}{elementID} = siteID if ref, . if not;
+	foreach my $regionID (nsort keys %{$region2elementGroup}) {
+		foreach my $elementGroupID (nsort keys %{$region2elementGroup->{$regionID}}) {
+			print $OUT "$regionID\t$elementGroupID\t";
+			
+			# check if ref element info exists
+			my ($refElementID, $refSiteID) = (".", ".");
+			
+			# there should only ever be 1 ref element 
+			if (exists $dereplicatedElements->{$regionID}->{$elementGroupID}) {
+				foreach my $refElement (nsort keys %{$dereplicatedElements->{$regionID}->{$elementGroupID}}) {
+					$refElementID = $refElement;
+					$refSiteID = $dereplicatedElements->{$regionID}->{$elementGroupID}->{$refElement};
+				}
+			}
+			
+			print $OUT "$refElementID\t$refSiteID\t";
+			
+			# now print all other elements
+			foreach my $otherElement (nsort keys %{$region2elementGroup->{$regionID}->{$elementGroupID}}) {
+				next if ($otherElement eq $refElementID); # skip the ref
+				print $OUT "${otherElement},";
+			}
+			print $OUT "\n";
+		}
+	}
+}
+
+sub Print_region_results {
+	my ($region2elementGroup, $element2og, $element2feat, $region2empty, $region2fragmented, $region2validatedTyr, $site2feat, $region2validatedSites, $SEP, $regionOutfile) = @_;
+	
+	my %haplotype2OGs;
+	
+	my ($OUT) = Open_FH($regionOutfile);
+	
+	print $OUT "#regionID\tmemberGroupID\tmemberID\tmemberType\tcontigID\tbegin\tend\tregionBegin\tregionEnd\tflankingOGs\n";
+
+	foreach my $regionID (nsort keys %{$region2elementGroup}) {
+		
+		# print out element info
+		foreach my $elementGroupID (nsort keys %{$region2elementGroup->{$regionID}}) {
+			foreach my $elementID (nsort keys %{$region2elementGroup->{$regionID}->{$elementGroupID}}) {
+				my ($range, $contigID) = @{$element2feat->{$elementID}};
+				my ($elementBegin, $elementEnd) = split/-/, $range;
+				
+				print $OUT "$regionID\t$elementGroupID\t$elementID\telement\t$contigID\t$elementBegin\t$elementEnd\t";
+		
+				if (defined $element2og && exists $element2og->{$elementID}) {
+				
+					# print region range, determined by sorting the coordinates and grabbing the smallest and largest
+					my @range = nsort @{$element2og->{$elementID}[1]};
+					my $regionBegin = shift @range;
+					my $regionEnd = pop @range;
+					print $OUT "$regionBegin\t$regionEnd\t";
+				
+					# print flanking OG string				
+					print $OUT join(",", @{$element2og->{$elementID}[0]}); # will be ordered upstream to downstream
+					
+					# load up OGs
+					foreach my $OG (@{$element2og->{$elementID}[0]}) {
+						next if ($OG eq '.');
+						$haplotype2OGs{$regionID}{$elementID}{$OG} = 1;
+					}
+				
+				} 
+				print $OUT "\n";
+			}
+		}
+		
+		# print out empty info
+		# structured: {regionID}{contigID} = \@OGs, \@unsortedCoords
+		foreach my $emptyContigID (nsort keys %{$region2empty->{$regionID}}) {
+		
+			my ($emptyOmeID)= split/$SEP/, $emptyContigID;
+			
+			# check if this contig has validated insertion sites
+			# order of siteIDs, begins, ends is maintained across arrays
+			my (@validatedSiteIDs, @validatedBegins, @validatedEnds);
+			foreach my $validatedSiteID (keys %{$region2validatedSites->{$regionID}}) {
+				if ($emptyContigID eq $region2validatedSites->{$regionID}->{$validatedSiteID}) {
+					push @validatedSiteIDs, $validatedSiteID;
+					my ($emptyRange) = @{$site2feat->{$validatedSiteID}};
+					my ($emptyBegin, $emptyEnd) = split/-/, $emptyRange;
+					push @validatedBegins, $emptyBegin;
+					push @validatedEnds, $emptyEnd;
+				}
+			}
+			if (scalar @validatedSiteIDs == 0) { # if no validated site, then just push in a .
+				push @validatedSiteIDs, "." ;
+				push @validatedBegins, "." ;
+				push @validatedEnds, "." ;
+			}
+			print $OUT "$regionID\t.\t".join(",", @validatedSiteIDs)."\tempty\t$emptyContigID\t".join(",", @validatedBegins)."\t".join(",", @validatedEnds)."\t";
+			
+			# print region range, determined by sorting the coordinates and grabbing the smallest and largest
+			my @range = nsort @{$region2empty->{$regionID}->{$emptyContigID}[1]};
+			my $regionBegin = shift @range;
+			my $regionEnd = pop @range;
+	
+			print $OUT "$regionBegin\t$regionEnd\t";
+		
+			# print flanking OG string				
+			print $OUT join(",", @{$region2empty->{$regionID}->{$emptyContigID}[0]});
+			print $OUT "\n";
+
+			# load up OGs
+			foreach my $OG (@{$region2empty->{$regionID}->{$emptyContigID}[0]}) {
+				next if ($OG eq '.');
+				$haplotype2OGs{$regionID}{$emptyContigID}{$OG} = 1;
+			}
+
+
+		}
+
+		# print out fragmented info
+		# print any validated tyrs within fragmented region as the memberID
+		# structured: {regionID}{contigID} = \@OGs, \@unsortedCoords
+		foreach my $fragmentedContigID (nsort keys %{$region2fragmented->{$regionID}}) {
+		
+			my ($fragmentedOmeID)= split/$SEP/, $fragmentedContigID;
+			
+			# check if this contig has validated insertion sites
+			# order of siteIDs, begins, ends is maintained across arrays
+			my (@validatedSiteIDs, @validatedBegins, @validatedEnds);
+			foreach my $validatedSiteID (nsort keys %{$region2validatedSites->{$regionID}}) {
+				if ($fragmentedContigID eq $region2validatedSites->{$regionID}->{$validatedSiteID}) {
+					push @validatedSiteIDs, $validatedSiteID;
+					my ($fragmentedRange) = @{$site2feat->{$validatedSiteID}};
+					my ($fragmentedBegin, $fragmentedEnd) = split/-/, $fragmentedRange;
+					push @validatedBegins, $fragmentedBegin;
+					push @validatedEnds, $fragmentedEnd;
+				}
+			}
+			
+			# check if this contig has validated tyrs inside
+			foreach my $validatedTyrID (nsort keys %{$region2validatedTyr->{$regionID}}) {
+				if ($fragmentedContigID eq $region2validatedTyr->{$regionID}->{$validatedTyrID}) {
+					push @validatedSiteIDs, $validatedTyrID;
+				}
+			}
+			
+			if (scalar @validatedSiteIDs == 0) { # if no validated site or validated tyr, then just push in a .
+				push @validatedSiteIDs, "." ;
+				push @validatedBegins, "." ;
+				push @validatedEnds, "." ;
+			}
+			print $OUT "$regionID\t.\t".join(",", @validatedSiteIDs)."\tfrag\t$fragmentedContigID\t".join(",", @validatedBegins)."\t".join(",", @validatedEnds)."\t";
+			
+			# print region range, determined by sorting the coordinates and grabbing the smallest and largest
+			my @range = nsort @{$region2fragmented->{$regionID}->{$fragmentedContigID}[1]};
+			my $regionBegin = shift @range;
+			my $regionEnd = pop @range;
+	
+			print $OUT "$regionBegin\t$regionEnd\t";
+		
+			# print flanking OG string				
+			print $OUT join(",", @{$region2fragmented->{$regionID}->{$fragmentedContigID}[0]});
+			print $OUT "\n";
+
+			# load up OGs
+			foreach my $OG (@{$region2fragmented->{$regionID}->{$fragmentedContigID}[0]}) {
+				next if ($OG eq '.');
+				$haplotype2OGs{$regionID}{$fragmentedContigID}{$OG} = 1;
+			}
+
+
+		}
+	}
+	return(\%haplotype2OGs);
+}
+
+sub Dereplicate_elements_in_regions {
+	my ($region2elementGroup, $element2feat, $element2site, $region2ValidatedSites)  = @_;
+	
+	my %dereplicatedElements;
+	my %dereplicatedValidatedCount;
+	
+	foreach my $regionID (nsort keys %{$region2elementGroup}) {
+		
+		# pick the longest element for each element family present at this site based on the following boundary criteria in decreasing priority:
+		# flank, insert
+		# if validatedElements exist, make sure validated elements have priority. assumes we will find at least 1 validated element per site, if elements have been validated
+		foreach my $elementGroupID (nsort keys %{$region2elementGroup->{$regionID}}) {
+			
+			my ($refElementID, $refSiteID, $altSiteID);
+			
+			my ($flankElementBoundary, $insertElementBoundary, $flankElementLength, $insertElementLength, $extendElementLength) = ('none','none', 0, 0, 0);
+			foreach my $elementID (nsort keys %{$region2elementGroup->{$regionID}->{$elementGroupID}}) {
+				my ($elementRange, $elementContig, $boundaryType) = @{$element2feat->{$elementID}};
+				my ($elementBegin, $elementEnd) = split/-/, $elementRange;
+				my $elementLength = $elementEnd - $elementBegin + 1;
+				
+				# first, choose the longest flank element; if no flank elements available, choose longest insert element, if no insert, choose extend
+				if ($boundaryType eq 'flank') {
+					if ($elementLength > $flankElementLength) {
+						$refElementID = $elementID;
+						$flankElementLength = $elementLength;
+						$flankElementBoundary = 'flank';
+					}
+				} elsif (($boundaryType eq 'insert') && ($flankElementBoundary eq 'none')) {
+					if ($elementLength > $insertElementLength) {
+						$refElementID = $elementID;
+						$insertElementLength = $elementLength;
+						$insertElementBoundary = 'insert';
+					}
+				} elsif (($boundaryType eq 'extend') && ($flankElementBoundary eq 'none')) {
+					if ($elementLength > $extendElementLength) {
+						$refElementID = $elementID;
+						$extendElementLength = $elementLength;
+					}
+				}
+			}
+				
+			# then, repeat as above but for elements with validated insertion sites to try and pick a better reference, choose the longest flank element; if no flank elements available, choose longest insert element
+			($flankElementBoundary, $insertElementBoundary, $flankElementLength, $insertElementLength) = ('none','none', 0, 0);
+			foreach my $elementID (nsort keys %{$region2elementGroup->{$regionID}->{$elementGroupID}}) {
+				my ($elementRange, $elementContig, $boundaryType) = @{$element2feat->{$elementID}};
+				my ($elementBegin, $elementEnd) = split/-/, $elementRange;
+				my $elementLength = $elementEnd - $elementBegin + 1;
+				
+				if ($boundaryType eq 'flank') {
+					if ($elementLength > $flankElementLength) {
+						foreach my $emptySite (nsort keys %{$element2site->{$elementID}}) {
+							if (exists $region2ValidatedSites->{$regionID}->{$emptySite}) {
+								$refElementID = $elementID;
+								$altSiteID = $emptySite if ($element2site->{$elementID}->{$emptySite} eq 'alt');
+								$refSiteID = $emptySite if ($element2site->{$elementID}->{$emptySite} eq 'ref');
+								$flankElementLength = $elementLength;
+								$flankElementBoundary = 'flank';
+							}
+						}
+					}
+				} elsif (($boundaryType eq 'insert') && ($flankElementBoundary eq 'none')) {
+					if ($elementLength > $insertElementLength) {
+						foreach my $emptySite (nsort keys %{$element2site->{$elementID}}) {
+							if (exists $region2ValidatedSites->{$regionID}->{$emptySite}) {
+								$refElementID = $elementID;
+								$altSiteID = $emptySite if ($element2site->{$elementID}->{$emptySite} eq 'alt');
+								$refSiteID = $emptySite if ($element2site->{$elementID}->{$emptySite} eq 'ref');
+								$insertElementLength = $elementLength;
+								$insertElementBoundary = 'insert';
+							}
+						}
+					}
+				}
+			}	
+				
+			# if ref is not defined, that means we can't find an insert or flank element for this site groupID
+			
+			if (defined $refElementID) {
+				$dereplicatedElements{$regionID}{$elementGroupID}{$refElementID} = '.';
+				if (defined $refSiteID) {
+					$dereplicatedElements{$regionID}{$elementGroupID}{$refElementID} = $refSiteID;
+					$dereplicatedValidatedCount{$regionID}++;
+				} elsif (defined $altSiteID) {
+					$dereplicatedElements{$regionID}{$elementGroupID}{$refElementID} = $altSiteID;
+					$dereplicatedValidatedCount{$regionID}++;				
+				}
+			} 
+		}
+	}
+	return(\%dereplicatedElements, \%dereplicatedValidatedCount);
+}
+
+sub Parse_element_groups_in_regions {
+	my ($region2element, $element2group) = @_;
+	
+	my %region2elementGroup;
+	
+	foreach my $regionID (keys %{$region2element}) {
+		foreach my $elementID (@{$region2element->{$regionID}}) {
+			if (defined $element2group->{$elementID}) {
+				$region2elementGroup{$regionID}{$element2group->{$elementID}}{$elementID} = 1;
+			} else {
+				my $datestring = localtime();					
+				print "[$datestring] warning: no tyr familyID for $elementID, skipping\n";
+			
+			}
+		}
+	}
+	return(\%region2elementGroup);	
+}
+
+sub Add_restricted_OGs_to_tagged {
+	my ($tag2feat, $restrictedOGs, $og2gene, $gene2pos) = @_;
+	my %tag2feat = %{$tag2feat};
+	foreach my $restrictedOG (keys %{$restrictedOGs}) {
+		if (exists $og2gene->{$restrictedOG}) {
+			foreach my $geneID (@{$og2gene->{$restrictedOG}}) {
+				if (exists $gene2pos->{$geneID}) {
+					my ($contig, $featBegin, $featEnd) = @{$gene2pos->{$geneID}};
+					push @{$tag2feat{$geneID}}, "${featBegin}-${featEnd}", $contig;
+				}
+			}
+		}
+	}
+	return(\%tag2feat);
+}
+
+sub Cross_reference_tagged_genes {
+	my ($region2fragmented, $tag2feat) = @_;
+	
+	# structured: $tag2feat{$tagID}}, $start-stop, $contigID
+	# structured: region2frag{regionID}{contigID} = \@OGs, \@unsortedCoords
+
+	my (%region2validatedTags, %validatedHaplotypes, %validatedTags);
+	my ($validatedTagCount, $validatedHaplotypeCount) = (0,0);
+	
+	# notice all the switching between different hashes
+	# iterate through each tag and check for a match
+	# first reshape tag2feat to speed up iteration through contigs
+	my %tag2featReshaped;
+	foreach my $tagID (keys %{$tag2feat}) {	
+		# retrive tag contig
+		my ($tagRange, $tagContigID) = @{$tag2feat->{$tagID}};
+		$tag2featReshaped{$tagContigID}{$tagID} = 1;
+	}	
+
+	foreach my $regionID (keys %{$region2fragmented}) {
+		foreach my $fragContigID (keys %{$region2fragmented->{$regionID}}) {
+			if (exists $tag2featReshaped{$fragContigID}) {
+				foreach my $tagID (keys %{$tag2featReshaped{$fragContigID}}) {	
+					my ($tagRange, $tagContigID) = @{$tag2feat->{$tagID}};
+					my ($tagBegin, $tagEnd) = split/-/, $tagRange;
+					my @fragRange = nsort @{$region2fragmented->{$regionID}->{$fragContigID}[1]};
+					my $fragBegin = shift @fragRange;
+					my $fragEnd = pop @fragRange;
+					
+					# check that tag coords are contained within frag coords; if they are, then tag is validated
+					if (($tagBegin > $fragBegin) && ($tagBegin < $fragEnd) && ($tagEnd > $fragBegin) && ($tagEnd < $fragEnd)) {
+						$region2validatedTags{$regionID}{$tagID} = $tagContigID;
+						$validatedHaplotypes{$regionID}{$tagContigID} = 1;
+						$validatedTags{$tagID} = 1;
+					}
+				}
+			}
+		}
+	}
+	foreach my $regionID (keys %validatedHaplotypes) {
+		my $regionHaplotypeCounts = scalar(keys %{$validatedHaplotypes{$regionID}});
+		$validatedHaplotypeCount = $validatedHaplotypeCount + $regionHaplotypeCounts;
+	}
+	$validatedTagCount = scalar (keys %validatedTags);
+	return(\%region2validatedTags, $validatedTagCount, $validatedHaplotypeCount);
+}
+
+sub Validate_insertion_sites {
+	my ($element2site, $region2element, $region2empty, $region2fragmented, $site2feat, $element2feat) = @_;
+	
+	# structured: {regionID} = \@elementIDs
+	# structured: $site2feat{$siteID}}, $start-stop, $contigID
+	# structured: region2empty{regionID}{contigID} = \@OGs, \@unsortedCoords
+	# structured: element2site{elementID}{siteID} = 1
+	# structured: $element2feat{$starshipID}}, $start-stop, $contigID, $boundaryType
+
+	my %region2validatedSites;
+	my $validatedSiteCount = 0;
+	
+	# notice all the switching between different hashes
+	foreach my $regionID (keys %{$region2element}) {
+		foreach my $elementID (@{$region2element->{$regionID}}) {
+			foreach my $siteID (keys %{$element2site->{$elementID}}) {
+				
+				# retrive site contig
+				my ($siteRange, $siteContigID) = @{$site2feat->{$siteID}};
+				my ($siteBegin, $siteEnd) = split/-/, $siteRange;
+				
+				# retrive region contig
+				# iterate through all empty contigs associated with this region and attempt to find a match
+				foreach my $regionContigID (keys %{$region2empty->{$regionID}}) {
+					if ($siteContigID eq $regionContigID) {
+						
+						my @regionRange = nsort @{$region2empty->{$regionID}->{$regionContigID}[1]};
+						my $regionBegin = shift @regionRange;
+						my $regionEnd = pop @regionRange;
+						
+						# check that site coords are contained within region coords; if they are, then site is validated
+						if (($siteBegin >= $regionBegin) && ($siteBegin <= $regionEnd) && ($siteEnd >= $regionBegin) && ($siteEnd <= $regionEnd)) {
+							$region2validatedSites{$regionID}{$siteID} = $siteContigID;
+						}
+					}
+				}
+				# iterate through all fragmented contigs associated with this region and attempt to find a match
+				foreach my $regionContigID (keys %{$region2fragmented->{$regionID}}) {
+					if ($siteContigID eq $regionContigID) {
+						
+						my @regionRange = nsort @{$region2fragmented->{$regionID}->{$regionContigID}[1]};
+						my $regionBegin = shift @regionRange;
+						my $regionEnd = pop @regionRange;
+						
+						# check that site coords are contained within region coords; if they are, then site is validated
+						if (($siteBegin >= $regionBegin) && ($siteBegin <= $regionEnd) && ($siteEnd >= $regionBegin) && ($siteEnd <= $regionEnd)) {
+							$region2validatedSites{$regionID}{$siteID} = $siteContigID;
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	foreach my $regionID (keys %region2validatedSites) {
+		my $validatedSites = scalar(keys %{$region2validatedSites{$regionID}});
+		$validatedSiteCount += $validatedSites;
+	}
+	
+	return(\%region2validatedSites, $validatedSiteCount);
+}
+
+sub Merge_regions_by_haplotype {
+	my ($region2element, $region2empty, $region2fragmented, $MERGECOUNT, $MERGELENGTH) = @_;
+	
+	my (%region2element, %region2empty, %region2fragmented);
+	my ($singletonMemberGroupCount, $multiMemberGroupCount, $emptyHaplotypeCount, $fragHaplotypeCount) = (0,0,0,0);
+
+	my (%observedComparisons, %mergedComparisons);
+	foreach my $regionA (nsort keys %{$region2element}) { # all empty and frag haplotypes are associated with a region from region2element
+		my ($emptyCountA, $fragCountA) = (0,0);
+		$emptyCountA = scalar (keys %{$region2empty->{$regionA}}) if (exists $region2empty->{$regionA});
+		$fragCountA = scalar (keys %{$region2fragmented->{$regionA}}) if (exists $region2fragmented->{$regionA});
+		my $totalCountA = $emptyCountA + $fragCountA;
+		next if ($totalCountA == 0);
+				
+		foreach my $regionB (nsort keys %{$region2element}) { 
+			
+			next if ($regionA eq $regionB); # skip self comparisons
+			next if (exists $observedComparisons{$regionA}{$regionB});
+			next if (exists $observedComparisons{$regionB}{$regionA});
+			$observedComparisons{$regionA}{$regionB} = 1;
+			$observedComparisons{$regionB}{$regionA} = 1;
+
+			my ($emptyCountB, $fragCountB) = (0,0);
+			$emptyCountB = scalar (keys %{$region2empty->{$regionB}}) if (exists $region2empty->{$regionB});
+			$fragCountB = scalar (keys %{$region2fragmented->{$regionB}}) if (exists $region2fragmented->{$regionB});
+			my $totalCountB = $emptyCountB + $fragCountB;
+			next if ($totalCountB == 0);
+			
+			my $emptyMergeCount = 0;
+			if ((exists $region2empty->{$regionA}) && (exists $region2empty->{$regionB})) {
+				($emptyMergeCount) = Merge_counter($region2empty, $regionA, $regionB, $MERGELENGTH);
+			}
+			
+			my $fragMergeCount = 0;
+			if ((exists $region2fragmented->{$regionA}) && (exists $region2fragmented->{$regionB})) {
+				($fragMergeCount) = Merge_counter($region2fragmented, $regionA, $regionB, $MERGELENGTH);
+			}
+			
+			my $totalMergeFracA = ($emptyMergeCount + $fragMergeCount) / $totalCountA;
+			my $totalMergeFracB = ($emptyMergeCount + $fragMergeCount) / $totalCountB;
+
+			if (($totalMergeFracA >= $MERGECOUNT) || ($totalMergeFracB >= $MERGECOUNT)) {
+				$mergedComparisons{$regionA}{$regionB} = 1;
+				$mergedComparisons{$regionB}{$regionA} = 1;
+			}
+		}
+	}
+	
+	# now iterate through the mergedComparisons tree, making sure that all merged and unmerged regions are stored
+	my $newGroupCount = 0;
+	my %mergedRegions;
+	foreach my $regionA (nsort keys %{$region2element}) {
+		next if (exists $mergedRegions{$regionA}); # skip regions that have already been merged
+		
+		$newGroupCount++;
+		my $formattedCount = sprintf("%04d", $newGroupCount);
+		my $newRegionID = "region$formattedCount";
+		my %focalRegions;
+		$focalRegions{$regionA} = 1;
+
+		if (exists $mergedComparisons{$regionA}) {
+			# this is so brute force....
+			# iterate seven steps through the tree. if orthogroup flank algorithm is working, then probably no need to keep merging after that
+			foreach my $regionB (keys %{$mergedComparisons{$regionA}}) {
+				$focalRegions{$regionB} = 1;
+				foreach my $regionC (keys %{$mergedComparisons{$regionB}}) {
+					$focalRegions{$regionC} = 1;
+					foreach my $regionD (keys %{$mergedComparisons{$regionC}}) {
+						$focalRegions{$regionD} = 1;
+						foreach my $regionE (keys %{$mergedComparisons{$regionD}}) {
+							$focalRegions{$regionE} = 1;
+							foreach my $regionF (keys %{$mergedComparisons{$regionE}}) {
+								$focalRegions{$regionF} = 1;
+								foreach my $regionG (keys %{$mergedComparisons{$regionF}}) {
+									$focalRegions{$regionG} = 1;
+									foreach my $regionH (keys %{$mergedComparisons{$regionG}}) {
+										$focalRegions{$regionH} = 1;
+									}
+								}
+							}
+						}
+					}
+				}
+			}	
+		} 
+		
+		# merge all overlapping regions into a new region
+		foreach my $focalRegion (keys %focalRegions) {
+			
+			# element haplotype IDs will never be present in >1 region
+			foreach my $haplotype (@{$region2element->{$focalRegion}}) {
+				push @{$region2element{$newRegionID}}, $haplotype;
+			}
+			
+			# empty and frag haplotypes will be present in multiple regions from same genome if those regions had any overlap
+			# individual genomes may also have empty and fragmented regions that are now assigned to the same region
+			# if this happens, merge the empty region into the fragmented region
+			foreach my $haplotype (keys %{$region2fragmented->{$focalRegion}}) {
+				if (not exists $region2fragmented{$newRegionID}{$haplotype}) {
+					@{$region2fragmented{$newRegionID}{$haplotype}} = @{$region2fragmented->{$focalRegion}->{$haplotype}};
+				} else {# if this haplotype (ie contigID) already exists within the hash, then merge its info with the existing haplotype
+				
+					my @cordsA = @{$region2fragmented{$newRegionID}{$haplotype}[1]}; # looks at existing info
+					my @ogsA = @{$region2fragmented{$newRegionID}{$haplotype}[0]};
+					push @ogsA, ";";
+			
+					my @coordsB = @{$region2fragmented->{$focalRegion}->{$haplotype}[1]}; # looks at to be merged info
+					my @ogsB = @{$region2fragmented->{$focalRegion}->{$haplotype}[0]};
+					
+					# merge the info
+					push (@cordsA, @coordsB);
+					push (@ogsA, @ogsB);
+					
+					push @{$region2fragmented{$newRegionID}{$haplotype}}, \@ogsA, \@cordsA;
+				}
+			}
+
+			foreach my $haplotype (keys %{$region2empty->{$focalRegion}}) {
+				if (not exists $region2empty{$newRegionID}{$haplotype} && not exists $region2fragmented{$newRegionID}{$haplotype}) {
+					@{$region2empty{$newRegionID}{$haplotype}} = @{$region2empty->{$focalRegion}->{$haplotype}};
+				} elsif (exists $region2fragmented{$newRegionID}{$haplotype}) {
+					
+					my @cordsA = @{$region2fragmented{$newRegionID}{$haplotype}[1]}; # looks at existing info
+					my @ogsA = @{$region2fragmented{$newRegionID}{$haplotype}[0]};
+					push @ogsA, ";";
+			
+					my @coordsB = @{$region2empty->{$focalRegion}->{$haplotype}[1]}; # looks at to be merged info
+					my @ogsB = @{$region2empty->{$focalRegion}->{$haplotype}[0]};
+					
+					# merge the info
+					push (@cordsA, @coordsB);
+					push (@ogsA, @ogsB);
+				
+					push @{$region2fragmented{$newRegionID}{$haplotype}}, \@ogsA, \@cordsA;
+				
+				} elsif (exists $region2empty{$newRegionID}{$haplotype}) { # if this haplotype (ie contigID) already exists within the empty hash, then merge its info with the existing haplotype
+					
+					my @cordsA = @{$region2empty{$newRegionID}{$haplotype}[1]}; # looks at existing info
+					my @ogsA = @{$region2empty{$newRegionID}{$haplotype}[0]};
+					push @ogsA, ";";
+			
+					my @coordsB = @{$region2empty->{$focalRegion}->{$haplotype}[1]}; # looks at to be merged info
+					my @ogsB = @{$region2empty->{$focalRegion}->{$haplotype}[0]};
+					
+					# merge the info
+					push (@cordsA, @coordsB);
+					push (@ogsA, @ogsB);
+				
+					push @{$region2empty{$newRegionID}{$haplotype}}, \@ogsA, \@cordsA;
+				
+				} 
+			}
+			
+		}
+
+		# copy focalRegions over to our dictionary of regions that have already been merged
+		(%mergedRegions) = (%mergedRegions, %focalRegions);
+	}
+	
+	# count up	
+	foreach my $region (keys %region2element) {
+		$singletonMemberGroupCount++ if (scalar @{$region2element{$region}} == 1);
+		$multiMemberGroupCount++ if (scalar @{$region2element{$region}} > 1);
+		$emptyHaplotypeCount+= scalar (keys %{$region2empty{$region}}) if (exists $region2empty{$region});
+		$fragHaplotypeCount+= scalar (keys %{$region2fragmented{$region}}) if (exists $region2fragmented{$region});
+	}
+	
+	return(\%region2element, \%region2empty, \%region2fragmented, $singletonMemberGroupCount, $multiMemberGroupCount, $emptyHaplotypeCount, $fragHaplotypeCount);
+}
+
+sub Merge_counter {
+	my ($regions, $regionA, $regionB, $MERGELENGTH) = @_;
+	my $mergeCount = 0;
+	foreach my $contigA (keys %{$regions->{$regionA}}) { 
+		# look at the same contig if it exists in regionB and calculate overlap between the two haplotypes
+		if (exists $regions->{$regionB}->{$contigA}) { 
+			my @sortedA = nsort @{$regions->{$regionA}->{$contigA}[1]};
+			my ($beginA, $endA) = ($sortedA[0], $sortedA[-1]);
+			my $lengthA = $endA - $beginA + 1;
+
+			my @sortedB = nsort @{$regions->{$regionB}->{$contigA}[1]};
+			my ($beginB, $endB) = ($sortedB[0], $sortedB[-1]);
+			my $lengthB = $endB - $beginB + 1;
+	
+			my $shortest = $lengthA;
+			$shortest = $lengthB if ($lengthB < $lengthA);
+	
+			# 4 possible overlapping conditions
+			my $overlap = 0;
+			if (($beginA >= $beginB) && ($beginA <= $endB) && ($endA >= $endB)) {
+				$overlap = $endB - $beginA + 1;
+			} elsif (($endA >= $beginB) && ($endA <= $endB) && ($beginA <= $beginB)) {
+				$overlap = $endA - $beginB + 1;
+			} elsif (($beginA >= $beginB) && ($endA <= $endB)) {
+				$overlap = $lengthA;
+			} elsif (($beginB >= $beginA) && ($endB <= $endA)) {
+				$overlap = $lengthB;
+			}
+			$mergeCount ++ if (($overlap / $shortest) >= $MERGELENGTH);
+		}
+	}
+	return($mergeCount);
+}
+
+sub Group_homologous_fragmented_regions_by_ogs {
+	my ($gene2pos, $og2gene, $element2og, $element2feat, $contig2element, $region2element, $region2empty, $region2taggedFrags, $gene2neighboringOGs, $SEP, $MINMATCHING, $MAXCONSTANT) = @_;
+	
+	# structured: {regionID}{contigID} = \@OGs, \@unsortedCoords
+	my %region2frag;
+	my $fragRegionCount = 0;
+	
+	# first, parse all genomes in each homologous region into a hash from elements and empty and fragtags
+	my %region2ome;
+	foreach my $regionID (keys %{$region2element}) {
+		foreach my $elementID (@{$region2element->{$regionID}}) {
+			my ($omeID)= split/$SEP/, $elementID;
+			$region2ome{$regionID}{$omeID} = 1;
+		}
+	}
+	foreach my $regionID (keys %{$region2empty}) {
+		foreach my $contigID (keys %{$region2empty->{$regionID}}) {
+			my ($omeID)= split/$SEP/, $contigID;
+			$region2ome{$regionID}{$omeID} = 1;
+		}
+	}
+	foreach my $regionID (keys %{$region2taggedFrags}) {
+		foreach my $contigID (keys %{$region2taggedFrags->{$regionID}}) {
+			my ($omeID)= split/$SEP/, $contigID;
+			$region2ome{$regionID}{$omeID} = 1;
+		}
+	}
+
+	# then for each region group, iterate through all genomes not already in the group
+	# and find the region that is flanked by the best matches to the upstream and downstream OG strings
+	foreach my $regionID (keys %{$region2element}) {
+		
+		my %ome2candidates; # keeps track of all matches per genome against each element
+		
+		# iterate through all these genes associated with this OG and check their flanking OGs for a match			
+		foreach my $elementID (@{$region2element->{$regionID}}) {
+		
+			# element size, for determining max distance between an upstream and downstream pair
+			my ($range) = @{$element2feat->{$elementID}};
+			my ($elementBegin, $elementEnd) = split/-/, $range;
+			my $elementLength = $elementEnd - $elementBegin + 1;
+			my $maxFragLength = $MAXCONSTANT * $elementLength; # change max fragment length HERE
+			
+			# grab all the upstream and downstream OGs flanking this element by iterating up until the insert marker
+			my @queryOGs = @{$element2og->{$elementID}[0]};
+			my @revQueryOGs = reverse @queryOGs;
+			my (@upstreamOGqueries, @downstreamOGqueries);
+			foreach my $OG (@queryOGs) {
+				last if ($OG eq '.');
+				push @upstreamOGqueries, $OG;
+			}
+			foreach my $OG (@revQueryOGs) {
+				last if ($OG eq '.');
+				push @downstreamOGqueries, $OG;
+			}
+			
+			# find all matches to upstream
+			my ($ome2upCandidatesTemp) = Parse_candidate_matches(\@upstreamOGqueries, $og2gene, $gene2neighboringOGs, $elementID, $regionID, \%region2ome, $SEP);
+			
+			# find all matches to downstream
+			my ($ome2downCandidatesTemp) = Parse_candidate_matches(\@downstreamOGqueries, $og2gene, $gene2neighboringOGs, $elementID, $regionID, \%region2ome, $SEP);			
+			
+			# match each upstream to each downstream located on the same contig and create a combined score
+			# sanity check distance between upstream and downstream (no larger than MAXCONSTANT max element size?)
+			my ($ome2candidatesTemp) = Combine_candidate_matches($ome2upCandidatesTemp, $ome2downCandidatesTemp, $maxFragLength, $gene2pos);
+			
+			# copy per-element results over to the element-wide hash
+			# notice here we are dealing with gene Pairs, not GeneIDs themselves
+			foreach my $tempOmeID (keys %{$ome2candidatesTemp}) {
+				foreach my $tempElementID (keys %{$ome2candidatesTemp->{$tempOmeID}}) {
+					foreach my $tempGenePair (keys %{$ome2candidatesTemp->{$tempOmeID}->{$tempElementID}}) {
+						foreach my $tempDirection (keys %{$ome2candidatesTemp->{$tempOmeID}->{$tempElementID}->{$tempGenePair}}) {
+							$ome2candidates{$tempOmeID}{$tempElementID}{$tempGenePair}{$tempDirection} = $ome2candidatesTemp->{$tempOmeID}->{$tempElementID}->{$tempGenePair}->{$tempDirection};
+						}
+					}
+				}
+			}
+		}
+		
+		# now evaluate the best match per genome, where best match is the gene pair whose combined set of neighbors gave greatest number of OG matches
+		
+		foreach my $omeID (keys %ome2candidates) {
+			my ($bestPair, $bestMatchScore, $bestDirection) = (".", "0", ".");
+			foreach my $elementID (nsort keys %{$ome2candidates{$omeID}}) {
+				foreach my $genePair (nsort keys %{$ome2candidates{$omeID}{$elementID}}) {
+					foreach my $direction (nsort keys %{$ome2candidates{$omeID}{$elementID}{$genePair}}) {
+						my $score = $ome2candidates{$omeID}{$elementID}{$genePair}{$direction};
+						if (($score > $bestMatchScore) && ($score >= $MINMATCHING)) {
+							$bestPair = $genePair;
+							$bestDirection = $direction;
+							$bestMatchScore = $score;
+						}
+					}
+				}
+			}
+			# check that at least 1 pair of genes was found for this genome for this region
+			# ignore the best match if it overlaps with an element found in a different haplotype
+			if ($bestPair ne '.') {
+				my ($bestUpGeneID, $bestDownGeneID) = split/\t/, $bestPair;
+				my (@bestOGs, @bestCoords);
+				# push a . to indicate the contained fragmented haplotype
+				push @bestOGs, @{$gene2neighboringOGs->{$bestUpGeneID}->{$bestDirection}[0]}, ".", @{$gene2neighboringOGs->{$bestDownGeneID}->{$bestDirection}[0]};
+				push @bestCoords, @{$gene2neighboringOGs->{$bestUpGeneID}->{$bestDirection}[1]}, @{$gene2neighboringOGs->{$bestDownGeneID}->{$bestDirection}[1]};
+				my $bestContigID = $gene2neighboringOGs->{$bestUpGeneID}->{$bestDirection}[2];
+				
+				# do bestCoords overlap with an element haplotype? 0 for no, 1 for yes
+				my ($elementOverlap) = Check_overlapping_elements($contig2element->{$bestContigID}, \@bestCoords);				
+				
+				if ($elementOverlap == 0) {
+					push @{$region2frag{$regionID}{$bestContigID}}, \@bestOGs, \@bestCoords;
+					$fragRegionCount++;
+				}
+			}
+		}
+	}
+	
+	# merge region2taggedFrags with region2frag
+	foreach my $regionID (keys %{$region2taggedFrags}) {
+		foreach my $contigID (keys %{$region2taggedFrags->{$regionID}}) {
+			@{$region2frag{$regionID}{$contigID}} = @{$region2taggedFrags->{$regionID}->{$contigID}};
+			$fragRegionCount++;
+		}
+	}
+	
+	return(\%region2frag, $fragRegionCount);		
+}
+
+sub Combine_candidate_matches {
+	my ($ome2upCandidates, $ome2downCandidates, $maxFragLength, $gene2pos) = @_;
+	my %mergedCandidates;
+	#$ome2candidates{$geneOmeID}{$elementID}{$geneID}{'down'}++;
+	
+	# iterate through upstream candidates and match to all downstream on the same contig for the same element comparison
+	foreach my $omeID (keys %{$ome2upCandidates}) {
+		foreach my $elementID (nsort keys %{$ome2upCandidates->{$omeID}}) {
+			foreach my $upGeneID (nsort keys %{$ome2upCandidates->{$omeID}->{$elementID}}) {
+				my ($upContigID, $upBegin, $upEnd) = @{$gene2pos->{$upGeneID}};
+				
+				if (scalar keys %{$ome2downCandidates->{$omeID}->{$elementID}} > 0) { # was at least 1 match found?
+					foreach my $downGeneID (nsort keys %{$ome2downCandidates->{$omeID}->{$elementID}}) {
+						my ($downContigID, $downBegin, $downEnd) = @{$gene2pos->{$downGeneID}};
+					
+						if ($upContigID eq $downContigID) {
+						
+							# upstream match could be located down of downstream match, if this contig is reversed with respect to the reference
+							my $pairDist = 0;
+							if ($downBegin > $upEnd) {
+								$pairDist = $downBegin - $upEnd + 1;
+							} elsif ($upBegin > $downEnd) {
+								$pairDist = $upBegin - $downEnd + 1;
+							}
+						
+							if ($pairDist <= $maxFragLength) {
+								# combine score of up and down into the upGeneID (no need to duplicate it)
+								# direction should be the same across up and down candidates for consistency
+								foreach my $direction (keys %{$ome2upCandidates->{$omeID}->{$elementID}->{$upGeneID}}) {
+									if (exists $ome2downCandidates->{$omeID}->{$elementID}->{$downGeneID}->{$direction}) { # check that a valid downGene exists for this direction
+										my $combinedScore = $ome2downCandidates->{$omeID}->{$elementID}->{$downGeneID}->{$direction} + $ome2upCandidates->{$omeID}->{$elementID}->{$upGeneID}->{$direction};
+										$mergedCandidates{$omeID}{$elementID}{"$upGeneID\t$downGeneID"}{$direction} = $combinedScore;
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return(\%mergedCandidates);
+}
+
+sub Parse_candidate_matches {
+	my ($queryOGs, $og2gene, $gene2neighboringOGs, $elementID, $regionID, $region2ome, $SEP) = @_;
+	my %ome2candidates;
+	# in case of duplicate OGs in query: avoid checking the same query OG twice
+	my %examinedQueryOGs;
+
+	foreach my $queryOG1 (@{$queryOGs}) {
+		
+		next if (exists $examinedQueryOGs{$queryOG1});
+		next if ($queryOG1 =~ m/^\.$/); # the null marker for insertion site
+		$examinedQueryOGs{$queryOG1} = 1; # set this query as observed
+		
+		# search all genes associated with this query OG of interest to quickly access the regions in which this OG is found
+		foreach my $geneID (@{$og2gene->{$queryOG1}}) {
+			my ($geneOmeID)= split/$SEP/, $geneID;
+			
+			# skip genes from genomes that already have an element or contiguous empty haplotype or tagged fragmented haplotype in the region
+			next if (exists $region2ome->{$regionID}->{$geneOmeID});
+			
+			# first check all upstream neighbors of this gene (and the gene itself) and evaluate them against all other query OGs
+			if (exists $gene2neighboringOGs->{$geneID}->{'up'}) {
+				my @upstreamOGs = @{$gene2neighboringOGs->{$geneID}->{'up'}[0]};
+				
+				# if duplicate OGs exist in the query, only count matches once
+				# compare each upstream OGs to  each OG in the array queryOGs 
+				my %examinedOGs;
+				foreach my $upstreamOG (@upstreamOGs) {
+					next if (exists $examinedOGs{$upstreamOG});
+					foreach my $queryOG2 (@{$queryOGs}) {
+						next if (exists $examinedOGs{$queryOG2});
+						if ($queryOG2 eq $upstreamOG) {
+							$ome2candidates{$geneOmeID}{$elementID}{$geneID}{'up'}++;
+							$examinedOGs{$queryOG2} = 1;
+						}
+					}
+				}
+			}
+
+			# then check all downstream neighbors of this gene (and the gene itself) and evaluate them against all other query OGs
+			if (exists $gene2neighboringOGs->{$geneID}->{'down'}) {
+				my @downstreamOGs = @{$gene2neighboringOGs->{$geneID}->{'down'}[0]};
+				
+				# if duplicate OGs exist in the query, only count matches once
+				my %examinedOGs;
+				foreach my $downstreamOG (@downstreamOGs) {
+					next if (exists $examinedOGs{$downstreamOG});
+					foreach my $queryOG2 (@{$queryOGs}) {
+						next if (exists $examinedOGs{$queryOG2});
+						if ($queryOG2 eq $downstreamOG) {
+							$ome2candidates{$geneOmeID}{$elementID}{$geneID}{'down'}++;
+							$examinedOGs{$queryOG2} = 1;
+						}
+					}
+				}
+			}
+		
+		}
+	}
+	return(\%ome2candidates);
+}
+
+sub Group_homologous_empty_regions_by_ogs {
+	my ($og2gene, $element2og, $region2element, $element2feat, $contig2element, $gene2neighboringOGs, $SEP, $MINMATCHING, $EMPTYCONSTANT) = @_;
+	
+	# structured: {regionID}{contigID} = \@OGs, \@unsortedCoords
+	my %region2empty;
+	my $emptyRegionCount = 0;
+	
+	# first, parse all genomes in each homologous region into a hash
+	my %region2ome;
+	foreach my $regionID (keys %{$region2element}) {
+		foreach my $elementID (@{$region2element->{$regionID}}) {
+			my ($omeID)= split/$SEP/, $elementID;
+			$region2ome{$regionID}{$omeID} = 1;
+		}
+	}
+
+	# then for each region group, iterate through all genomes not already in the group
+	# and find the region that best matches the OG string
+	foreach my $regionID (keys %{$region2element}) {
+		
+		my %ome2candidates; # keeps track of all matches per genome against each element
+		my $largestFlankingRegion = 0; # keep track of the longest combined flanking regions across all elements in this region
+
+		# iterate through all these genes associated with this OG and check their flanking OGs for a match			
+		foreach my $elementID (@{$region2element->{$regionID}}) {
+			
+			
+			# grab all the OGs flanking this element
+			my @queryOGs = @{$element2og->{$elementID}[0]};
+			my @queryCoords = nsort @{$element2og->{$elementID}[1]};
+			my ($queryBegin, $queryEnd) = ($queryCoords[0], $queryCoords[-1]);
+			my $queryLength = $queryEnd - $queryBegin + 1;
+			
+			# parse the flanking region length
+			my ($elementStart, $elementEnd) = split/-/, $element2feat->{$elementID}[0];
+			my $elementLength = $elementEnd - $elementStart;
+			my $flankingLength = $queryLength - $elementLength + 1;
+			$largestFlankingRegion = $flankingLength if ($flankingLength > $largestFlankingRegion);
+
+			my ($ome2candidatesTemp) = Parse_candidate_matches(\@queryOGs, $og2gene, $gene2neighboringOGs, $elementID, $regionID, \%region2ome, $SEP);
+			
+			# copy per-element results over to the element-wide hash
+			foreach my $tempOmeID (keys %{$ome2candidatesTemp}) {
+				foreach my $tempElementID (keys %{$ome2candidatesTemp->{$tempOmeID}}) {
+					foreach my $tempGeneID (keys %{$ome2candidatesTemp->{$tempOmeID}->{$tempElementID}}) {
+						foreach my $tempDirection (keys %{$ome2candidatesTemp->{$tempOmeID}->{$tempElementID}->{$tempGeneID}}) {
+							$ome2candidates{$tempOmeID}{$tempElementID}{$tempGeneID}{$tempDirection} = $ome2candidatesTemp->{$tempOmeID}->{$tempElementID}->{$tempGeneID}->{$tempDirection};
+						}
+					}
+				}
+			}
+		 
+		}
+		
+		# now evaluate the best match per genome, where best match is the gene whose neighbors gave greatest number of OG matches
+		
+		foreach my $omeID (keys %ome2candidates) {
+			my ($bestID, $bestMatchScore, $bestDirection) = (".", "0", ".");
+			foreach my $elementID (nsort keys %{$ome2candidates{$omeID}}) {
+				foreach my $geneID (nsort keys %{$ome2candidates{$omeID}{$elementID}}) {
+					foreach my $direction (nsort keys %{$ome2candidates{$omeID}{$elementID}{$geneID}}) {
+						my $score = $ome2candidates{$omeID}{$elementID}{$geneID}{$direction};
+						if (($score > $bestMatchScore) && ($score >= $MINMATCHING)) {
+							$bestID = $geneID;
+							$bestDirection = $direction;
+							$bestMatchScore = $score;
+						}
+					}
+				}
+			}
+			# check that at least 1 site was found for this genome for this region
+			# if the best site is actually an element present in some other region, ignore it
+			if ($bestID ne '.') {
+				my @bestOGs = @{$gene2neighboringOGs->{$bestID}->{$bestDirection}[0]};
+				my @bestCoords = @{$gene2neighboringOGs->{$bestID}->{$bestDirection}[1]};
+				my $bestContigID = $gene2neighboringOGs->{$bestID}->{$bestDirection}[2];
+				
+				# sanity check: if the best empty site is actually > MAXEMPTYCONSTANT the length of the longest flanking region flanking an element, then this is probably a false positive 
+				my @sortedBestCoords = nsort @bestCoords;
+				my ($bestBegin, $bestEnd) = ($sortedBestCoords[0], $sortedBestCoords[-1]);
+				my $bestLength = $bestEnd - $bestBegin + 1;
+				next if ($bestLength >= ($EMPTYCONSTANT * $largestFlankingRegion));
+				
+				# do bestCoords overlap with an element haplotype? 0 for no, 1 for yes
+				my ($elementOverlap) = Check_overlapping_elements($contig2element->{$bestContigID}, \@bestCoords);			
+				
+				if ($elementOverlap == 0) {
+					push @{$region2empty{$regionID}{$bestContigID}}, \@bestOGs, \@bestCoords;
+					$emptyRegionCount++;
+				}
+			}
+		}
+	}
+	return(\%region2empty, $emptyRegionCount);		
+}
+
+sub Check_overlapping_elements {
+	my ($elementCoords, $testCoords) = @_;
+	my $elementOverlap = 0;
+	
+	my @sortedTestCoords = nsort @{$testCoords};
+	my $testBegin = shift @sortedTestCoords;
+	my $testEnd = pop @sortedTestCoords;
+	
+	foreach my $elementID (keys %{$elementCoords}) {
+		my ($elementBegin, $elementEnd) = split/-/, $elementCoords->{$elementID};
+		$elementOverlap = 1 if ((($elementEnd >= $testBegin) && ($elementEnd <= $testEnd)) || (($elementBegin >= $testBegin) && ($elementBegin <= $testEnd)));
+	}
+	return($elementOverlap);	
+}
+
+sub Consolidate_regions_by_ogs {
+	my ($region2elementTemp, $element2og, $element2feat, $MISMATCHING) = @_;
+	
+	# make sure that the same contig does not get assigned multiple times to the same group; could happen in the case of nested elements
+	# each contig should be present exactly once per group
+	# 14.09.22: currently not implemented, as it does not allow overlapping/nested elements to have all their IDs printed to output files, which we want
+	my %region2contig;
+	
+	# this procedure is heuristic and may not produce the exact same results each time, since we are grouping elements into groups based on pairwise comparisons
+	my %region2element;
+	my $multiMemberGroupCount = 0;
+	my $newGroupCount = 0;
+	
+	# as long as we match 1 element in the group with the given criteria, include the query element in this group
+	
+	# cross-reference all elements in each group to each other; consolidate two groups if at least 1 element from each matches each other
+	my (%examinedRegionPairs, %mergedRegions);
+	foreach my $queryRegionID (nsort keys %{$region2elementTemp}) {
+		
+		next if (exists $mergedRegions{$queryRegionID}); # skip regions that have already been merged into a new region
+		my %matchingRegions;
+		
+		foreach my $queryElementID (nsort @{$region2elementTemp->{$queryRegionID}}) {
+	
+			my @queryOGs = @{$element2og->{$queryElementID}[0]};
+			
+			# iterate through all other targetRegions and look for a match
+			foreach my $targetRegionID (nsort keys %{$region2elementTemp}) {
+				
+				next if (exists $mergedRegions{$targetRegionID}); # skip regions that have already been merged into a new region
+				next if ($queryRegionID eq $targetRegionID);
+				next if (exists $examinedRegionPairs{$queryRegionID}{$targetRegionID});
+				next if (exists $examinedRegionPairs{$targetRegionID}{$queryRegionID});
+				
+				foreach my $targetElementID (nsort @{$region2elementTemp->{$targetRegionID}}) {
+					
+					my %examinedOGs; # keep track of which OGs have already been examined, so we don't check them twice
+					my $mismatchCount = 0;
+					my @targetOGs = @{$element2og->{$targetElementID}[0]};
+
+					foreach my $queryOG (@queryOGs) {
+						my $matchingOGs = 0;
+						next if ($queryOG =~ m/^\.$/); # the null marker for insertion element
+						
+						# if duplicate OGs exist in the query, after observing the first match, ignore all others
+						# iterate through all targetOGs and attempt to find a match
+						if (not exists $examinedOGs{$queryOG}) {
+							foreach my $targetOG (@targetOGs) {
+								next if ($targetOG =~ m/^\.$/); # the null marker for insertion element
+								if ($queryOG eq $targetOG) {
+									$matchingOGs = 1;
+									$examinedOGs{$queryOG} = 1; # if we have a match, don't allow this same match to be evaluated again
+								}
+							}
+						} else {
+							next;
+						}
+						
+						# if none of the targetOGs match the given queryOG, then count a mismatch
+						$mismatchCount++ if ($matchingOGs == 0);
+						last if ($mismatchCount > $MISMATCHING);
+					}
+					# set whole region as matching if overlap is found between queryElementId and targetElementID
+					$matchingRegions{$targetRegionID} = 1 if ($mismatchCount <= $MISMATCHING);
+					last if (exists $matchingRegions{$targetRegionID}); # no need to compare any more target elements once we have at least 1 match
+				}
+			}
+		}
+		
+		# set all query-target regions regions as observed after testing them
+		foreach my $targetRegionID (keys %{$region2elementTemp}) {
+			$examinedRegionPairs{$queryRegionID}{$targetRegionID} = 1;
+			$examinedRegionPairs{$targetRegionID}{$queryRegionID} = 1;
+		}
+		
+		# now group together all matching regions into a new group
+		# assign queryRegion its own new group regardless
+		$newGroupCount++;
+		my $formattedCount = sprintf("%04d", $newGroupCount);
+		my $groupID = "region$formattedCount";
+		$mergedRegions{$queryRegionID} = 1;
+		
+		# push all query elementIDs into new group
+		foreach my $queryElementID (@{$region2elementTemp->{$queryRegionID}}) {
+			my $queryContig = $element2feat->{$queryElementID}[1];
+			#push @{$region2element{$groupID}}, $queryElementID if (not exists $region2contig{$groupID}{$queryContig}); # avoid the same contig being duplicated in same region
+			push @{$region2element{$groupID}}, $queryElementID;
+			$region2contig{$groupID}{$queryContig} = 1;
+		}
+
+		# push in any and all of the target element IDs in the matching regionsinto new group if they exist
+		if (scalar keys %matchingRegions > 0) {
+			foreach my $matchingRegionID (keys %matchingRegions) {
+				$mergedRegions{$matchingRegionID} = 1;
+				foreach my $targetElementID (@{$region2elementTemp->{$matchingRegionID}}) {
+					my $targetContig = $element2feat->{$targetElementID}[1];
+					#push @{$region2element{$groupID}}, $targetElementID if (not exists $region2contig{$groupID}{$targetContig}); # avoid the same contig being duplicated in same region
+					push @{$region2element{$groupID}}, $targetElementID;
+					$region2contig{$groupID}{$targetContig} = 1;
+				}
+			}
+		}
+	}
+	
+	# count the number of multielement regions
+	foreach my $groupID (keys %region2element) {
+		$multiMemberGroupCount++ if (scalar @{$region2element{$groupID}} > 1);
+	}
+
+	return(\%region2element, $multiMemberGroupCount);
+}
+
+sub Group_homologous_flanking_regions_by_ogs {
+	my ($element2og, $MISMATCHING) = @_;
+	
+	# this procedure is heuristic and may not produce the exact same results each time, since we are grouping elements into groups based on pairwise comparisons
+	my %region2element;
+	my $multiMemberGroupCount = 0;
+	
+	# iterate through each element, starting with those that have the most flanking OGs
+	# as long as we match 1 element in the group with the given criteria, include the query element in this group
+	
+	my ($groupCount) = (0);
+	foreach my $elementID (nsort keys %{$element2og}) {
+		
+		my @queryOGs = @{$element2og->{$elementID}[0]};
+		
+		if (scalar keys %region2element == 0) { # will invoke on the very first pass
+			$groupCount++;
+			my $formattedCount = sprintf("%04d", $groupCount);
+			my $groupID = "region$formattedCount";
+			push @{$region2element{$groupID}}, $elementID;
+		} else {
+
+			# evaluate against all other elements in all other groups, and add it to an existing group if a match is found
+			my $groupFound = 0;
+			foreach my $groupID (nsort keys %region2element) {
+				foreach my $groupElementID (nsort @{$region2element{$groupID}}) {
+					
+					my %examinedOGs; # keep track of which OGs have already been examined, so we don't check them twice
+					my $mismatchCount = 0;
+					my @targetOGs = @{$element2og->{$groupElementID}[0]};
+					
+					foreach my $queryOG (@queryOGs) {
+						
+						my $matchingOGs = 0;
+						
+						next if ($queryOG =~ m/^\.$/); # the null marker for insertion element
+						
+						# if duplicate OGs exist in the query, after observing the first match, ignore all others
+						# iterate through all targetOGs and attempt to find a match
+						if (not exists $examinedOGs{$queryOG}) {
+							foreach my $targetOG (@targetOGs) {
+								next if ($targetOG =~ m/^\.$/); # the null marker for insertion element
+								if ($queryOG eq $targetOG) {
+									$matchingOGs = 1;
+									$examinedOGs{$queryOG} = 1; # if we have a match, don't allow this same match to be evaluated again
+								}
+							}
+						} else {
+							next; # if query OG has already been evaluated, skip it
+						}
+						
+						# if none of the targetOGs match the given queryOG, then count a mismatch
+						$mismatchCount++ if ($matchingOGs == 0);
+						last if ($mismatchCount > $MISMATCHING);
+					}
+					$groupFound = 1 if ($mismatchCount <= $MISMATCHING);
+					last if ($groupFound == 1);
+				}
+				if ($groupFound == 1) {
+					push @{$region2element{$groupID}}, $elementID;
+					last;
+				}
+			}
+			
+			# if no group has been found after iterating through all groups, assign this element to a new group
+			if ($groupFound == 0) {
+				$groupCount++;
+				my $formattedCount = sprintf("%04d", $groupCount);
+				my $groupID = "region$formattedCount";
+				push @{$region2element{$groupID}}, $elementID;
+			}
+		}
+	}
+	
+	# count the number of multielement regions
+	foreach my $groupID (keys %region2element) {
+		$multiMemberGroupCount++ if (scalar @{$region2element{$groupID}} > 1);
+	}
+	return(\%region2element, $multiMemberGroupCount);
+}
+
+sub Parse_internal_OGs {
+	my ($element2feat, $contig2gene, $gene2og) = @_;
+	my (%internalOGs);
+	foreach my $elementID (keys %{$element2feat}) {
+		my ($range, $contigID) = @{$element2feat->{$elementID}};
+		my ($begin, $end) = split/-/, $range;
+		
+		# grab internal OGs by iterating past the begining coordinate of the element in an increasing manner until the end coordinate
+		# grab the downstream set of OGs by iterating past the end coordinate of the element in an increasing manner
+		foreach my $genePos (sort { $a <=> $b } keys %{$contig2gene->{$contigID}}) {
+			if (($genePos >= $begin) && ($genePos <= $end)) {
+				my ($geneOG);
+				foreach my $geneID (keys %{$contig2gene->{$contigID}->{$genePos}}) { # there should only ever be 1
+					if (exists $gene2og->{$geneID}) { # is this a OG?
+						$geneOG = $gene2og->{$geneID};
+					} 
+				}
+				if (defined $geneOG) {
+					$internalOGs{$geneOG} = 1;
+				}
+			} 
+			last if (($genePos > $end));
+		}
+	}
+	return(\%internalOGs);
+}
+
+sub Parse_flanking_OGs {
+	my ($element2feat, $contig2gene, $gene2og, $og2signal, $FLANKING, $DISTANCE, $MISMATCHING, $REVERSE, $MAXSIGNAL) = @_;
+	my (%element2og, %focalOGs);
+	
+	foreach my $elementID (keys %{$element2feat}) {
+		my ($range, $contigID) = @{$element2feat->{$elementID}};
+		my ($begin, $end) = split/-/, $range;
+		
+		# approach flanking by heading OUT from the insertion element  <== * ==>
+		# grab the upstream set of OGs by iterating past the begining coordinate of the element in a decreasing manner until max distance is reached
+		my (@upFlankingOGs, @upFlankingCoords);
+		my $distanceCount = 0;
+		my %upstreamMaxSignalCount; # keeps track of whether we have saturated the upstream with FLANKING OGs with maxsignal
+		foreach my $genePos (sort { $b <=> $a } keys %{$contig2gene->{$contigID}}) {
+			if ($genePos < $begin) {
+				$distanceCount = $begin - $genePos + 1; # for each gene always calculate an updated distance from the gene to the insertion element
+			
+				last if ($distanceCount >= $DISTANCE);
+				
+				my ($geneOG, $geneBegin, $geneEnd); # in case multiple genes have same starting position, make sure only 1 ever gets pushed in. should only matter for gff files with wonky format
+				foreach my $geneID (nsort keys %{$contig2gene->{$contigID}->{$genePos}}) { # there should only ever be 1
+					if (exists $gene2og->{$geneID} && exists $og2signal->{$gene2og->{$geneID}}) { # is this an OG with signal?
+						my ($null1, $null2, $null3, $null4, $featBegin, $featEnd) = split/\t/, $contig2gene->{$contigID}->{$genePos}->{$geneID};
+						$geneOG = $gene2og->{$geneID};
+						($geneBegin, $geneEnd) = ($featBegin, $featEnd);
+					} 
+				}
+				if (defined $geneOG) {
+					push @upFlankingOGs, $geneOG;
+					push @upFlankingCoords, $geneBegin, $geneEnd;
+					$upstreamMaxSignalCount{$geneOG} = 1 if ($og2signal->{$geneOG} == $MAXSIGNAL); # check if this gene's OG has the maximum possible signal
+				}
+			}
+			last if ($distanceCount >= $DISTANCE);
+			last if (scalar (keys %upstreamMaxSignalCount) >= $FLANKING); # if the upstream regions is already saturated with FLANKING unique OGs that have maxsignal, then no need to keep going
+		}
+		
+		# grab the downstream set of OGs by iterating past the end coordinate of the element in an increasing manner
+		$distanceCount = 0; # reset distance count
+		my (@downFlankingOGs, @downFlankingCoords);
+		my ($downstreamCount) = (0);
+		my %downstreamMaxSignalCount; # keeps track of whether we have saturated the downstream with FLANKING OGs with maxsignal
+		foreach my $genePos (sort { $a <=> $b } keys %{$contig2gene->{$contigID}}) {
+			if ($genePos > $end) {
+				
+				$distanceCount = $genePos - $end + 1; # for each gene always calculate an updated distance from the gene to the insertion element
+
+				last if ($distanceCount >= $DISTANCE);
+
+				my ($geneOG, $geneBegin, $geneEnd); # in case multiple genes have same starting position, make sure only 1 ever gets pushed in. should only matter for gff files with wonky format
+				foreach my $geneID (nsort keys %{$contig2gene->{$contigID}->{$genePos}}) { # there should only ever be 1
+					if (exists $gene2og->{$geneID} && exists $og2signal->{$gene2og->{$geneID}}) { # is this an OG with signal?
+						my ($null1, $null2, $null3, $null4, $featBegin, $featEnd) = split/\t/, $contig2gene->{$contigID}->{$genePos}->{$geneID};
+						$geneOG = $gene2og->{$geneID};
+						($geneBegin, $geneEnd) = ($featBegin, $featEnd);
+					} 
+				}
+				if (defined $geneOG) {
+					push @downFlankingOGs, $geneOG;
+					push @downFlankingCoords, $geneBegin, $geneEnd;
+					$downstreamMaxSignalCount{$geneOG} = 1 if ($og2signal->{$geneOG} == $MAXSIGNAL); # check if this gene's OG has the maximum possible signal
+				}
+			}
+			last if ($distanceCount >= $DISTANCE);
+			last if (scalar (keys %downstreamMaxSignalCount) >= $FLANKING); # if the downstream regions is already saturated with FLANKING unique OGs that have maxsignal, then no need to keep going
+		}
+
+		# skip any elements that already are not big enough
+		next if (scalar(@upFlankingOGs) < ($FLANKING - $MISMATCHING)); # ignore any elements that don't have enough flanking OGs recovered to ever match 
+		next if (scalar(@downFlankingOGs) < ($FLANKING - $MISMATCHING)); # ignore any elements that don't have enough flanking OGs recovered to ever match 
+		
+		# now parse at most $FLANKING OGs with greatest signal from upstream and downstream; if multiple have same signal, pick the ones closest to the beginning of the array
+		# do a preliminary size check to make sure at least some OGs are in the array
+		# reverse OGs, so that the top genes from the flanking region end are selected
+
+		my ($focalUpOGs, $focalDownOGs);
+		if (defined $REVERSE) {
+			my @revUpFlankingOGs = reverse @upFlankingOGs;
+			my @revDownFlankingOGs = reverse @downFlankingOGs;
+			($focalUpOGs) = Parse_OGs_by_signal(\@revUpFlankingOGs, $og2signal, $FLANKING) if (scalar @upFlankingOGs >= ($FLANKING - $MISMATCHING));
+			($focalDownOGs) = Parse_OGs_by_signal(\@revDownFlankingOGs, $og2signal, $FLANKING) if (scalar @downFlankingOGs >= ($FLANKING - $MISMATCHING));
+		} else {
+			($focalUpOGs) = Parse_OGs_by_signal(\@upFlankingOGs, $og2signal, $FLANKING) if (scalar @upFlankingOGs >= ($FLANKING - $MISMATCHING));
+			($focalDownOGs) = Parse_OGs_by_signal(\@downFlankingOGs, $og2signal, $FLANKING) if (scalar @downFlankingOGs >= ($FLANKING - $MISMATCHING));
+		}
+
+		
+		# skip any elements without at least $FLANKING - MISMATCHING in either upstream or downstream
+		# we check here again, because focalOG array will only contain unique OGs, not any duplicated ones
+		my $upFlankSize = scalar keys %{$focalUpOGs};
+		next if ($upFlankSize < ($FLANKING - $MISMATCHING)); # ignore any elements that don't have enough flanking OGs recovered to ever match 
+		my $downFlankSize = scalar keys %{$focalDownOGs};
+		next if ($downFlankSize < ($FLANKING - $MISMATCHING)); # ignore any elements that don't have enough flanking OGs recovered to ever match 
+
+		# iterate through upstream and downstream, and only retain those OGs with the highest signal
+		# fyi duplicate OGs dont count towards the total
+		my (@flankingOGs, @flankingCoords);
+		my ($upBeginIndex, $upEndIndex) = (-2, -1);
+		foreach my $upOG (@upFlankingOGs) {
+			$upBeginIndex +=2;
+			$upEndIndex +=2;
+			if (exists $focalUpOGs->{$upOG}) {
+				unshift @flankingOGs, $upOG; # unshift to preserve order of OGs around insertion element
+				unshift @flankingCoords, $upFlankingCoords[$upBeginIndex], $upFlankingCoords[$upEndIndex]; # begin and end coords in coords array are in the same order as in og array
+			}
+		}
+		
+		# push in a null marker to indicate where the element is
+		push @flankingOGs, ".";
+
+		my ($downBeginIndex, $downEndIndex) = (-2, -1);
+		foreach my $downOG (@downFlankingOGs) {
+			$downBeginIndex +=2;
+			$downEndIndex +=2;
+			if (exists $focalDownOGs->{$downOG}) {
+				push @flankingOGs, $downOG; # push to preserve order of OGs around insertion element
+				push @flankingCoords, $downFlankingCoords[$downBeginIndex], $downFlankingCoords[$downEndIndex]; # begin and end coords in coords array are in the same order as in og array
+			}
+		}
+		
+		# store results
+		push @{$element2og{$elementID}}, \@flankingOGs, \@flankingCoords;
+		foreach my $flankingOG (@flankingOGs) {
+			$focalOGs{$flankingOG} = 1;
+		}
+	}
+	return(\%element2og, \%focalOGs);
+}
+
+sub Parse_OGs_by_signal {
+	my ($ogs, $og2signal, $FLANKING) = @_;
+
+	# identify the FLANKING ogs with greatest signal
+	# because OGs are put in hashes, this will only identify unique OG ids and will ignore duplicates
+	my %ogSorted;
+	foreach my $og (@{$ogs}) {
+		if (exists $og2signal->{$og}) {
+			my $signal = $og2signal->{$og};
+			$ogSorted{$signal}{$og} = 1;
+		}
+	}
+	# pick the top FLANKING ogs, sorted by signal
+	my %topOGs;
+	my $topOGcount = 0;
+	foreach my $signal (sort {$b <=> $a} keys %ogSorted) {
+		foreach my $og (keys %{$ogSorted{$signal}}) {
+			$topOGs{$signal}{$og} = 1;
+			$topOGcount++;
+		}
+		last if ($topOGcount >= $FLANKING); # if for example, 20 ogs had the same top signal, we want to make sure we look at all of them and then pick the closest ones
+	}
+	# pick the top FLANKING ogs with the top signal, sorted by position
+	# for each of the highest signal magnitudes, pick the closest OG to the first position in array
+	# basically, evaluate each og in array against a list of top OGs ordered by signal
+	my %closestOGs;
+	foreach my $signal (sort {$b <=> $a} keys %topOGs) {
+		foreach my $og (@{$ogs}) { # iterate down from first position in array
+			if (exists $topOGs{$signal}{$og}) { # is this a OG with among the highest signal?
+				$closestOGs{$og} = 1;
+				last if ((scalar (keys %closestOGs)) >= $FLANKING); # stop iterating out once we have found our closest FLANKING unique OGs with top signals
+			}
+		}
+		last if ((scalar (keys %closestOGs)) >= $FLANKING); # stop iterating out once we have found our closest FLANKING unique OGs with top signals
+	}
+	return(\%closestOGs);	
+}
+
+sub Parse_group_file_by_og {
+	my ($clusteringOutfile, $SEP) = @_;
+	my $datestring = localtime();					
+	my (%group2member, %group2signal, %group2ome);
+	open (my $IN, '<', $clusteringOutfile) or usage("\n\n[$datestring] error: cannot read $clusteringOutfile, exiting\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		my (@members) = split/\s+/, $line;
+		my $group = shift @members;
+		$group =~ s/:$//;
+		push @{$group2member{$group}}, @members;
+		foreach my $member (@members) {
+			my ($omeID)= split/$SEP/, $member;
+			$group2ome{$group}{$omeID} = 1;
+		}
+	}
+	
+	# count number of unique omes per group as that group's signal
+	foreach my $groupID (keys %group2ome) {
+		my $signal = scalar(keys %{$group2ome{$groupID}});
+		$group2signal{$groupID} = $signal;
+	}	
+	return(\%group2member, \%group2signal);	
+}
+
+sub Parse_group_file_by_member {
+	my ($clusteringOutfile) = @_;
+	my $datestring = localtime();					
+	my %member2group;
+	open (my $IN, '<', $clusteringOutfile) or usage("\n\n[$datestring] error: cannot read $clusteringOutfile, exiting\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		my (@members) = split/\s+/, $line;
+		my $group = shift @members;
+		$group =~ s/:$//;
+		
+		foreach my $member (@members) {
+			$member2group{$member} = $group;
+		}
+	}
+	return(\%member2group);	
+}
+
+sub Parse_site_features {
+	my ($featureFile) = @_;
+	my (%site2feat, %element2site);
+	open(my $IN, '<', $featureFile) or usage("\nError: can't open $featureFile for reading\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		next if ($line =~ m/^#/);
+		my ($elementID, $elementCaptainID, $elementContigID, $elementBegin, $elementEnd, $elementLength, $elementStrand, $emptySiteID, $emptyContigID, $emptyBegin, $emptyEnd, $emptyLength, $emptyStrand, $emptySiteSeq, $quality, $warnings) = split/\t/, $line;
+		push @{$site2feat{$emptySiteID}}, "${emptyBegin}-${emptyEnd}", $emptyContigID;
+		$element2site{$elementID}{$emptySiteID} = $quality;
+	}
+	return(\%site2feat, \%element2site);
+}
+
+sub Parse_tagged_genes_from_bed {
+	my ($tagFile, $captainIDs) = @_;
+	my (%tyr2feat, %tag2feat);
+	
+	open(my $IN, '<', $tagFile) or usage("\nError: can't open $tagFile for reading\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		# DK001_Scaffold1	97800	100136	DK001_V000019	$tag	+	DK001_ship00001
+		my ($contigID, $begin, $end, $featureID, $idtag, $strand, $regionIDString, $annotation) = split("\t", $line);
+		next if (exists $captainIDs->{$featureID}); # skip starship-associated tyrs
+		
+		# load up all features into tag2feat
+		push @{$tag2feat{$featureID}}, "${begin}-${end}", $contigID;
+		
+		# load up tyrs into a specific hash for easier parsing
+		next if ($idtag ne 'tyr');
+		push @{$tyr2feat{$featureID}}, "${begin}-${end}", $contigID;
+	}
+	return(\%tyr2feat, \%tag2feat);
+}
+
+sub Parse_tagged_genes_from_gff {
+	my ($gffFile, $NAMEFIELD) = @_;
+	my %tag2feat;
+	my $datestring = localtime();
+	open (my $IN, '<', $gffFile) or die("[$datestring] error: can't open $gffFile for reading\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		my ($contigID, $annotator, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $attributes) = split("\t", $line);
+		$attributes = "\t$attributes";
+		$attributes =~ m/[;\t]$NAMEFIELD([^;]+)/;
+		my $seqID = $1;
+		push @{$tag2feat{$seqID}}, "${begin}-${end}", $contigID;
+	}
+	return(\%tag2feat);	
+}
+
+sub Parse_element_features {
+	my ($featureFile) = @_;
+	my (%element2feat, %contig2element, %captainIDs);
+	open(my $IN, '<', $featureFile) or usage("\nError: can't open $featureFile for reading\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		next if ($line =~ m/^#/);
+		my ($contigID, $starshipID, $captainID, $elementBegin, $elementEnd, $elementLength, $strand, $boundaryType, $emptySiteID, $emptyContig, $emptyBegin, $emptyEnd, $emptySeq, $upTSD, $downTSD, $TSDedit, $upTIR, $downTIR, $TIRedit, $nestedInside, $containNested) = split/\t/, $line;
+		next if (($boundaryType ne 'flank') && ($boundaryType ne 'insert') && ($boundaryType ne 'extend'));
+		my $range = "${elementBegin}-${elementEnd}";
+		push @{$element2feat{$starshipID}}, $range, $contigID, $boundaryType;
+		$contig2element{$contigID}{$starshipID} = $range;
+		$captainIDs{$captainID} = 1;
+	}
+	return(\%element2feat, \%contig2element, \%captainIDs);
+}
+
+sub Parse_neighboring_OG_strings {
+	my ($gene2og, $contig2gene, $focalOGs, $og2signal, $DISTANCE, $MINFLANK, $MAXFLANK, $REVERSE, $MAXSIGNAL) = @_;
+	
+	# structured: {gene}{up/down} = \@OGs, \@coords, $contigID
+	my (%gene2neighboringOGsSorted, %gene2neighboringOGsFinal);
+	
+	# keep track of all features that overal with a restricted coord to speed up computation
+	my %restrictedGeneIDs;
+	
+	foreach my $contigID (keys %{$contig2gene}) {
+		
+		# approach flanking by heading OUT from each focal gene
+		# grab the upstream set of OGs by iterating past the begining coordinate of the gene in a decreasing manner until max distance is reached
+		# since the genes are arranged linearly, the upstream neighboring genes up to gene X of a focal gene will be the downstream neighboring genes of gene X
+		
+		foreach my $focalGeneBegin (sort { $a <=> $b } keys %{$contig2gene->{$contigID}}) {
+			my $focalGeneEnd = $focalGeneBegin + $DISTANCE;
+
+			foreach my $focalGeneID (nsort keys %{$contig2gene->{$contigID}->{$focalGeneBegin}}) { # there should only ever be 1, but sometimes could be more than 1
+				
+				next if ((exists $restrictedGeneIDs{$focalGeneID}) && ($restrictedGeneIDs{$focalGeneID} == 1));
+				
+				if (exists $gene2og->{$focalGeneID} && exists $focalOGs->{$gene2og->{$focalGeneID}}) { # does this focalgene have an OG and is it a focal OG?
+
+					# check if focal gene overlaps with a restricted feature
+					my ($focalnull1, $focalnull2, $focalnull3, $focalnull4, $focalFeatBegin, $focalFeatEnd) = split/\t/, $contig2gene->{$contigID}->{$focalGeneBegin}->{$focalGeneID};
+	
+					# we know that the focal gene does not overlap, so store that info
+					$restrictedGeneIDs{$focalGeneID} = 0 if (not exists $restrictedGeneIDs{$focalGeneID});
+
+					# gather all other genes with focal OGs DISTANCE away for focal gene downstream; and do reciprocal for upstream of target gene
+					# stop iterating once we have saturated the upstream and downstream with FLANKING OGs with MAXSIGNAL (it can't ever get better than that)
+
+					# store a maxsignal saturation score for all genes; stop iterating once neighboring OG string is saturated with OGs with the highest signal
+					my %signalSaturation;
+	
+					foreach my $targetGeneBegin (sort { $a <=> $b } keys %{$contig2gene->{$contigID}}) { # will ensure that focalGene is evaluated against itself so its own info gets into its own hash
+						if (($targetGeneBegin >= $focalGeneBegin) && ($targetGeneBegin <= $focalGeneEnd)) {
+						
+							foreach my $targetGeneID (nsort keys %{$contig2gene->{$contigID}->{$targetGeneBegin}}) { # there should only ever be 1
+								
+								next if ((exists $restrictedGeneIDs{$targetGeneID}) && ($restrictedGeneIDs{$targetGeneID} == 1));
+								last if (scalar (keys %signalSaturation >= $MAXFLANK));
+		
+								if (exists $gene2og->{$targetGeneID} && exists $focalOGs->{$gene2og->{$targetGeneID}}) { # does this targetgene have an OG and is it a target OG?
+
+									# check if target gene overlaps with a restricted feature
+									my ($targetnull1, $targetnull2, $targetnull3, $targetnull4, $targetFeatBegin, $targetFeatEnd) = split/\t/, $contig2gene->{$contigID}->{$targetGeneBegin}->{$targetGeneID};
+
+									# we know that the target gene does not overlap, so store that info
+									$restrictedGeneIDs{$targetGeneID} = 0 if (not exists $restrictedGeneIDs{$targetGeneID});
+
+									# store info as downstream info of focal gene and as upstream info of target gene
+									push @{$gene2neighboringOGsSorted{$focalGeneID}{'down'}[0]}, $gene2og->{$targetGeneID};
+									push @{$gene2neighboringOGsSorted{$focalGeneID}{'down'}[1]}, $targetFeatBegin, $targetFeatEnd;
+									push @{$gene2neighboringOGsSorted{$focalGeneID}{'down'}}, $contigID;
+
+									push @{$gene2neighboringOGsSorted{$targetGeneID}{'up'}[0]}, $gene2og->{$focalGeneID};
+									push @{$gene2neighboringOGsSorted{$targetGeneID}{'up'}[1]}, $focalFeatBegin, $focalFeatEnd;
+									push @{$gene2neighboringOGsSorted{$targetGeneID}{'up'}}, $contigID;
+									
+									# check if the neighboring OG string is as saturated as it gets
+									# since we are looking at the upstream and downstream simultaneously, we are really measuring saturation in the region between focalGene and targetGene, including both the focal gene and target gene
+									$signalSaturation{$gene2og->{$targetGeneID}} = 1 if ($og2signal->{$gene2og->{$targetGeneID}} == $MAXSIGNAL);
+									$signalSaturation{$gene2og->{$focalGeneID}} = 1 if ($og2signal->{$gene2og->{$targetGeneID}} == $MAXSIGNAL);
+									last if (scalar (keys %signalSaturation >= $MAXFLANK));
+								} 
+							}
+						} 
+						last if (scalar (keys %signalSaturation >= $MAXFLANK));
+					}
+				}
+			}
+		}
+	}
+	
+	# for each focal gene, choose the MAXFLANK genes with greatest phylogenetic signal in its upstream and downstream
+	foreach my $focalGene (keys %gene2neighboringOGsSorted) {
+		foreach my $direction (keys %{$gene2neighboringOGsSorted{$focalGene}}) {
+			my ($flankingOGs, $flankingCoords, $contigID) = @{$gene2neighboringOGsSorted{$focalGene}{$direction}};
+			
+			# reverse OGs, so that the top genes from the flanking region end are selected
+			my ($focalSignalOGs);
+			if (defined $REVERSE) {
+				my @revFlankingOGs = reverse @{$flankingOGs};
+				($focalSignalOGs) = Parse_OGs_by_signal(\@revFlankingOGs, $og2signal, $MAXFLANK) if (scalar @{$flankingOGs} >= $MINFLANK);
+			} else {
+				($focalSignalOGs) = Parse_OGs_by_signal($flankingOGs, $og2signal, $MAXFLANK) if (scalar @{$flankingOGs} >= $MINFLANK);
+			}
+			# skip any genes without at least $MINFLANK in either upstream or downstream
+			# we check here again, because focalOG array will only contain unique OGs, not any duplicated ones
+			my $flankSize = scalar keys %{$focalSignalOGs};
+			next if ($flankSize < $MINFLANK); # ignore any genes that don't have enough flanking OGs recovered to ever match 
+			
+			# copy info over to temporary arrays to avoid errors while accessing their indices
+			my @flankingOGs = @{$flankingOGs};
+			my @flankingCoords = @{$flankingCoords};
+			
+			# iterate through upstream and downstream, and only retain those OGs with the highest signal
+			# fyi duplicate OGs dont count towards the total
+			my (@flankingOGsFinal, @flankingCoordsFinal);
+			my ($beginCoordIndex, $endCoordIndex) = (-2, -1);
+			foreach my $og (@flankingOGs) {
+				$beginCoordIndex +=2;
+				$endCoordIndex +=2;
+				if (exists $focalSignalOGs->{$og}) {
+					push @flankingOGsFinal, $og;
+					push @flankingCoordsFinal, $flankingCoords[$beginCoordIndex], $flankingCoords[$endCoordIndex]; # coords array has same index as the og array
+				}
+			}
+			push @{$gene2neighboringOGsFinal{$focalGene}{$direction}}, \@flankingOGsFinal, \@flankingCoordsFinal, $contigID;
+		}
+
+	}
+	return(\%gene2neighboringOGsFinal);	
+}
+
+
+sub Rename_regions_by_groupsize {
+	my ($region2elementTemp, $region2emptyTemp, $region2fragTemp) = @_;
+	
+	my (%groupSizes, %region2element, %region2empty, %region2frag);
+	
+	# count up the total number of haplotypes
+	foreach my $regionID (nsort keys %{$region2elementTemp}) {
+		my ($elementCount, $emptyCount, $fragCount) = (0,0,0);
+		$elementCount = scalar @{$region2elementTemp->{$regionID}};
+		$emptyCount = scalar keys (%{$region2emptyTemp->{$regionID}}) if (exists $region2emptyTemp->{$regionID});
+		$fragCount = scalar keys (%{$region2fragTemp->{$regionID}}) if (exists $region2fragTemp->{$regionID});
+		my $totalCount = $elementCount + $emptyCount + $fragCount;
+		
+		$groupSizes{$elementCount}{$totalCount}{$regionID} = 1;
+	}
+	
+	my $newGroupCount = 0;
+	foreach my $elementCount (sort {$b <=> $a} keys %groupSizes) {
+		foreach my $totalCount (sort {$b <=> $a} keys %{$groupSizes{$elementCount}}) {
+			foreach my $regionID (nsort keys %{$groupSizes{$elementCount}{$totalCount}}) {
+				$newGroupCount++;
+				my $formattedCount = sprintf("%04d", $newGroupCount);
+				my $newRegionID = "region$formattedCount";
+				push @{$region2element{$newRegionID}}, @{$region2elementTemp->{$regionID}};
+				if (exists $region2emptyTemp->{$regionID}) {
+					foreach my $contigID (keys %{$region2emptyTemp->{$regionID}}) {
+						@{$region2empty{$newRegionID}{$contigID}} = @{$region2emptyTemp->{$regionID}->{$contigID}};
+					}
+				}
+				if (exists $region2fragTemp->{$regionID}) {
+					foreach my $contigID (keys %{$region2fragTemp->{$regionID}}) {
+						@{$region2frag{$newRegionID}{$contigID}} = @{$region2fragTemp->{$regionID}->{$contigID}};
+					}
+				}
+			}
+		}
+	}
+	return(\%region2element, \%region2empty, \%region2frag);	
+}
+
+sub Restrict_starship_coords {
+	my ($element2feat) = @_;
+	my %restrictedCoords;
+	foreach my $starshipID (keys %{$element2feat}) {
+		my ($range, $contigID) = @{$element2feat->{$starshipID}};
+		my ($begin, $end) = split/-/, $range;
+		for my $coordinate ($begin..$end) { # mark each coordinate in starship as restricted
+			$restrictedCoords{$contigID}{$coordinate} = 1;
+		}
+	}
+	return(\%restrictedCoords);	
+}
+
+sub Parse_repeat_GFF {
+	my ($ome2gffFile, $restrictedCoords, $MINREPEAT) = @_;
+	my %repeats = %{$restrictedCoords}; # copy old restrictedCoords to the new one
+	foreach my $ome (keys %{$ome2gffFile}) {
+		open (my $IN, '<', $ome2gffFile->{$ome}) or die("Error: can't open $ome2gffFile->{$ome} for reading\n");
+		while (my $line = <$IN>) {
+			next if ($line =~ m/^#/);
+			chomp $line;
+			my ($contigID, $annotator, $featureType, $begin, $end) = split("\t", $line);
+			next if (($end - $begin) < $MINREPEAT);
+			foreach my $position ($begin .. $end) {
+				$repeats{$contigID}{$position} = 1;
+			}
+		}
+	}
+	return(\%repeats);	
+}
+
+sub Parse_tagged_regions_from_empty {
+	my ($region2emptyTemp, $regionsWithTags) = @_;
+	
+	# iterate through regions with tags to identify all contigIDs in regions
+	my %region2taggedContigs;
+	foreach my $regionID (keys %{$regionsWithTags}) {
+		foreach my $tagID (keys %{$regionsWithTags->{$regionID}}) {
+			my $contigID = $regionsWithTags->{$regionID}->{$tagID};
+			$region2taggedContigs{$regionID}{$contigID} = 1;
+		}
+	}
+
+	# structured: {regionID}{contigID} = \@OGs, \@unsortedCoords
+	my (%region2empty, %region2taggedFrags);
+	foreach my $regionID (keys %{$region2emptyTemp}) {
+		foreach my $contigID (keys %{$region2emptyTemp->{$regionID}}) {
+			if (exists $region2taggedContigs{$regionID}{$contigID}) {
+				@{$region2taggedFrags{$regionID}{$contigID}} = @{$region2emptyTemp->{$regionID}->{$contigID}};
+			} else {
+				@{$region2empty{$regionID}{$contigID}} = @{$region2emptyTemp->{$regionID}->{$contigID}};
+			}
+		}
+	}
+	return(\%region2empty, \%region2taggedFrags);
+}
+
+sub Parse_max_ogsignal {
+	my ($og2signal) = @_;
+	my $MAXSIGNAL = 0;
+	foreach my $og (keys %{$og2signal}) {
+		$MAXSIGNAL = $og2signal->{$og} if ($og2signal->{$og} > $MAXSIGNAL);
+	}
+	return($MAXSIGNAL);
+}
+
+sub Opts_check {
+	my ($opts) = @_;
+	usage() if (exists $opts->{'h'});
+	usage("\nError: no arguments provided\n") if (scalar keys %{$opts} == 0);
+	usage("\nError: please provide a file to --tagged\n") if (not defined $opts->{'tagged'});
+	usage("\nError: the file provided to --tagged does not exist\n") if (! -f $opts->{'tagged'});
+	usage("\nError: please provide a file to --feat\n") if (not defined $opts->{'feat'});
+	usage("\nError: the file provided to --feat does not exist\n") if (! -f $opts->{'feat'});
+	usage("\nError: please provide a file to --stats\n") if (not defined $opts->{'stats'});
+	usage("\nError: the file provided to --stats does not exist\n") if (! -f $opts->{'stats'});
+	usage("\nError: please provide a string to --prefix\n") if (not defined $opts->{'prefix'});
+	usage("\nError: please provide a directory to --outdir\n") if (not defined $opts->{'outdir'});
+	usage("\nError: the directory provided to --outdir does not exist\n") if (! -d $opts->{'outdir'});
+	usage("\nError: please provide a file to --element\n") if (not defined $opts->{'element'});
+	usage("\nError: the file provided to --element does not exist\n") if (! -f $opts->{'element'});
+	if (not defined $opts->{'nameField'}) {
+		$opts->{'nameField'} = 'Name=';
+	}
+	usage("\nError: please provide a file to --orthologs\n") if (not defined $opts->{'orthologs'});
+	usage("\nError: the file provided to --orthologs does not exist\n") if (! -f $opts->{'orthologs'});
+	usage("\nError: please provide a file to --gff\n") if (not defined $opts->{'gff'});
+	usage("\nError: the file provided to --gff does not exist\n") if (! -f $opts->{'gff'});
+	usage("\nError: the file provided to --repeats does not exist\n") if ((defined $opts->{'repeats'}) && (! -f $opts->{'repeats'}));
+	if (not defined $opts->{'flanking'}) {
+		$opts->{'flanking'} = 6;
+	} elsif ($opts->{'flanking'} !~ m/^\d+/) {
+		usage("\nError: --flanking must be an integer\n");
+	}
+	if (not defined $opts->{'distance'}) {
+		$opts->{'distance'} = 600000;
+	} elsif ($opts->{'distance'} !~ m/^\d+/) {
+		usage("\nError: --distance must be an integer\n");
+	}
+	if (not defined $opts->{'mismatching'}) {
+		$opts->{'mismatching'} = 1;
+	} elsif ($opts->{'mismatching'} !~ m/^\d+/) {
+		usage("\nError: --mismatching must be an integer\n");
+	}
+	if (not defined $opts->{'fragconstant'}) {
+		$opts->{'fragconstant'} = 2;
+	} elsif ($opts->{'fragconstant'} !~ m/^\d+\.\d+$/) {
+		usage("\nError: --fragconstant must be a floating value\n");
+	}
+	if (not defined $opts->{'emptyconstant'}) {
+		$opts->{'emptyconstant'} = 2;
+	} elsif ($opts->{'emptyconstant'} !~ m/^\d+\.\d+$/) {
+		usage("\nError: --fragconstant must be a floating value\n");
+	}
+	if (not defined $opts->{'minrepeat'}) {
+		$opts->{'minrepeat'} = 250;
+	} elsif ($opts->{'minrepeat'} !~ m/^\d+/) {
+		usage("\nError: --minrepeat must be an integer\n");
+	}
+	if (not defined $opts->{'mergecount'}) {
+		$opts->{'mergecount'} = 0.5;
+	} elsif ($opts->{'mergecount'} !~ m/^\d+\.\d+$/) {
+		usage("\nError: --mergecount must be a floating value\n");
+	}
+	if (not defined $opts->{'mergelength'}) {
+		$opts->{'mergelength'} = 0.25;
+	} elsif ($opts->{'mergelength'} !~ m/^\d+\.\d+$/) {
+		usage("\nError: --mergelength must be a floating value\n");
+	}
+	if (not defined $opts->{'separator'}) {
+		$opts->{'separator'} = '_';
+	} elsif ($opts->{'separator'} eq ':') {
+		usage("\nError: the separator character cannot be ':'\n");
+	} elsif ($opts->{'separator'} eq ';') {
+		usage("\nError: the separator character cannot be ';'\n");
+	} elsif ($opts->{'separator'} eq '|') {
+		usage("\nError: the separator character cannot be '|'\n");
+	}
+	if (defined $opts->{'separator'}) {
+		$opts->{'separator'} = quotemeta($opts->{'separator'});	# to allow splitting on special characters, like '.'
+	}
+}

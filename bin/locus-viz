@@ -1,0 +1,1164 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use Data::Dumper;
+use File::Basename;
+use Getopt::Long qw(:config auto_abbrev no_ignore_case);
+use Sort::Naturally;
+use Storable;
+use FileHandle;
+use POSIX;
+$|=1;
+# Fishtank lib
+use Fishtank::Utils qw(Parse_known_elements Commandline_check Fasta_hash_many_files Glofish_bed_hash Gff_sortable_gene_hash dim_0_hash dim_1_hash dim_2_hash Open_FH);
+
+sub usage {
+	my $message = shift;
+	my $usage = qq/
+usage: starfish locus-viz [args]
+
+execute alignments with nucmer and generate synteny schematics with gggenomes.
+
+Required:
+-m, --mode          STR    either 'region-align', 'element-align' or 'schematic'.
+-a, --assembly      FILE   2 column tsv: genome code, path to assembly FASTA.
+-b, --bed           FILE   BED file with feature coordinates of mobile elements.
+-x, --prefix        STR    prefix for naming output files.
+-o, --outdir        DIR    output directory.
+
+Required, with defaults:
+-T, --threads       INT    number of threads for alignment software.
+                           (default: 1)
+-U, --upstream      INT    bp to align and visualize upstream.
+                           (default: 0)
+-D, --downstream    INT    bp to align and visualize downstream.
+                           (default: 0)
+--units             STR    units of .png, either 'cm' or 'in'.
+                           (default: in)
+
+Required, if --mode region-align or element-align:
+-A, --aligner       STR    aligner to use, either 'nucmer' or 'minimap2'.
+--nucmeropts        STR    options to pass to nucmer.
+                           (default: \\'--mum\\')
+--deltafilteropts   STR    options to pass to delta-filter.
+                           (default: \\'-m -l 1000 -i 90\\')
+--minimapopts       STR    options to pass to minimap2.
+                           (default: \\'-x asm20 -N 0 -c\\')
+
+Required, if --mode region-align (all output by starfish dereplicate):
+-r, --regions       FILE   regions.txt file.
+-d, --dereplicated  FILE   dereplicated.txt file.
+-j, --jaccard       FILE   haplotype_jaccard.sim file.
+
+Required, if --mode element-align or schematic
+-l, --list          FILE   1 column of elementID(s) to visualize.
+                           (order will reflect figure if --mode element-align)
+
+Required, if --mode schematic
+-t, --ticks         INT    length in bp between tick marks scale.
+                           (default: 25000)
+
+Optional:
+-g, --gff           FILE   2 column tsv: genome code, path to GFF.
+-n, --nameField     STR    GFF3 attribute field where gene features are named.
+                           (required if --gff; default: 'Name=')
+--gc                FILE   BED file with GC content per contig.
+                           (e.g., output by \/utils\/seq-gc.sh)
+--tags              FILE   2 column tsv: geneID, gene tag.
+                           (tags in --bed have priority)
+--dedup                    only visualize non-redundant empty haplotypes.
+                           (useful if visualizing many genomes)
+--featureID                label all gene models with their featureID.
+--regionOrder              arrange haplotypes as they appear in the regions file.
+                           (for --mode region-align only)
+--force                    force all steps even if output already exists.
+-h, --help                 print more details and exit.
+
+/;
+	if (not defined $message) {
+		$message = $usage;
+	} else {
+		$message = "$message\nuse -h for more details\n\n" ;
+	}	
+	die($message);
+}
+
+main: {
+
+	# parse and check options
+	my %opts;
+	GetOptions(\%opts, 
+		'mode|m=s',
+		'aligner|A=s',
+		'assembly|a=s',
+		'regions|r=s',
+		'dereplicated|d=s',
+		'jaccard|j=s',
+		'bed|b=s',
+		'list|l=s',
+		'outdir|o=s',
+		'upstream|U=i',
+		'downstream|D=i',
+		'tags=s',
+		'prefix|x=s',
+		'gc=s',
+		'units=s',
+		'threads|T=i',
+		'nameField|namefield|n=s',
+		'nucmeropts=s',
+		'deltafilteropts=s',
+		'minimapopts=s',
+		'gff|g=s',
+		'force',
+		'dedup',
+		'featureID',
+		'regionOrder',
+		'h|help');
+	Opts_check(\%opts);
+
+	# check dependencies
+	my @commandlines;
+	if ($opts{'aligner'} eq 'nucmer') {
+		@commandlines = ("nucmer", "delta-filter", "show-coords");
+		print "Key parameters:
+nucmer                 $opts{nucmeropts} -T $opts{threads}
+delta-filter           $opts{deltafilteropts}\n\n";
+	}
+	
+	if ($opts{'aligner'} eq 'minimap2') {
+		@commandlines = ("minimap2");
+		print "Key parameters:
+minimap2               $opts{minimapopts} -t $opts{threads}\n\n";
+	}	
+	
+	Commandline_check(\@commandlines);
+
+	
+	#######################################
+	#### FORMAT CHECK AND READ IN DATA ####
+	#######################################
+
+		my $datestring = localtime();
+		print "[$datestring] reading in data..\n";
+	
+		# Parse info from Starship regions
+		# structured: {contigID}{locusID}{featureID} = [begin, end, strand, tag, annotation]
+		my ($starshipFeatures) = Glofish_bed_hash($opts{'bed'});
+
+		# Parse the coordinates of any elements with 'cap' DUF3435 genes
+		# elementBegin and elementEnd are the upmost and downmost coordinates associated with this captain
+		# structured: starshipCoords{locusID} = [elementBegin, elementEnd, strand, tag, ann, contigID]
+		my ($starshipCoordsTemp) = Parse_known_elements($starshipFeatures);
+		my ($starshipCoords) = Reshape_starship_coords($starshipCoordsTemp);
+		
+		# Load up all assembly sequences into a single hash
+		# Structured: {contigID} = sequence
+		my ($sequencePaths) = dim_0_hash($opts{'assembly'}, "\t", "1");
+		my ($id2sequence) = Fasta_hash_many_files($sequencePaths);
+		
+		# Load up elements, in the order in which they will appear if --mode align
+		# structured: [element1, element2, ..]
+		my ($elementList) = Parse_element_list($opts{'list'}) if (defined $opts{'list'});
+		
+		# load up gene2tags, if available
+		my ($gene2tag) = dim_2_hash($opts{'tags'}, "\t", "0:1") if (defined $opts{'tags'});
+		
+		($starshipFeatures) = Update_tags($starshipFeatures, $gene2tag) if (defined $gene2tag);
+
+		# define gc content file, if one was provided
+		my $seq2gc;
+		($seq2gc) = Parse_GC_file($opts{'gc'}) if (defined $opts{'gc'});
+
+		# parse all gff info by contigID and geneID
+		# structured: {contigID}{featureID} = [begin, end, strand, tag, annotation]
+		my %contig2gene;
+		if (defined $opts{'gff'}) {
+			my ($ome2gff) = dim_1_hash($opts{'gff'}, "\t", "0:1");
+			foreach my $ome (keys %{$ome2gff}) {
+				my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'});
+				foreach my $contig (keys %{$gffInfo}) {
+					foreach my $pos (keys %{$gffInfo->{$contig}}) {
+						foreach my $seqID (keys %{$gffInfo->{$contig}->{$pos}}) {
+							my ($featureID, $contigID, $annotator, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $info) = split/\t/, $gffInfo->{$contig}->{$pos}->{$seqID};
+							my $seqTag = '.';
+							if (defined $opts{'featureID'}) {
+								$seqTag = $featureID ; # if gene names are requested, add featureID to any existing tag info
+								$seqTag = ":".join(",", nsort keys %{$gene2tag->{$seqID}}) if ((defined $gene2tag) && (exists $gene2tag->{$seqID}));
+							} else {
+								$seqTag = join(",", nsort keys %{$gene2tag->{$seqID}}) if ((defined $gene2tag) && (exists $gene2tag->{$seqID}));
+							}
+							push @{$contig2gene{$contig}{$featureID}}, $begin, $end, $strand, $seqTag, $info;
+						}
+					}
+				}
+			}
+		}
+		
+		# by default, all element, empty and frag haplotypes, ordered by increasing jaccard similarity to reference
+		# if no jaccard file is supplied, then the order will reflect haplotype order line by line in the .regions file
+		# <elements --> increasing sim> <ref> < empty/frag --> decreasing sim>
+		# {$regionID} = \@[haplotype1, haplotype2, etc]
+		# reference will be flipped from - to + if necessary, based on orientation of its captain
+		# if dedup specified, ignore haplotypes with identical jaccard similarity to reference and within 10% of each others length
+		# structured: regionCoords{regionID}{elementID/emptyID/fragID|tag} = [haplotypeBegin, haplotypeEnd, strand, tag, 'regionBegin-regionEnd', contigID]
+		# structured: @{$regionList{$regionID}}, "${queID}|${queTag}";
+		my ($regionList, $regionCoords) = Parse_haplotype_order($opts{'dereplicated'}, $opts{'jaccard'}, $opts{'regions'}, $starshipCoords, $opts{'dedup'}, $opts{'regionOrder'}) if ($opts{'mode'} eq 'region-align');
+
+		# check that >1 region provided, if --mode align
+		usage("\n[$datestring] error: >1 elementID must be specified in --list if using --mode element-align\n") if (($opts{'mode'} eq 'element-align') && (scalar @{$elementList} == 1));
+		
+	###########################
+	#### EXECUTE ALIGNMENT ####
+	###########################
+		
+		# skip step if --mode schematic
+		if ($opts{'mode'} eq 'element-align' || $opts{'mode'} eq 'region-align') {
+
+			$datestring = localtime();
+			print "[$datestring] executing $opts{'aligner'} alignments..\n";
+		
+			# skip alignment if already present, unless force in effect
+			# for generating $OUTDIR/$PREFIX.tsv.links file
+			if ($opts{'mode'} eq 'element-align') {
+				if ((! -f "$opts{'outdir'}/$opts{'prefix'}.links.tsv") || ($opts{'force'} == 1)) {
+					if ($opts{'aligner'} eq 'nucmer') {
+						my ($failcheck) = Nucmer_wrapper($elementList, $starshipCoords, $id2sequence, $opts{'prefix'}, $opts{'nucmeropts'}, $opts{'deltafilteropts'}, $opts{'threads'}, $opts{'outdir'});
+						if ($failcheck != 0) { die "\n\n[$datestring] error: could not execute mummer on commandline, exiting..\n$!\n";}
+					} elsif ($opts{'aligner'} eq 'minimap2') {
+						my ($failcheck) = Minimap_wrapper($elementList, $starshipCoords, $id2sequence, $opts{'prefix'}, $opts{'minimapopts'}, $opts{'threads'}, $opts{'outdir'});
+						if ($failcheck != 0) { die "\n\n[$datestring] error: could not execute minimap2 on commandline, exiting..\n$!\n";}
+					}
+				} else {
+					print "[$datestring] $opts{'outdir'}/$opts{'prefix'}.links.tsv exists, skipping alignment\n";
+				}
+			} elsif ($opts{'mode'} eq 'region-align') {
+
+				# iterate through each region, print out region-specific alignment files based on $prefix
+				foreach my $regionID (nsort keys %{$regionCoords}) {
+					if ((! -f "$opts{'outdir'}/$opts{'prefix'}.$regionID.links.tsv") || ($opts{'force'} == 1)) {
+						my @haplotypeList = @{$regionList->{$regionID}};
+						my %haplotypeCoords = %{$regionCoords->{$regionID}};
+						next if (scalar @haplotypeList < 2);
+						if ($opts{'aligner'} eq 'nucmer') {
+							my ($failcheck) = Nucmer_wrapper(\@haplotypeList, \%haplotypeCoords, $id2sequence, "$opts{'prefix'}.$regionID", $opts{'nucmeropts'}, $opts{'deltafilteropts'}, $opts{'threads'}, $opts{'outdir'});
+							if ($failcheck != 0) { die "\n\n[$datestring] error: could not execute mummer on commandline, exiting..\n$!\n";}
+						} elsif ($opts{'aligner'} eq 'minimap2') {
+							my ($failcheck) = Minimap_wrapper(\@haplotypeList, \%haplotypeCoords, $id2sequence, "$opts{'prefix'}.$regionID", $opts{'minimapopts'}, $opts{'threads'}, $opts{'outdir'});
+							if ($failcheck != 0) { die "\n\n[$datestring] error: could not execute minimap2 on commandline, exiting..\n$!\n";}
+						}
+					} else {
+						print "[$datestring] $opts{'outdir'}/$opts{'prefix'}.$regionID.links.tsv exists, skipping alignment\n";
+					}		
+				}
+			} 		
+		}
+
+	##################################################
+	#### PRINT CONFIG FILES AND EXECUTE GGGENOMES ####
+	##################################################
+
+		# print separate 'genes', 'feats', 'seq', 'links' config files for each region if --mode schematic
+		# print a single 'genes', 'feats', and 'seq' config file with multiple regions if --mode align
+		# structured: [[prefix, geneFile1, featFile1, seqFile1, linkFile1], [prefix, geneFile2, featFile2, seqFile2], ..], 
+		# where File are paths to printed files and scalar @{configFiles} > 1 if --mode align. linksFile only exists if --mode align. 'prefix' is $opts{'prefix'} if --mode align and '$opts{'prefix'}.locusID' if --mode schematic
+
+		# Unfortunately, gggenomes can get a little buggy when it comes to reading links files
+		# and will often extend link ribbons beyond the focal region. Here, we do some simple 
+		# on the fly filtering to ensure that no coordinate in the links file goes beyond the
+		# coordinates of the requested region/element
+		# will generate a temporary file $PREFIX.links.filt.tsv
+
+		$datestring = localtime();
+		print "[$datestring] printing config files and executing gggenomes script..\n";
+		my $configFiles;
+		if ($opts{'mode'} eq 'element-align' || $opts{'mode'} eq 'schematic') {
+			($configFiles) = Print_config_files($elementList, $starshipFeatures, $starshipCoords, \%contig2gene, $seq2gc, $opts{'upstream'}, $opts{'downstream'}, $opts{'mode'}, $opts{'ticks'}, $opts{'prefix'}, $opts{'outdir'});
+			Filter_links($elementList, $starshipCoords, $opts{'upstream'}, $opts{'downstream'}, $opts{'mode'}, $opts{'aligner'}, $opts{'prefix'}, $opts{'outdir'});
+			Execute_gggenomes($configFiles, $opts{'mode'}, $opts{'aligner'}, $opts{'units'}, $opts{'outdir'});
+		} elsif ($opts{'mode'} eq 'region-align') {
+			foreach my $regionID (nsort keys %{$regionCoords}) {
+				my @haplotypeList = @{$regionList->{$regionID}};
+				my %haplotypeCoords = %{$regionCoords->{$regionID}};
+				next if (scalar @haplotypeList < 2);
+				($configFiles) = Print_config_files(\@haplotypeList, $starshipFeatures, \%haplotypeCoords, \%contig2gene, $seq2gc, $opts{'upstream'}, $opts{'downstream'}, $opts{'mode'}, $opts{'ticks'}, "$opts{'prefix'}.$regionID", $opts{'outdir'});
+				Filter_links(\@haplotypeList, \%haplotypeCoords, $opts{'upstream'}, $opts{'downstream'}, $opts{'mode'}, $opts{'aligner'}, "$opts{'prefix'}.$regionID", $opts{'outdir'});
+				Execute_gggenomes($configFiles, $opts{'mode'}, $opts{'aligner'}, $opts{'units'}, $opts{'outdir'});
+			}
+		}
+
+		$datestring = localtime();
+		print "[$datestring] done\n";
+}
+
+sub Execute_gggenomes {
+	my ($configFiles, $MODE, $ALIGNER, $UNITS, $OUTDIR) = @_;	
+	foreach my $configList (@{$configFiles}) {
+		my ($PREFIX, $geneConfig, $featConfig, $seqConfig, $altConfig, $gcConfig) = @{$configList};
+		
+		# rule of thumb for size of alignment files:
+		# 3 elements/ inch for height
+		# 27kb / inch for length
+		
+		my ($OUT) = Open_FH("$OUTDIR/$PREFIX.R");
+		my $outSVG = "$OUTDIR/$PREFIX.svg";
+		my $outPNG = "$OUTDIR/$PREFIX.png";
+		
+		# clever way to flip plots based on captain orientation
+		#  flip(where(~any(.x\$strand[.x\$name %in% "cap"] == "-")), .bin_track=genes) +
+		
+		# type of linkline to read in will depend on aligner
+		# read_blast() function of gggenomes is unpredictably buggy: 
+		my $linkLine;
+		if ($ALIGNER eq 'nucmer') {
+			$linkLine = "linkFeats = read_links(\"$altConfig\", format = 'blast')"
+		} elsif ($ALIGNER eq 'minimap2') {
+			$linkLine = "linkFeats = read_links(\"$altConfig\", format = 'paf')"
+		}
+		
+		# only include a gc line if a gc file is provided
+		my ($gcLine1, $gcLine2, $gcFeatures) = ("", "", "");
+		if (-f $gcConfig) {
+			$gcLine1 = "regionGC <- read_bed(\"$gcConfig\")";
+			$gcLine2 = "%>% add_feats(gc=regionGC)";
+			$gcFeatures = "geom_wiggle(aes(z=score, group=seq_id), feats(gc), fill=\"lavenderblush4\", offset=-.3, height=.38, bounds=c(.5,0.15,0.65)) +";
+		}
+		
+		if ($MODE eq 'schematic') {
+			print $OUT qq/#!\/usr\/bin\/env Rscript
+library(gggenomes)
+regionGenes = utils::read.table(\"$geneConfig\", header = T, sep = '\t')
+regionSeqs = utils::read.table(\"$seqConfig\", header = T, sep = '\t')
+regionFeats = utils::read.table(\"$featConfig\", header = T, sep = '\t')
+regionTicks = utils::read.table(\"$altConfig\", header = T, sep = '\t')
+
+lengthFrac = floor(as.integer(regionSeqs\$length) \/ 100) # may have to adjust this divisor to fit everything into the same frame
+
+schematic <- gggenomes(genes = regionGenes, seqs = regionSeqs, feats = regionFeats) +
+  add_feats(regionTicks) +
+  geom_seq(size = 3, alpha = 0.4, color = "#ff0000") +
+  geom_seq(size = 0.5) +
+  geom_bin_label() +
+  geom_gene(aes(fill=name), show.legend = F, shape = 3, stroke = 0.15) +
+  scale_fill_manual("Gene tags", values = c("cap" = "#ff0000", "tyr" = "#ff0000", "d37" = "#92e9ff", "fre" = "#b17227", "plp" = "#fdb735", "nlr" = "#048dfb"), na.value = "cornsilk3") +
+  geom_gene_tag(aes(label=name), nudge_y=0.25, check_overlap = FALSE) +
+  geom_feat(alpha=.6, size=10, position="identity") +
+  geom_feat_text(aes(label=type), nudge_y=-0.3, check_overlap = TRUE) +
+  geom_feat_text(data=feats(regionTicks), aes(label=feat_id), nudge_y=-0.25, check_overlap = TRUE, size = 1.5) +
+  theme_void() + 
+  theme(plot.margin = unit(c(0.1,0.1,0.1,0.1), "cm"))
+ggsave(\"$outPNG\", plot = schematic, units = "px", height = 200, width = lengthFrac)
+ggsave(\"$outSVG\", plot = schematic, units = "px", height = 200, width = lengthFrac)
+/;		
+		
+		} elsif ($MODE eq 'element-align' || $MODE eq 'region-align') {
+		
+			print $OUT qq/#!\/usr\/bin\/env Rscript
+library(gggenomes)
+regionGenes = utils::read.table(\"$geneConfig\", header = T, sep = '\t')
+regionSeqs = utils::read.table(\"$seqConfig\", header = T, sep = '\t')
+regionFeats = utils::read.table(\"$featConfig\", header = T, sep = '\t')
+$linkLine
+$gcLine1
+
+widthFrac = max(regionSeqs\$length) \/ 27000
+#heightFrac = nrow(regionSeqs) \/ 2 # for default cases
+heightFrac = nrow(regionSeqs) \/ 1.1 # for when OG ids are included as gene_name
+expandFrac = 0.6
+if (max(regionSeqs\$length) < 100000) {
+	expandFrac = 1.5
+} else if (max(regionSeqs\$length) < 200000) {
+	expandFrac = 1.2
+} 
+
+align <- gggenomes(genes = regionGenes, seqs = regionSeqs, feats = regionFeats, links = linkFeats) $gcLine2 +
+  geom_link(offset = 0.04) +
+  geom_bin_label(size = 3, expand_left = expandFrac, nudge_left = 0.05) +
+  geom_feat(alpha=.6, size=3, position="identity", color = "#ff0000") +
+  geom_seq(size = 0.5) +
+  geom_gene(aes(fill=name), show.legend = T, shape = 3) + $gcFeatures
+  scale_fill_manual("Gene tags", values = c("cap" = "#ff0000", "tyr" = "#ff0000", "d37" = "#92e9ff", "fre" = "#b17227", "plp" = "#fdb735", "nlr" = "#048dfb"), na.value = "cornsilk3") +
+  geom_gene_tag(aes(label=name), size = 2, nudge_y=0.1, check_overlap = FALSE)
+ggsave(\"$outPNG\", plot = align, units = \"$UNITS\", height = heightFrac, width = widthFrac, limitsize = FALSE)
+ggsave(\"$outSVG\", plot = align, units = \"$UNITS\", height = heightFrac, width = widthFrac, limitsize = FALSE)
+/;
+		}
+		
+		close($OUT);
+		sleep(2);
+		system("chmod +x $OUTDIR/$PREFIX.R");
+		sleep(2);
+		system("$OUTDIR/$PREFIX.R 1&>/dev/null");
+		sleep(2);
+	}
+}
+
+sub Filter_links {
+	my ($locusList, $starshipCoords, $UPSTREAM, $DOWNSTREAM, $MODE, $ALIGNER, $PREFIX, $OUTDIR) = @_;
+	
+	my $oldLinksFile = "$OUTDIR/$PREFIX.links.tsv";
+	
+	my $datestring = localtime();
+	open (my $IN, '<', $oldLinksFile) or die("[$datestring] Error: can't open the links file $oldLinksFile to filter, but it should exist..\n");
+	my $newLinksFile = "$OUTDIR/$PREFIX.links.filt.tsv";
+	my $OUT = Open_FH($newLinksFile);
+	
+	my %locusCoords; # stores updated coordinates for regions in locus, taking into account UPSTREAM and DOWNSTREAM
+	foreach my $locusID (@{$locusList}) {
+	
+		$datestring = localtime();
+		if (not defined $starshipCoords->{$locusID}) {
+			die("[$datestring] Error: can't find coordinates for $locusID in --bed, exiting..\n");
+		}
+	
+		my ($locusBegin, $locusEnd, $locusStrand, $locusTag, $locusAnn, $contigID) = @{$starshipCoords->{$locusID}};
+
+		if ($MODE eq 'element-align' || $MODE eq 'schematic') {
+			
+			# print 'seqs' file
+			if ($UPSTREAM != '0' || $DOWNSTREAM != '0') {
+				if ($locusStrand eq '+') {
+					$locusBegin = $locusBegin - $UPSTREAM;
+					$locusBegin = 0 if ($locusBegin < 0);
+					$locusEnd = $locusEnd + $DOWNSTREAM;
+				} elsif ($locusStrand eq '-') {
+					$locusBegin = $locusBegin - $DOWNSTREAM;
+					$locusBegin = 0 if ($locusBegin < 0);
+					$locusEnd = $locusEnd + $UPSTREAM;
+				}	
+			}
+			$locusCoords{$locusID} = "${locusBegin}-${locusEnd}";
+
+		} elsif ($MODE eq 'region-align') {
+			
+			# print 'seqs' file for both elements and empty
+			my ($regionBegin, $regionEnd) = split/-/, $locusAnn;
+			if ($UPSTREAM != '0' || $DOWNSTREAM != '0') {
+				if ($locusStrand eq '+') {
+					$regionBegin = $regionBegin - $UPSTREAM;
+					$regionBegin = 0 if ($regionBegin < 0);
+					$regionEnd = $regionEnd + $DOWNSTREAM;
+				} elsif ($locusStrand eq '-') {
+					$regionBegin = $regionBegin - $DOWNSTREAM;
+					$regionBegin = 0 if ($regionBegin < 0);
+					$regionEnd = $regionEnd + $UPSTREAM;
+				}	
+			}
+			$locusCoords{$locusID} = "${regionBegin}-${regionEnd}";
+		}
+	}
+	
+	# open original links file for reading, and filter on the fly
+	if ($ALIGNER eq 'nucmer') {
+		while (my $line = <$IN>) {
+			chomp $line;
+			my ($queryID, $targetID, $pident, $length, $mismatches, $gaps, $queryStart, $queryEnd, $targetStart, $targetEnd, $eval, $bit) = split/\t/, $line;
+			my ($queryMaxStart, $queryMaxEnd) = split/-/, $locusCoords{$queryID};
+			# ignore if both alignment coordinates are outside of the region of interest
+			if ($queryStart > $queryEnd) { # coordinates are reversed, indicating a flipped alignment
+				if ((($queryEnd < $queryMaxStart) && ($queryStart < $queryMaxStart)) || (($queryEnd > $queryMaxEnd) && ($queryStart > $queryMaxEnd))) {
+					$queryEnd = $queryEnd;
+					$queryStart = $queryStart;
+				} else {
+					$queryEnd = $queryMaxStart if ($queryEnd < $queryMaxStart);
+					$queryStart = $queryMaxEnd if ($queryStart > $queryMaxEnd);
+				}
+			} else {
+				if ((($queryEnd < $queryMaxStart) && ($queryStart < $queryMaxStart)) || (($queryEnd > $queryMaxEnd) && ($queryStart > $queryMaxEnd))) {
+					$queryEnd = $queryEnd;
+					$queryStart = $queryStart;
+				} else {
+					$queryEnd = $queryMaxEnd if ($queryEnd > $queryMaxEnd);
+					$queryStart = $queryMaxStart if ($queryStart < $queryMaxStart);
+				}
+			}
+
+			my ($targetMaxStart, $targetMaxEnd) = split/-/, $locusCoords{$targetID};
+			if ($targetStart > $targetEnd) { # coordinates are reversed, indicating a flipped alignment
+				if ((($targetEnd < $targetMaxStart) && ($targetStart < $targetMaxStart)) || (($targetEnd > $targetMaxEnd) && ($targetStart > $targetMaxEnd))) {
+					$targetEnd = $targetEnd;
+					$targetStart = $targetStart;
+				} else {
+					$targetEnd = $targetMaxStart if ($targetEnd < $targetMaxStart);
+					$targetStart = $targetMaxEnd if ($targetStart > $targetMaxEnd);
+				}
+			} else {
+				if ((($targetEnd < $targetMaxStart) && ($targetStart < $targetMaxStart)) || (($targetEnd > $targetMaxEnd) && ($targetStart > $targetMaxEnd))) {
+					$targetEnd = $targetEnd;
+					$targetStart = $targetStart;
+				} else {
+					$targetEnd = $targetMaxEnd if ($targetEnd > $targetMaxEnd);
+					$targetStart = $targetMaxStart if ($targetStart < $targetMaxStart);
+				}
+			}
+			print $OUT "$queryID\t$targetID\t$pident\t$length\t$mismatches\t$gaps\t$queryStart\t$queryEnd\t$targetStart\t$targetEnd\t$eval\t$bit\n";
+		}
+	
+	} elsif ($ALIGNER eq 'minimap2') {
+		while (my $line = <$IN>) {
+			chomp $line;
+			my ($queryID, $queryLength, $queryStart, $queryEnd, $strand, $targetID, $targetLength, $targetStart, $targetEnd, $residueMatches, $blockLength, $mappingQual) = split/\t/, $line;
+			my ($queryMaxStart, $queryMaxEnd) = split/-/, $locusCoords{$queryID};
+			if ($queryStart > $queryEnd) { # coordinates are reversed, indicating a flipped alignment
+				if ((($queryEnd < $queryMaxStart) && ($queryStart < $queryMaxStart)) || (($queryEnd > $queryMaxEnd) && ($queryStart > $queryMaxEnd))) {
+					$queryEnd = $queryEnd;
+					$queryStart = $queryStart;
+				} else {
+					$queryEnd = $queryMaxStart if ($queryEnd < $queryMaxStart);
+					$queryStart = $queryMaxEnd if ($queryStart > $queryMaxEnd);
+				}
+			} else {
+				if ((($queryEnd < $queryMaxStart) && ($queryStart < $queryMaxStart)) || (($queryEnd > $queryMaxEnd) && ($queryStart > $queryMaxEnd))) {
+					$queryEnd = $queryEnd;
+					$queryStart = $queryStart;
+				} else {
+					$queryEnd = $queryMaxEnd if ($queryEnd > $queryMaxEnd);
+					$queryStart = $queryMaxStart if ($queryStart < $queryMaxStart);
+				}
+			}
+
+			my ($targetMaxStart, $targetMaxEnd) = split/-/, $locusCoords{$targetID};
+			if ($targetStart > $targetEnd) { # coordinates are reversed, indicating a flipped alignment
+				if ((($targetEnd < $targetMaxStart) && ($targetStart < $targetMaxStart)) || (($targetEnd > $targetMaxEnd) && ($targetStart > $targetMaxEnd))) {
+					$targetEnd = $targetEnd;
+					$targetStart = $targetStart;
+				} else {
+					$targetEnd = $targetMaxStart if ($targetEnd < $targetMaxStart);
+					$targetStart = $targetMaxEnd if ($targetStart > $targetMaxEnd);
+				}
+			} else {
+				if ((($targetEnd < $targetMaxStart) && ($targetStart < $targetMaxStart)) || (($targetEnd > $targetMaxEnd) && ($targetStart > $targetMaxEnd))) {
+					$targetEnd = $targetEnd;
+					$targetStart = $targetStart;
+				} else {
+					$targetEnd = $targetMaxEnd if ($targetEnd > $targetMaxEnd);
+					$targetStart = $targetMaxStart if ($targetStart < $targetMaxStart);
+				}
+			}
+			print $OUT "$queryID\t$queryLength\t$queryStart\t$queryEnd\t$strand\t$targetID\t$targetLength\t$targetStart\t$targetEnd\t$residueMatches\t$blockLength\t$mappingQual\n";
+		}	
+	}
+}
+
+
+sub Print_config_files {
+	my ($locusList, $starshipFeatures, $starshipCoords, $gffFeatures, $seq2gc, $UPSTREAM, $DOWNSTREAM, $MODE, $TICKSCALE, $PREFIX, $OUTDIR) = @_;
+	my (@configFiles, @alignFiles);
+	
+	# print a single type of config for the whole analysis if align
+	my ($genesOUT) = Open_FH("$OUTDIR/$PREFIX.genes.config", "seq_id\tstart\tend\tstrand\tfeat_id\tname\n") if ($MODE eq 'element-align' || $MODE eq 'region-align');
+	my ($featsOUT) = Open_FH("$OUTDIR/$PREFIX.feats.config", "seq_id\tstart\tend\tstrand\tfeat_id\ttype\n" ) if ($MODE eq 'element-align' || $MODE eq 'region-align');
+	my ($seqsOUT) = Open_FH("$OUTDIR/$PREFIX.seqs.config", "seq_id\tstart\tend\tstrand\tlength\n") if ($MODE eq 'element-align' || $MODE eq 'region-align');
+	my ($gcOUT) = Open_FH("$OUTDIR/$PREFIX.gc.config") if ((defined $seq2gc) && (($MODE eq 'element-align') || ($MODE eq 'region-align')));
+	
+	push @alignFiles, "$PREFIX", "$OUTDIR/$PREFIX.genes.config", "$OUTDIR/$PREFIX.feats.config", "$OUTDIR/$PREFIX.seqs.config", "$OUTDIR/$PREFIX.links.filt.tsv", "$OUTDIR/$PREFIX.gc.config" if ($MODE eq 'element-align' || $MODE eq 'region-align');; # links file was printed out in sub Nucmer_wrapper
+	push @configFiles, \@alignFiles if ($MODE eq 'element-align' || $MODE eq 'region-align');
+
+	foreach my $locusID (@{$locusList}) {
+	
+		my $datestring = localtime();
+		if (not defined $starshipCoords->{$locusID}) {
+			die("[$datestring] Error: can't find coordinates for $locusID in --bed, exiting..\n");
+		}
+	
+		my ($locusBegin, $locusEnd, $locusStrand, $locusTag, $locusAnn, $contigID) = @{$starshipCoords->{$locusID}};
+		# as above, but with a separate set of config files for each locus if schematic
+		# also print out custom tickmarks
+		($genesOUT) = Open_FH("$OUTDIR/$PREFIX.$locusID.genes.config", "seq_id\tstart\tend\tstrand\tfeat_id\tname\n") if ($MODE eq 'schematic');
+		($featsOUT) = Open_FH("$OUTDIR/$PREFIX.$locusID.feats.config", "seq_id\tstart\tend\tstrand\tfeat_id\ttype\n") if (($MODE eq 'schematic'));
+		($seqsOUT) = Open_FH("$OUTDIR/$PREFIX.$locusID.seqs.config", "seq_id\tstart\tend\tstrand\tlength\n") if ($MODE eq 'schematic');
+		my ($ticksOUT) = Open_FH("$OUTDIR/$PREFIX.$locusID.ticks.config", "seq_id\tstart\tend\tfeat_id\ttype\n") if ($MODE eq 'schematic');
+		($gcOUT) = Open_FH("$OUTDIR/$PREFIX.$locusID.gc.config") if ((defined $seq2gc) && ($MODE eq 'schematic'));
+		
+		# print 'genes' file for starships
+		# some awkward id parsing, since we have changed name of locus id to include locustag for printing purposes
+		my %printedIDs; # avoid printing same gene twice
+		my $ogLocusID = $locusID;
+		($ogLocusID) = split/\|/, $locusID if ($MODE eq 'region-align');
+		
+		if ((exists $starshipFeatures->{$contigID}) && (exists $starshipFeatures->{$contigID}->{$ogLocusID})) {
+			foreach my $featureID (nsort keys %{$starshipFeatures->{$contigID}->{$ogLocusID}}) {
+				my ($featBegin, $featEnd, $featStrand, $featTag) = @{$starshipFeatures->{$contigID}->{$ogLocusID}->{$featureID}};
+				$featTag = 'NA' if ($featTag eq '.');
+				if ($featTag =~ m/^insert$|^flank$|^extend$/) {
+					next;				
+				} else {
+					$printedIDs{$featureID} = 1;
+					print $genesOUT "$locusID\t$featBegin\t$featEnd\t$featStrand\t$featureID\t$featTag\n";
+				}
+			}
+		}
+
+		# print 'gc' file in bed format
+		if (defined $seq2gc) {
+			foreach my $line (@{$seq2gc->{$contigID}}) {
+				my ($seqID, $start, $end, $tag, $gc) = split/\t/, $line;
+				print $gcOUT "$locusID\t$start\t$end\t$tag\t$gc\n";
+			}
+		}
+		
+		# print 'feats' file with locus range
+		my $locusLength;
+		if ($MODE eq 'element-align' || $MODE eq 'schematic') {
+			
+			print $featsOUT "$locusID\t$locusBegin\t$locusEnd\t$locusStrand\t$locusID\t$contigID\n";
+			# print 'seqs' file
+			$locusLength = $locusEnd - $locusBegin + 1;
+			if ($UPSTREAM != '0' || $DOWNSTREAM != '0') {
+				if ($locusStrand eq '+') {
+					$locusBegin = $locusBegin - $UPSTREAM;
+					$locusBegin = 0 if ($locusBegin < 0);
+					$locusEnd = $locusEnd + $DOWNSTREAM;
+				} elsif ($locusStrand eq '-') {
+					$locusBegin = $locusBegin - $DOWNSTREAM;
+					$locusBegin = 0 if ($locusBegin < 0);
+					$locusEnd = $locusEnd + $UPSTREAM;
+				}	
+			}
+			print $seqsOUT "$locusID\t$locusBegin\t$locusEnd\t$locusStrand\t$locusLength\n";
+
+			# option to print genes file based on gff
+			if ((defined $gffFeatures) && (exists $gffFeatures->{$contigID})) {
+				foreach my $featureID (nsort keys %{$gffFeatures->{$contigID}}) {
+					next if (exists $printedIDs{$featureID});
+					my ($featBegin, $featEnd, $featStrand, $featTag) = @{$gffFeatures->{$contigID}->{$featureID}};
+					$featTag = 'NA' if ($featTag eq '.');
+					if (($featBegin >= $locusBegin) && ($featEnd <= $locusEnd)) {
+						$printedIDs{$featureID} = 1;
+						print $genesOUT "$locusID\t$featBegin\t$featEnd\t$featStrand\t$featureID\t$featTag\n";
+					}
+				}
+			}
+		} elsif ($MODE eq 'region-align') {
+			
+			# print 'seqs' file for both elements and empty
+			my ($regionBegin, $regionEnd) = split/-/, $locusAnn;
+			$locusLength = $regionEnd - $regionBegin + 1;
+			if ($UPSTREAM != '0' || $DOWNSTREAM != '0') {
+				if ($locusStrand eq '+') {
+					$regionBegin = $regionBegin - $UPSTREAM;
+					$regionBegin = 0 if ($regionBegin < 0);
+					$regionEnd = $regionEnd + $DOWNSTREAM;
+				} elsif ($locusStrand eq '-') {
+					$regionBegin = $regionBegin - $DOWNSTREAM;
+					$regionBegin = 0 if ($regionBegin < 0);
+					$regionEnd = $regionEnd + $UPSTREAM;
+				}	
+			}
+			print $seqsOUT "$locusID\t$regionBegin\t$regionEnd\t$locusStrand\t$locusLength\n";
+		
+			# print 'feat' file for only elements
+			print $featsOUT "$locusID\t$locusBegin\t$locusEnd\t$locusStrand\t$locusID\t$contigID\n" if ($locusTag ne 'frag' && $locusTag ne 'emptyI' && $locusTag ne 'emptyR');
+
+			# option to print genes file based on gff
+			if ((defined $gffFeatures) && (exists $gffFeatures->{$contigID})) {
+				foreach my $featureID (nsort keys %{$gffFeatures->{$contigID}}) {
+					next if (exists $printedIDs{$featureID});
+					my ($featBegin, $featEnd, $featStrand, $featTag) = @{$gffFeatures->{$contigID}->{$featureID}};
+					$featTag = 'NA' if ($featTag eq '.');
+					if (($featBegin >= $regionBegin) && ($featEnd <= $regionEnd)) {
+						$printedIDs{$featureID} = 1;
+						print $genesOUT "$locusID\t$featBegin\t$featEnd\t$featStrand\t$featureID\t$featTag\n";
+					}
+				}
+			}
+		}	
+		
+
+		if ($MODE eq 'schematic') {
+			
+			# print ticks every 20kb
+			my $majorTickCount = $locusLength / $TICKSCALE;
+			$majorTickCount = floor($majorTickCount);
+			my $tickMark = $locusBegin;
+			foreach my $tick (1..$majorTickCount) {
+				$tickMark += $TICKSCALE;
+				print $ticksOUT "$locusID\t$tickMark\t$tickMark\t|\ttick\n";
+			}
+			my @regionConfigs;
+			push @regionConfigs, "$PREFIX.$locusID", "$OUTDIR/$PREFIX.$locusID.genes.config", "$OUTDIR/$PREFIX.$locusID.feats.config", "$OUTDIR/$PREFIX.$locusID.seqs.config", "$OUTDIR/$PREFIX.$locusID.ticks.config", "$OUTDIR/$PREFIX.$locusID.gc.config";
+			push @configFiles, \@regionConfigs;
+		}	
+	}
+	return(\@configFiles);	
+}
+
+sub Minimap_wrapper {
+	my ($locusList, $locusCoords, $id2sequence, $PREFIX, $MINIMAPOPTS, $THREADS, $OUTDIR) = @_;
+	my @locusList = @{$locusList};
+	
+	# generate a single .links file for everything
+	my $outprefix = "$OUTDIR/$PREFIX";
+	my $linksFile = "$outprefix.links.tsv";
+	my $datestring = localtime();
+
+	my $queLocus = shift @locusList;
+	while (scalar @locusList > 0) {
+		my $refLocus = shift @locusList;
+		
+		$datestring = localtime();
+		if (not defined $locusCoords->{$queLocus}) {
+			die("[$datestring] Error: can't find coordinates for $queLocus in --bed, exiting..\n");
+		}
+		if (not defined $locusCoords->{$refLocus}) {
+			die("[$datestring] Error: can't find coordinates for $refLocus in --bed, exiting..\n");
+		}
+		
+		my ($queBegin, $queEnd, $queStrand, $queTag, $queAnn, $queContigID) = @{$locusCoords->{$queLocus}};
+		my ($refBegin, $refEnd, $refStrand, $refTag, $refAnn, $refContigID) = @{$locusCoords->{$refLocus}};
+		
+		if (defined $id2sequence->{$refContigID} && defined $id2sequence->{$queContigID}) {
+		
+			my $refFile = "$OUTDIR/ref.fna";
+			my ($refOUT) = Open_FH($refFile);
+			print $refOUT ">$refLocus\n$id2sequence->{$refContigID}\n";
+			my $queFile = "$OUTDIR/que.fna";
+			my ($queOUT) = Open_FH($queFile);
+			print $queOUT ">$queLocus\n$id2sequence->{$queContigID}\n";
+		
+			# minimap2 parameters
+			#  - asm5/asm10/asm20 - asm-to-ref mapping, for ~0.1/1/5% sequence divergence
+			# -N INT       retain at most INT secondary alignments [5]
+			# -x asm10	asm10	Long assembly to reference mapping (-k19 -w19 -U50,500 --rmq -r100k -g10k -A1 -B9 -O16,41 -E2,1 -s200 -z200 -N50)
+			# -X	Equivalent to ’-DP --dual=no --no-long-join’. Primarily used for all-vs-all read overlapping.
+			# -c	Generate CIGAR. In PAF, the CIGAR is written to the ‘cg’ custom tag.
+
+			$datestring = localtime();
+			my ($failcheck) = system("minimap2 $MINIMAPOPTS -t $THREADS $refFile $queFile 1>>$linksFile 2>/dev/null");
+			if ($failcheck != 0) { die "\n\n[$datestring] error: could not execute minimap2 on commandline for $refFile, exiting..\n$!\n";}
+
+			# iterate to the next comparison		
+			$queLocus = $refLocus;
+			system("rm $refFile $queFile");
+		} else {
+			$datestring = localtime();
+			warn("\n\n[$datestring] warning: could not parse sequence for either $refContigID or $queContigID, skipping this comparison\n");
+		}
+	}
+			
+	sleep(2);
+	return("0");
+}
+
+
+sub Nucmer_wrapper {
+	my ($locusList, $locusCoords, $id2sequence, $PREFIX, $NUCMEROPTS, $DELTAFILTEROPTS, $THREADS, $OUTDIR) = @_;
+	my @locusList = @{$locusList};
+	
+	# generate a single .links file for everything
+	my $outprefix = "$OUTDIR/$PREFIX";
+	my $linksFile = "$outprefix.links.tsv";
+	my ($linksOUT) = Open_FH($linksFile);
+	my $datestring = localtime();
+	my $queLocus = shift @locusList;
+	while (scalar @locusList > 0) {
+		my $refLocus = shift @locusList;
+	
+		$datestring = localtime();
+		if (not defined $locusCoords->{$queLocus}) {
+			usage("[$datestring] Error: can't find coordinates for $queLocus in --bed, exiting..\n");
+		}
+		if (not defined $locusCoords->{$refLocus}) {
+			usage("[$datestring] Error: can't find coordinates for $refLocus in --bed, exiting..\n");
+		}
+
+		# # mp053 vs mp102
+		# nucmer --mum -p mp053_vs_mp102 mp053.cc2-3.fna mp102.contigs.fna 
+		# delta-filter -1 -i 90 -l 15000 mp053_vs_mp102.delta > mp053_vs_mp102.filt.delta
+		# show-coords -TH mp053_vs_mp102.filt.delta | sort -k5,5nr | awk '{z+=1;print $8"\t"$1"\t"$2"\t"$9"\t"$3"\t"$4}' > mp053_vs_mp102.links.tsv
+		my ($queBegin, $queEnd, $queStrand, $queTag, $queAnn, $queContigID) = @{$locusCoords->{$queLocus}};
+		my ($refBegin, $refEnd, $refStrand, $refTag, $refAnn, $refContigID) = @{$locusCoords->{$refLocus}};
+
+		my $refFile = "$OUTDIR/ref.fna";
+		my ($refOUT) = Open_FH($refFile);
+		print $refOUT ">$refLocus\n$id2sequence->{$refContigID}\n";
+		my $queFile = "$OUTDIR/que.fna";
+		my ($queOUT) = Open_FH($queFile);
+		print $queOUT ">$queLocus\n$id2sequence->{$queContigID}\n";
+		
+		my ($nucmerCheck) = system("nucmer $NUCMEROPTS -t $THREADS -p $outprefix $queFile $refFile 2>/dev/null");
+		if ($nucmerCheck != 0) { die "\n\n[$datestring] error: could not execute nucmer on commandline for $queFile and $refFile, exiting..\n$!\n";}
+		
+		my ($deltaCheck) = system("delta-filter $DELTAFILTEROPTS $outprefix.delta > $outprefix.filt.delta 2>/dev/null");
+		if ($deltaCheck != 0) { die "\n\n[$datestring] error: could not execute delta-filter on commandline for $queFile and $refFile, exiting..\n$!\n";}
+		
+		my $awkArgs = q{'{print $1"\t"$6"\t"$11"\t"$13"\t0\t0\t"$7"\t"$8"\t"$9"\t"$10"\t0\t100"}'};
+		#print "show-coords -TH $outprefix.filt.delta | sort -k5,5nr | awk $awkArgs | perl -pe 's/\\t\$/\\tcolor=\$color3/' > $outprefix.links.tsv";die;
+		my (@coordsLines) = `show-coords -B $outprefix.filt.delta | awk -F '\t' $awkArgs`;
+		if (scalar @coordsLines == 0) { 
+			warn("\n\n[$datestring] warning: no nucmer alignments found between $queLocus and $refLocus in $linksFile\n");
+		} else {
+			foreach my $line (@coordsLines) {
+				chomp $line;
+				print $linksOUT "$line\n";
+			}
+		}
+		system("rm $refFile $queFile $outprefix.delta $outprefix.filt.delta");
+		
+		# iterate to the next comparison		
+		$queLocus = $refLocus;
+	}
+	close($linksOUT);
+	sleep(2);
+	return("0");
+}
+
+sub Parse_element_list {
+	my ($listFile) = @_;
+	my @regions;
+	open(my $IN, '<', $listFile) or usage("\nError: can't open $listFile for reading\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		next if ($line !~ m/^.+$/); # to avoid empty lines
+		push @regions, $line;
+	}
+	return(\@regions);	
+}
+
+sub Reshape_starship_coords {
+	my ($starshipFeatures) = @_;
+	my %starshipCoords;
+	foreach my $contigID (keys %{$starshipFeatures}) {
+		foreach my $starshipID (keys %{$starshipFeatures->{$contigID}}) {
+			foreach my $capID (keys %{$starshipFeatures->{$contigID}->{$starshipID}}) {
+				my ($elementStart, $elementEnd, $strand, $tag, $ann) = @{$starshipFeatures->{$contigID}->{$starshipID}->{$capID}};
+				if (not exists $starshipCoords{$starshipID}) {
+					push @{$starshipCoords{$starshipID}}, $elementStart, $elementEnd, $strand, $tag, $ann, $contigID;
+				} else { # means that this particular starship has >1 captain
+					next;
+				}
+			}
+		}
+	}
+	return(\%starshipCoords);	
+}
+
+sub Parse_feature_file {
+	my ($featureFile) = @_;
+	my %features;
+	open(my $IN, '<', $featureFile) or usage("\nError: can't open $featureFile for reading\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		my ($locusID, $featureID, $begin, $end, $strand, $type) = split/\t/, $line;
+		push @{$features{$locusID}{$featureID}}, $begin, $end, $strand, $type;
+	}
+	return(\%features);
+}
+
+sub Parse_GC_file {
+	my ($gcFile) = @_;
+	my %seq2gc;
+	open(my $IN, '<', $gcFile) or usage("\nError: can't open $gcFile for reading\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		my ($seqID) = split/\t/, $line;
+		push @{$seq2gc{$seqID}}, $line;
+	}
+	return(\%seq2gc);
+}
+
+
+sub Parse_haplotype_order {
+	my ($dereplicatedFile, $jaccardFile, $regionFile, $starshipCoords, $DEDUPCHECK, $REGIONORDER) = @_;
+	my (%regionList, %regionCoords);
+	
+	# parse reference element
+	# if a region has multiple reference elements, pick the one associated with the most elements
+	my (%region2ref, %region2refSize, %haplotype2tag);
+	open(my $derepIN, '<', $dereplicatedFile) or usage("\nError: can't open $dereplicatedFile for reading\n");
+	while (my $line = <$derepIN>) {
+		chomp $line;
+		next if ($line =~ m/^#/);
+		my ($regionID, $elementGroupID, $refElementID, $refSiteID, $otherElementIDs) = split/\t/, $line;
+		my @otherElements = split/,/, $otherElementIDs;
+		my $refSize = scalar @otherElements;
+		$refSize = 0 if (not defined $refSize);
+		if ((not exists $region2refSize{$regionID}) || ($refSize > $region2refSize{$regionID})) {
+			$region2ref{$regionID}  = $refElementID ;
+			$region2refSize{$regionID} = $refSize ;
+		}
+	}
+	
+	# parse haplotype jaccard similarities
+	my %haplotypeSims;
+	open(my $jaccIN, '<', $jaccardFile) or usage("\nError: can't open $jaccardFile for reading\n");
+	while (my $line = <$jaccIN>) {
+		chomp $line;
+		next if ($line =~ m/^#/);
+		my ($refRegionID, $queRegionID, $refElementID, $queElementID, $jaccSim) = split/\t/, $line;
+		if ($refRegionID eq $queRegionID) { # only look at comparisons within the same region
+			$haplotypeSims{$refRegionID}{$refElementID}{$queElementID} = $jaccSim;
+			$haplotypeSims{$refRegionID}{$queElementID}{$refElementID} = $jaccSim;
+		}	
+	}
+	
+	# parse region coordinates
+	# structured: regionCoords{regionID}{elementID/emptyID/fragID} = [haplotypeBegin, haplotypeEnd, strand, tag, ann, contigID]
+	my %defaultRegionOrder;
+	open(my $regionIN, '<', $regionFile) or usage("\nError: can't open $regionFile for reading\n");
+	while (my $line = <$regionIN>) {
+		chomp $line;
+		next if ($line =~ m/^#/);
+		my ($regionID, $memberGroupID, $memberID, $memberType, $contigID, $begin, $end, $regionBegin, $regionEnd, $flankingOGs) = split/\t/, $line;
+		if ($memberType eq 'frag') { 
+			push @{$regionCoords{$regionID}{$contigID}}, $begin, $end, $flankingOGs, 'frag', "${regionBegin}-${regionEnd}", $contigID;
+			push @{$defaultRegionOrder{$regionID}}, $contigID;
+		} elsif ($memberType eq 'empty' && $memberID eq '.') { 
+			push @{$regionCoords{$regionID}{$contigID}}, $begin, $end, $flankingOGs, 'emptyR', "${regionBegin}-${regionEnd}", $contigID;
+			push @{$defaultRegionOrder{$regionID}}, $contigID;
+		} elsif ($memberType eq 'empty') { 
+			push @{$regionCoords{$regionID}{$contigID}}, $begin, $end, $flankingOGs, 'emptyI', "${regionBegin}-${regionEnd}", $contigID;
+			push @{$defaultRegionOrder{$regionID}}, $contigID;
+		} else {
+			push @{$regionCoords{$regionID}{$memberID}}, $begin, $end, $flankingOGs, $memberGroupID, "${regionBegin}-${regionEnd}", $contigID;
+			push @{$defaultRegionOrder{$regionID}}, $memberID;
+		}
+	}
+	
+	# determine orientation vs ref by comparing OG strings
+	foreach my $regionID (keys %region2ref) {
+		my $refID = $region2ref{$regionID};
+		my ($refBegin, $refEnd, $refFlankingOGs, $refTag, $refRegionRange, $refContigID) = @{$regionCoords{$regionID}{$refID}};
+		$haplotype2tag{$refID} = $refTag;
+		
+		my ($refElementStart, $refElementEnd, $refStrand) = @{$starshipCoords->{$refID}}; # grab the orientation according to the captain sequence
+		my @refOGs = split/,/, $refFlankingOGs;
+		
+		# update info in regionCoords hash
+		@{$regionCoords{$regionID}{$refID}} = ($refBegin, $refEnd, $refStrand, $refTag, $refRegionRange, $refContigID);
+		
+		foreach my $queID (keys %{$regionCoords{$regionID}}) {
+			next if ($queID eq $refID);	
+			my ($queBegin, $queEnd, $queFlankingOGs, $queTag, $queRegionRange, $queContigID) = @{$regionCoords{$regionID}{$queID}};
+			$haplotype2tag{$queID} = $queTag;
+			
+			my @queOGs = split/,/, $queFlankingOGs;
+			my @revQueOGs = reverse @queOGs;
+			my ($forwardMismatches, $reverseMismatches) = (0,0);
+			# how far do we have to iterate through refOGs until we find a match?
+			# if a query OGs doesnt have a match, it will contribute just as much to forward and reverse count
+			
+			# assess match distance forward
+			my %forwardMatches; # skip OGs that have previously matched
+			foreach my $queOG (@queOGs) {
+				next if (($queOG eq '.' ) || (exists $forwardMatches{$queOG}));
+				foreach my $refOG (@refOGs) {
+					next if (($refOG eq '.') || (exists $forwardMatches{$refOG}));
+					$forwardMismatches++ if ($queOG ne $refOG);
+					# stop iterating once a match has been found
+					if ($queOG eq $refOG) {
+						$forwardMatches{$queOG} = 1;
+						last;
+					} 
+				}
+			}
+			
+			# assess match distance reverse
+			my %reverseMatches;
+			foreach my $queOG (@revQueOGs) {
+				next if (($queOG eq '.' ) || (exists $reverseMatches{$queOG}));
+				foreach my $refOG (@refOGs) {
+					next if (($refOG eq '.') || (exists $reverseMatches{$refOG}));
+					$reverseMismatches++ if ($queOG ne $refOG);
+					if ($queOG eq $refOG) {
+						$reverseMatches{$queOG} = 1;
+						last;
+					} 
+				}
+			}
+		
+			# the smallest mismatch distance is the correct orientation for query element
+			my $queStrand = $refStrand; # set default orientation to be like the reference
+			my $oppositeStrand = '-' if ($refStrand eq '+');
+			$oppositeStrand = '+' if ($refStrand eq '-');
+			
+			# reverse the orientation if the number of matches in reverse exceed the number of matches in the direction of the reference
+			$queStrand = $oppositeStrand if ($reverseMismatches < $forwardMismatches); 
+			
+			# update info in regionCoords hash
+			@{$regionCoords{$regionID}{$queID}} = ($queBegin, $queEnd, $queStrand, $queTag, $queRegionRange, $queContigID);
+		}
+	}
+	
+	# determine order of haplotypes in each region based on their similarity to referece
+	my %renamedRegionCoords; # rename regions to include their tag, either element family or empty/frag
+	foreach my $regionID (nsort keys %region2ref) {
+		my (%elementHaplotypes, %emptyHaplotypes);
+		my $refID = $region2ref{$regionID};
+		my ($refBegin, $refEnd, $refFlankingOGs, $refTag, $refRegionRange, $refContigID) = @{$regionCoords{$regionID}{$refID}};
+
+		foreach my $queID (nsort keys %{$regionCoords{$regionID}}) {
+			next if ($queID eq $refID);	
+			my ($queBegin, $queEnd, $queFlankingOGs, $queTag, $queRegionRange, $queContigID) = @{$regionCoords{$regionID}{$queID}};
+			my $jaccSim = 0;
+			$jaccSim = $haplotypeSims{$regionID}{$refID}{$queID} if (exists $haplotypeSims{$regionID}{$refID}{$queID});
+			if ($queTag ne 'frag' && $queTag ne 'emptyI' && $queTag ne 'emptyR') {
+				$elementHaplotypes{$queTag}{$jaccSim}{$queID} = 1;
+			} else {
+				$emptyHaplotypes{$queTag}{$jaccSim}{$queID} = 1;
+			}
+		}
+		
+		# push in elements in an increasing order of similarity to ref
+		# starting with families that arent the ref
+		foreach my $queTagSort (nsort keys %elementHaplotypes) {
+			next if ($refTag eq $queTagSort); # we will print these out last
+			foreach my $sim (sort {$a <=> $b} keys %{$elementHaplotypes{$queTagSort}}) {
+				foreach my $queID (nsort keys %{$elementHaplotypes{$queTagSort}{$sim}}) {
+					my ($queBegin, $queEnd, $queFlankingOGs, $queTag, $queRegionRange, $queContigID) = @{$regionCoords{$regionID}{$queID}};
+					push @{$renamedRegionCoords{$regionID}{"${queID}|${queTag}"}}, $queBegin, $queEnd, $queFlankingOGs, $queTag, $queRegionRange, $queContigID;
+					push @{$regionList{$regionID}}, "${queID}|${queTag}";
+				}
+			}
+		}
+		# now push in the family of the ref
+		if (exists $elementHaplotypes{$refTag}) {
+			foreach my $sim (sort {$a <=> $b} keys %{$elementHaplotypes{$refTag}}) {
+				foreach my $queID (nsort keys %{$elementHaplotypes{$refTag}{$sim}}) {
+					my ($queBegin, $queEnd, $queFlankingOGs, $queTag, $queRegionRange, $queContigID) = @{$regionCoords{$regionID}{$queID}};
+					push @{$renamedRegionCoords{$regionID}{"${queID}|${queTag}"}}, $queBegin, $queEnd, $queFlankingOGs, $queTag, $queRegionRange, $queContigID;
+					push @{$regionList{$regionID}}, "${queID}|${queTag}";
+				}
+			} 
+		}
+		
+		
+		# push in ref element
+		push @{$renamedRegionCoords{$regionID}{"${refID}|${refTag}"}}, $refBegin, $refEnd, $refFlankingOGs, $refTag, $refRegionRange, $refContigID;
+		push @{$regionList{$regionID}}, "${refID}|${refTag}";
+		
+		# push in empties in a decreasing order of similarity to ref
+		# if dedup specified, skip any haplotypes that have identical jaccard and are within 10% of length
+		my %dedupRefs;
+		foreach my $queTagSort (nsort keys %emptyHaplotypes) { # empties with validated insertion sites (emptyI) will be printed before empties without sites (emptyR), which will be printed out before frags (frag)
+			foreach my $sim (sort {$a <=> $b} keys %{$emptyHaplotypes{$queTagSort}}) {
+				foreach my $queID (nsort keys %{$emptyHaplotypes{$queTagSort}{$sim}}) {
+					my ($queBegin, $queEnd, $queFlankingOGs, $queTag, $queRegionRange, $queContigID) = @{$regionCoords{$regionID}{$queID}};
+					my ($regionBegin, $regionEnd) = split/-/, $queRegionRange;
+					my $queLength = $regionEnd - $regionBegin + 1;
+					my $dedupFail = 0;
+					if (defined $DEDUPCHECK) {
+						if (exists $dedupRefs{$sim}) {
+							foreach my $dedupLength (@{$dedupRefs{$sim}}) {
+								$dedupFail = 1 if (($queLength <= 1.1 * $dedupLength) && ($queLength >= 0.9 * $dedupLength));
+							}
+						}
+					}
+					if ($dedupFail == 0) {
+						push @{$dedupRefs{$sim}}, $queLength;
+						push @{$renamedRegionCoords{$regionID}{"${queID}|${queTag}"}}, $queBegin, $queEnd, $queFlankingOGs, $queTag, $queRegionRange, $queContigID;
+						push @{$regionList{$regionID}}, "${queID}|${queTag}";
+					}
+				}
+			}
+		} 
+	}
+	
+	# if naming override specified, arrange haplotypes in the order in which they appear in the regions file
+	if (defined $REGIONORDER) {
+		%regionList = ();
+		foreach my $regionID (keys %defaultRegionOrder) {
+			foreach my $queID (@{$defaultRegionOrder{$regionID}}) {
+				my $queTag = $haplotype2tag{$queID};
+				my $newID = "${queID}|${queTag}";
+				push @{$regionList{$regionID}}, "${queID}|${queTag}";
+			}
+		}
+	}
+	
+	return(\%regionList, \%renamedRegionCoords, \%haplotype2tag);
+}
+
+sub Update_tags {
+	my ($starshipFeatures, $gene2tag) = @_;
+	my %newFeatures;
+	
+	foreach my $contigID (keys %{$starshipFeatures}) {
+		foreach my $locusID (keys %{$starshipFeatures->{$contigID}}) {
+			foreach my $featureID (keys %{$starshipFeatures->{$contigID}->{$locusID}}) {
+				my ($begin, $end, $strand, $tag, $annotation) = @{$starshipFeatures->{$contigID}->{$locusID}->{$featureID}};
+				$tag = join(",", nsort keys %{$gene2tag->{$featureID}}) if ($tag eq '.' && exists $gene2tag->{$featureID});
+				push @{$newFeatures{$contigID}{$locusID}{$featureID}}, $begin, $end, $strand, $tag, $annotation;
+			}
+		}
+	}
+	return(\%newFeatures);
+}
+
+sub Opts_check {
+	my ($opts) = @_;
+	usage() if (exists $opts->{'h'});
+	usage("\nError: no arguments provided\n") if (scalar keys %{$opts} == 0);
+	usage("\nError: please provide a file to --assembly\n") if (not defined $opts->{'assembly'});
+	usage("\nError: the file provided to --assembly does not exist\n") if (! -f $opts->{'assembly'});
+	usage("\nError: please provide a file to --bed\n") if (not defined $opts->{'bed'});
+	usage("\nError: the file provided to --bed does not exist\n") if (! -f $opts->{'bed'});
+	usage("\nError: please provide a path to --outdir\n") if (not defined $opts->{'outdir'});
+	usage("\nError: the path provided to --outdir does not exist\n") if (! -d $opts->{'outdir'});
+	usage("\nError: please provide a string to --prefix\n") if (not defined $opts->{'prefix'});
+	if (not defined $opts->{'mode'}) {
+		usage("\nError: you must specify an option for --mode, either 'region-align', 'element-align' or 'schematic'\n");
+	} elsif ($opts->{'mode'} !~ m/^region-align$|^schematic$|^element-align$/) {
+		usage("\nError: unrecognized option for --mode, must be either 'region-align', 'element-align' or 'schematic'\n");
+	}
+	
+	if ($opts->{'mode'} eq 'element-align' || $opts->{'mode'} eq 'region-align') {
+		if (not defined $opts->{'aligner'}) {
+			usage("\nError: you must specify an option for --aligner, either 'nucmer' or 'minimap2'\n");
+		} elsif ($opts->{'aligner'} !~ m/^nucmer$|^minimap2$/) {
+			usage("\nError: unrecognized option for --aligner, must be either 'nucmer' or 'minimap2'\n");
+		} 
+		if (not defined $opts->{'nucmeropts'}) {
+			$opts->{'nucmeropts'} = '--mum';
+		}
+		if (not defined $opts->{'deltafilteropts'}) {
+			$opts->{'deltafilteropts'} = '-m -l 1000 -i 90';
+		}
+		if (not defined $opts->{'minimapopts'}) {
+			$opts->{'minimapopts'} = '-x asm20 -N 0 -c';
+		}
+	}
+	if (defined $opts->{'gff'}) {
+		usage("\nError: the file provided to --gff does not exist\n") if (! -f $opts->{'gff'});
+		if (not defined $opts->{'nameField'}) {
+			$opts->{'nameField'} = 'Name=';
+		}
+	}
+	if (not defined $opts->{'upstream'}) {
+		$opts->{'upstream'} = '0';
+	}
+	if (not defined $opts->{'downstream'}) {
+		$opts->{'downstream'} = '0';
+	}
+	if ($opts->{'mode'} eq 'element-align' || $opts->{'mode'} eq 'schematic') {
+		usage("\nError: please provide a file to --list\n") if (not defined $opts->{'list'});
+		usage("\nError: the file provided to --list does not exist\n") if (! -f $opts->{'list'});
+	}
+	if (defined $opts->{'tags'}) { # for 
+		usage("\nError: the file provided to --tags does not exist\n") if (! -f $opts->{'tags'});
+	}
+	if (defined $opts->{'gc'}) { # for 
+		usage("\nError: the file provided to --gc does not exist\n") if (! -f $opts->{'gc'});
+	}
+	if (not defined $opts->{'ticks'}) {
+		$opts->{'ticks'} = '25000';
+	}
+	if (not defined $opts->{'units'}) {
+		$opts->{'units'} = 'in';
+	}
+	if (not defined $opts->{'force'}) {
+		$opts->{'force'} = 0;
+	} else {
+		$opts->{'force'} = 1;
+	}
+	if (not defined $opts->{'threads'}) {
+		$opts->{'threads'} = 1;
+	}
+	if ($opts->{'mode'} eq 'region-align') {
+		usage("\nError: please provide a file to --dereplicated\n") if (not defined $opts->{'dereplicated'});
+		usage("\nError: the file provided to --dereplicated does not exist\n") if (! -f $opts->{'dereplicated'});
+		usage("\nError: please provide a file to --regions\n") if (not defined $opts->{'regions'});
+		usage("\nError: the file provided to --regions does not exist\n") if (! -f $opts->{'regions'});
+		usage("\nError: please provide a file to --jaccard\n") if (not defined $opts->{'jaccard'});
+		usage("\nError: the file provided to --jaccard does not exist\n") if (! -f $opts->{'jaccard'});
+	}
+}

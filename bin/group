@@ -1,0 +1,313 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use Data::Dumper;
+use File::Basename;
+use Getopt::Long qw(:config auto_abbrev no_ignore_case);
+use Sort::Naturally;
+use Storable;
+use FileHandle;
+$|=1;
+# Fishtank lib
+use Fishtank::Utils qw(Commandline_check Open_FH);
+
+sub usage {
+	my $message = shift;
+	my $usage = qq/
+usage: starfish group [args]
+
+group captains or elements into families based on k-mers.
+
+Required:
+-m, --mode        STR    clustering algorithm, either 'mcl' or 'apc'.
+                         (apc not currently implemented)
+-s, --sim         FILE   3-column tsv: refID, queID, similarity.
+                         (e.g., output by starfish sim)
+-i, --idtag       STR    string used as a prefix to name groups.
+-o, --outdir      DIR    output directory.
+
+Required, with defaults:
+-t, --thresh      FLT    min similarity threshold [0-1).
+                         (default: 0)
+-T, --threads     INT    number of threads.
+                         (default: 1)
+-I, --infl        FLT    inflation paramenter.
+                         (for --mode mcl; default: 1.5)
+
+Optional:
+-f, --feat        FILE   .feat file.
+                         (output by starfish summarize; if comparing elements)
+-h, --help               print more details and exit.
+
+/;
+	if (not defined $message) {
+		$message = $usage;
+	} else {
+		$message = "$message\nuse -h for more details\n\n" ;
+	}	
+	die($message);
+}
+
+main: {
+
+	# parse and check options
+	my %opts;
+	GetOptions(\%opts, 
+		'mode|m=s',
+		'sim|s=s',
+		'feat|f=s',
+		'outdir|o=s',
+		'idtag|i=s',
+		'thresh|t=f',
+		'threads|T=i',
+		'infl|I=f',
+		'h|help');
+	Opts_check(\%opts);
+
+	# check dependencies
+	my @commandlines = ("mcl");
+	Commandline_check(\@commandlines);
+
+	#######################################
+	#### FORMAT CHECK AND READ IN DATA ####
+	#######################################
+
+		my $datestring = localtime();
+		print "\n[$datestring] reading in data..\n";
+
+		# filter values by threshold, then remap similarity values
+		# from mcl manual: It is recommended that edge weights have increased contrast between them, as mcl is affected by relative differences (ratios) between edge weights rather than absolute differences. To illustrate this, values 0.75 and 0.95 should be re-mapped to 0.05 and 0.25, with respective ratios 0.79 and 0.25. 
+		my ($simFileName) = fileparse($opts{'sim'});
+		my $remappedSimFile = "$opts{'outdir'}/$simFileName.remap";
+		if ($opts{'thresh'} > 0) {
+			Remap_sim_values($opts{'sim'}, $opts{'thresh'}, $remappedSimFile);
+		} else {
+			$remappedSimFile = $opts{'sim'}; # no need to remap if thresh is 0
+		}
+				
+		# read in relevant info for element metadata
+		my ($element2feat) = Parse_feature_file($opts{'feat'}) if (defined $opts{'feat'});
+
+	######################################
+	#### EXECUTE CLUSTERING ALGORITHM ####
+	######################################
+	
+		$datestring = localtime();					
+		print "[$datestring] grouping genetic loci into families based on $opts{'mode'} clustering algorithm..\n";
+		my ($outFilename) = fileparse($opts{'sim'}, ".sim");
+		my $clusteringOutfile = "$opts{'outdir'}/$outFilename.I$opts{'infl'}.mcl";
+		
+		my ($mclCheck) = system("mcl $remappedSimFile -I $opts{'infl'} --abc -o $clusteringOutfile 2>/dev/null");
+		$datestring = localtime();					
+		if ($mclCheck != 0) { die "\n\n[$datestring] error: could not execute mcl on commandline, exiting..\n$!\n";}
+		
+	#######################
+	#### PRINT RESULTS ####
+	#######################
+
+		# parse output and name groups (may have to change parser if we add other methods besides MCL)
+		# then overwrite the original clustering output file to include familyID information, and singletons as well
+		# but keep the order of the elements, because the first element listed should be the 'type' element, according to MCL manual
+		Print_results($clusteringOutfile, $opts{'idtag'});
+		
+		# read in clustering data, but ignore singletons
+		my ($element2group) = Parse_group_file($clusteringOutfile);
+	
+		# print out a nodes file to use as input in ggraph auxilary script
+		# note that singletons are not printed out this file, because visualizing them doesn't really make sense and could get complicated
+		my $nodeFile = "$opts{'outdir'}/$outFilename.I$opts{'infl'}.nodes.txt";
+		Print_node_data($element2feat, $element2group, $nodeFile);
+		
+		# print out an edges file to use as input in ggraph auxilary script with redundant pairs of edges removed
+		# the avg similarity for each node pair will be used
+		my $edgeFile = "$opts{'outdir'}/$outFilename.I$opts{'infl'}.edges.txt";
+		Print_edge_data($opts{'sim'}, $edgeFile);
+		
+		$datestring = localtime();					
+		print "[$datestring] done\n";
+
+}
+
+sub Print_edge_data {
+	my ($simFile, $edgeFile) = @_;
+	my $datestring = localtime();					
+	open (my $IN, '<', $simFile) or usage("\n\n[$datestring] error: cannot read $simFile, exiting\n");
+	my %pairs;
+	while (my $line = <$IN>) {
+		chomp $line;
+		my ($node1, $node2, $sim) = split/\t/, $line;
+		my @nodes = nsort ($node1, $node2); # sort node pairs to always get consistent pairID
+		push @{$pairs{$nodes[0]}{$nodes[1]}}, $sim;
+	}
+	my ($OUT) = Open_FH($edgeFile);
+	print $OUT "from\tto\tweight\n";
+
+	foreach my $node1 (keys %pairs) {
+		foreach my $node2 (keys %{$pairs{$node1}}) {
+			my ($sum, $count) = (0, 0);
+			foreach my $sim (@{$pairs{$node1}{$node2}}) {
+				$sum += $sim;
+				$count++;
+			}
+			my $avg = sprintf("%.3f", $sum / $count);
+			print $OUT "$node1\t$node2\t$avg\n";
+		}
+	}
+}
+
+sub Print_node_data {
+	my ($element2feat, $element2group, $nodeFile) = @_;
+	my ($OUT) = Open_FH($nodeFile);
+	print $OUT "id\tgroup\tlength\tboundary\n";
+	
+	foreach my $elementID (nsort keys %{$element2group}) {
+		print $OUT "$elementID\t$element2group->{$elementID}\t";
+		if (defined $element2feat && exists $element2feat->{$elementID}) {
+			print $OUT join("\t", @{$element2feat->{$elementID}})."\n";
+		} else {
+			print $OUT "NA\tNA\n";
+			# my $datestring = localtime();					
+			# print "[$datestring] warning: no feature data found for $elementID\n";
+		}
+	}	
+}
+
+sub Print_results {
+	my ($clusteringOutfile, $groupPrefix) = @_;
+	my $datestring = localtime();					
+	
+	my (%groups);
+	open (my $IN, '<', $clusteringOutfile) or usage("\n\n[$datestring] error: cannot read $clusteringOutfile, exiting\n");
+	my ($groupCount, $singletonCount, $elementCount) = (0, 0, 0);
+	while (my $line = <$IN>) {
+		chomp $line;
+		
+		# check that this group contains >1 member
+		my @fields = split/\t/, $line;
+		if (scalar @fields > 1) {
+			$groupCount++;		
+			my $formattedCount = sprintf("%04d", $groupCount);
+			my $groupName = "$groupPrefix$formattedCount";
+			foreach my $element (@fields) {
+				$elementCount++;
+				push @{$groups{$groupName}}, $element;
+			}
+		} else {
+			$singletonCount++;
+			my $formattedCount = sprintf("%04d", $singletonCount);
+			my $groupName = "sng$formattedCount";
+			foreach my $element (@fields) {
+				push @{$groups{$groupName}}, $element;
+			}
+		}
+	}
+	close($IN);	
+	my ($OUT) = Open_FH($clusteringOutfile);
+	foreach my $group (nsort keys %groups) {
+		print $OUT "$group";
+		foreach my $element (@{$groups{$group}}) {
+			print $OUT "\t$element";
+		}
+		print $OUT "\n";
+	}
+		
+	print "[$datestring] grouped $elementCount loci into $groupCount groups\n";
+	print "[$datestring] $singletonCount loci are singletons\n";
+}
+
+sub Remap_sim_values {
+	my ($originalSimFile, $MINTHRESH, $remappedSimFile) = @_;
+	my ($OUT) = Open_FH($remappedSimFile);
+	open(my $IN, '<', $originalSimFile) or usage("\nError: can't open $originalSimFile for reading\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		my ($ref, $que, $sim) = split/\t/, $line;
+		if ($sim < $MINTHRESH) {
+			my $remapSim = 0; # assign a sim value of 0 if below threshold
+			print $OUT "$ref\t$que\t$remapSim\n";
+		} else {
+			# remap
+			my $remapSim = $sim - $MINTHRESH;
+			print $OUT "$ref\t$que\t$remapSim\n";
+		}
+	}
+}
+
+sub Parse_group_file {
+	my ($clusteringOutfile) = @_;
+	my $datestring = localtime();					
+	my %element2group;
+	open (my $IN, '<', $clusteringOutfile) or usage("\n\n[$datestring] error: cannot read $clusteringOutfile, exiting\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		my (@elements) = split/\t/, $line;
+		my $group = shift @elements;
+		next if ($group =~ m/^sng/); # skip singletons
+		foreach my $element (@elements) {
+			$element2group{$element} = $group;
+		}
+	}
+	return(\%element2group);	
+}
+
+sub Parse_sim_file {
+	my ($remappedSimFile) = @_;
+	my %elementIDs;
+	open(my $IN, '<', $remappedSimFile) or usage("\nError: can't open $remappedSimFile for reading\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		my ($refID, $queID, $sim) = split/\t/, $line;
+		$elementIDs{$refID} = 1;
+		$elementIDs{$queID} = 1;
+	}
+	return(\%elementIDs);
+}
+
+sub Parse_feature_file {
+	my ($featureFile) = @_;
+	my %element2feat;
+	open(my $IN, '<', $featureFile) or usage("\nError: can't open $featureFile for reading\n");
+	while (my $line = <$IN>) {
+		chomp $line;
+		my ($contigID, $starshipID, $captainID, $elementBegin, $elementEnd, $elementLength, $strand, $boundaryType, $emptySiteID, $emptyContig, $emptyBegin, $emptyEnd, $emptySeq, $upTSD, $downTSD, $TSDedit, $upTIR, $downTIR, $TIRedit, $nestedInside, $containNested) = split/\t/, $line;
+		push @{$element2feat{$starshipID}}, $elementLength, $boundaryType;
+	}
+	return(\%element2feat);
+}
+
+sub Opts_check {
+	my ($opts) = @_;
+	usage() if (exists $opts->{'h'});
+	usage("\nError: no arguments provided\n") if (scalar keys %{$opts} == 0);
+	usage("\nError: please provide a file to --sim\n") if (not defined $opts->{'sim'});
+	usage("\nError: the file provided to --sim does not exist\n") if (! -f $opts->{'sim'});
+	if (defined $opts->{'feat'}) {
+		usage("\nError: the file provided to --feat does not exist\n") if (! -f $opts->{'feat'});
+	}
+	usage("\nError: please provide directory to --outdir\n") if (not defined $opts->{'outdir'});
+	usage("\nError: the directory provided to --outdir does not exist\n") if (! -d $opts->{'outdir'});
+	usage("\nError: please provide a string to --idtag\n") if (not defined $opts->{'idtag'});
+	if (defined $opts->{'idtag'}) {
+		if ($opts->{'idtag'} =~ m/^sng/) {
+			usage("\nError: the string provided to --idtag cannot begin with 'sng'\n")
+		}
+	}
+	if (not defined $opts->{'mode'}) {
+		usage("\nError: you must specify an option for --mode, either 'mcl' or 'apc'\n");
+	} elsif ($opts->{'mode'} !~ m/^mcl$|^apc$/) {
+		usage("\nError: unrecognized option for --mode, must be either 'mcl' or 'apc'\n");
+	} 
+	if (not defined $opts->{'threads'}) {
+		$opts->{'threads'} = 1;
+	}
+	if (not defined $opts->{'thresh'}) {
+		$opts->{'thresh'} = 0;
+	} elsif (($opts->{'thresh'} < 0)  || ($opts->{'thresh'} > 0.99999999999999999999999)) {
+		usage("\nError: the argument provided to --thresh must range between [0,1)\n");
+	}
+	if (not defined $opts->{'infl'}) {
+		$opts->{'infl'} = 1.5;
+	} elsif ($opts->{'infl'} !~ m/\d+\.\d+/) {
+		usage("\nError: the argument provided to --infl must be a float value\n");
+	}
+}

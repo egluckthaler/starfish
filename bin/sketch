@@ -1,0 +1,427 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use Data::Dumper;
+use File::Basename;
+use Getopt::Long qw(:config auto_abbrev no_ignore_case);
+use Sort::Naturally;
+use FileHandle;
+$|=1;
+# Fishtank lib
+use Fishtank::Utils qw(Gff_sortable_gene_hash Annotation_hash dim_0_hash dim_1_hash dim_2_hash Open_FH Format_check_gff);
+
+sub usage {
+	my $message = shift;
+	my $usage = qq/
+usage: starfish sketch [args]
+
+identify genomic neighborhoods containing genes of interest.
+
+Required:
+-q, --queries     FILE   2 column tsv: geneID of interest, tag.
+-g, --gff         FILE   2 column tsv: genome code, path to GFF.
+-m, --merge       INT    max distance to merge query genes, in bp.
+-i, --idtag       STR    prefix for naming neighborhoods.
+-x, --prefix      STR    prefix for naming output files.
+-o, --outdir      DIR    output directory.
+
+Required, with defaults:
+-f, --flanking    INT    size of flanking region to extract, ≤ -m, in bp.
+                         (default: 0)
+-s, --separator   STR    character separating genomeID from featureID.
+                         (default: '_')
+-n, --nameField   STR    GFF3 attribute field where gene features are named.
+                         (default: 'Name=')
+
+Optional:
+-r, --rules       FILE   tag-based rules for identifying regions of interest.
+-a, --annotation  FILE   3 column tsv: sequenceID, fieldID, annotation.
+--noCheck                skip format checking.
+-h, --help               print more details and exit.
+
+/;
+	if (not defined $message) {
+		$message = $usage;
+	} else {
+		$message = "$message\nuse -h for more details\n\n" 
+	}	
+	die($message);
+}
+
+main: {
+
+	# parse and check options
+	my %opts;
+	GetOptions(\%opts, 
+		'queries|q=s',
+		'idtag|i=s',
+		'merge|m=i',
+		'flanking|f=i',
+		'gff|g=s',
+		'separator|s=s',
+		'prefix|x=s',
+		'outdir|o=s',
+		'nameField|namefield|n=s',
+		'annotation|a=s',
+		'rules|r=s',
+		'noCheck|nocheck',
+		'h|help');
+	Opts_check(\%opts);
+
+	print "Key parameters:
+--merge       $opts{'merge'}
+--flanking    $opts{'flanking'}\n\n";
+
+	#######################################
+	#### FORMAT CHECK AND READ IN DATA ####
+	#######################################
+
+	my $datestring = localtime();
+	print "[$datestring] reading in data..\n";
+
+	# Parse some basic info
+	my ($OUTPREFIX) = "$opts{outdir}/$opts{prefix}";
+	my ($queryNames) = dim_2_hash($opts{'queries'}, "\t", "0:1");
+	my ($annotationNames) = dim_0_hash($opts{'queries'}, "\t", "1");
+	
+	# Sort input GFF by contig and gene coordinate
+	# structured: $allGenes{$contig}{$begin}{$seqID} = $seqID\t$gffLine;
+	my %allGenes;
+	my ($ome2gff) = dim_1_hash($opts{'gff'}, "\t", "0:1");
+	foreach my $ome (keys %{$ome2gff}) {
+		if (not defined $opts{'noCheck'}) {
+			$datestring = localtime();
+			print "[$datestring] checking formatting of $ome gff..\n";
+			Format_check_gff($ome2gff->{$ome}, $opts{'separator'}, $opts{'nameField'}) if (defined $opts{'gff'});
+		}
+		my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'});
+		foreach my $contig (keys %{$gffInfo}) {
+			foreach my $pos (keys %{$gffInfo->{$contig}}) {
+				foreach my $seqID (nsort keys %{$gffInfo->{$contig}->{$pos}}) {
+					$allGenes{$contig}{$pos}{$seqID} = $gffInfo->{$contig}->{$pos}->{$seqID};
+				}
+			}
+		}
+	}
+
+
+
+	#######################
+	#### MERGE QUERIES ####
+	#######################
+
+	# Merge any queries within --merge distance of each other into the same neighborhood, and add all intervening genes
+	# structured: $neighborhoods{$neighborhoodID}{$begin}{$queryID} = $seqID\t$gffLine;
+	$datestring = localtime();
+	print "[$datestring] merging any of the ".scalar(keys(%{$queryNames}))." input query genes within $opts{merge} bp of each other into the same neighborhood..\n";
+	my ($queryNeighborhoods, $neighborhoodQueryCount) = Merge_genes_into_neighborhood($queryNames, \%allGenes, $opts{'merge'}, $opts{'idtag'}, $opts{'separator'});
+	
+	#####################################
+	#### PARSE FLANKING AND POPULATE ####
+	#####################################
+
+	# Parse all genes in the '--flanking' flanking distance from each hood, rounding up to nearest gene if necessary
+	# structured: $neighborhoods{$neighborhoodID}{$begin}{$geneID} = $seqID\t$gffLine;
+	$datestring = localtime();
+	print "[$datestring] extending neighborhoods by $opts{flanking} flanking bp and adding all genes within new boundaries to neighborhood..\n";
+	($queryNeighborhoods) = Populate_neighborhood($queryNeighborhoods, \%allGenes, $opts{'flanking'});
+	
+	#############################
+	#### MERGE NEIGHBORHOODS ####
+	#############################
+
+ 	# Do another round of merging for hoods that now overlap in gene content due to flanking regions (only useful if flanking regions were extracted)
+	# we can reuse Merge_genes_into_neighborhood subroutine, if we consider all genes within populated neighborhoods to be the new 'queries'
+	if ($opts{'flanking'} > 0) {
+		#   structured:  $neighborhoods{$neighborhoodID}{$begin}{$queryID} = $seqID\t$gffLine
+		$datestring = localtime();
+		print "[$datestring] merging any neighborhoods whose flanks now overlap with each other..\n";
+		my ($neighborhoodGeneNames) = Parse_neighborhood_genes($queryNeighborhoods);
+		($queryNeighborhoods) = Merge_genes_into_neighborhood($neighborhoodGeneNames, \%allGenes, $opts{'merge'}, $opts{'idtag'}, $opts{'separator'});
+	}
+	
+	#######################
+	#### PRINT RESULTS ####
+	#######################
+
+	# Print out a modified .bed file summarizing all neighborhood content
+	my $annotations;
+	($annotations) = Annotation_hash($opts{'annotation'}) if (defined $opts{'annotation'});
+	Print_bed($queryNeighborhoods, $queryNames, $OUTPREFIX, $annotations);
+		
+	# Print out an occupancy matrix summarizing queries of interest per neighborhood, as well as some other basic stats
+	my ($neighborhoodTags) = Print_matrix($queryNeighborhoods, $queryNames, $annotationNames, $OUTPREFIX);
+
+    # Optional rules based filtering
+    if (defined $opts{'rules'}) {
+    	my ($rules) = dim_0_hash($opts{'rules'}, "\t", "0");
+	    my ($filteredCount) = Filter_neighborhoods_by_rule($neighborhoodTags, $rules, $OUTPREFIX);
+    	$datestring = localtime();
+		print "[$datestring] found $filteredCount neighborhoods that meet the filtering rules\n";
+	}
+
+	$datestring = localtime();
+	print "[$datestring] found ".scalar(keys %{$queryNeighborhoods})." neighborhoods containing input query genes\n";
+	print "[$datestring] done\n";
+}
+
+sub Filter_neighborhoods_by_rule {
+	my ($neighborhoodTags, $rules, $OUTPREFIX) = @_;
+	my $filteredCount = 0;
+	my ($OUT) = Open_FH("$OUTPREFIX.rule_filtered.ids");
+
+	foreach my $hood (nsort keys %{$neighborhoodTags}) {
+		my @ruleArray;
+		foreach my $rule (keys %{$rules}) {
+			# tyr,d37,..
+			
+			my @tags = split/,/, $rule;
+			my %tags = map { $_ => 1 } @tags;
+			usage("\nError: no parseable tags found in rule $rule..\n") if (scalar @tags == 0);
+			my $ruleFail = 0; # assume rule is passed if it doesn't fail
+			foreach my $tag (keys %tags) { # if hood is missing a tag, it fails the rule
+				$ruleFail = 1 if (not exists $neighborhoodTags->{$hood}->{$tag});
+			}
+			push @ruleArray, $rule if ($ruleFail == 0);
+		}
+		if (scalar @ruleArray > 0) {
+			my $ruleString = join(";", @ruleArray);
+			print $OUT "$hood\t$ruleString\n";
+			$filteredCount++; 		
+		}
+	}
+	return($filteredCount);
+}
+
+sub Print_matrix {
+	my ($queryNeighborhoods, $queryNames, $annotationNames, $OUTPREFIX) = @_;
+	my ($OUT) = Open_FH("$OUTPREFIX.mat");
+	my $globalAnnotationCount = 0;
+	
+	# print header
+	print $OUT "neighborhoodID";
+	foreach my $annotation (nsort keys %{$annotationNames}) {
+		print $OUT "\t$annotation";
+		$globalAnnotationCount++;
+	}
+	print $OUT "\tsize.bp\tsize.genes\tdistinctAnnotations\tannotationCoverage\n";
+	
+	# count up all genes with annotations of interest per neighborhood
+	my %hoodAnnotations;
+	foreach my $hoodID (keys %{$queryNeighborhoods}) {
+		foreach my $geneBegin (keys %{$queryNeighborhoods->{$hoodID}}) {
+			foreach my $geneID (keys %{$queryNeighborhoods->{$hoodID}->{$geneBegin}}) {
+				if (exists $queryNames->{$geneID}) {
+					foreach my $tag (keys %{$queryNames->{$geneID}}) {
+						$hoodAnnotations{$hoodID}{$tag}++;
+					}
+				}
+			}
+		}
+	}
+
+	# print out occupancy matrix
+	foreach my $hoodID (nsort keys %hoodAnnotations) {
+		print $OUT "$hoodID\t";
+		my ($hoodContig, $hoodBegin, $hoodEnd, $hoodGeneCount) = Parse_neighborhood_coordinates(\%{$queryNeighborhoods->{$hoodID}}); 
+		my $hoodsize = $hoodEnd - $hoodBegin + 1;
+		my $hoodAnnotationCount = 0;
+		foreach my $annotation (nsort keys %{$annotationNames}) {
+			if (exists $hoodAnnotations{$hoodID}{$annotation}) {
+				print $OUT "\t$hoodAnnotations{$hoodID}{$annotation}";
+				$hoodAnnotationCount++;
+			} else {
+				print $OUT "\t0";
+			}
+		}
+		print $OUT "\t";
+		my $annotationCoverage = sprintf("%.2f", $hoodAnnotationCount / $globalAnnotationCount);
+		print $OUT "$hoodsize\t$hoodGeneCount\t$hoodAnnotationCount\t$annotationCoverage\n";
+	}
+	return(\%hoodAnnotations);
+}
+
+sub Print_bed {
+	my ($queryNeighborhoods, $queryNames, $OUTPREFIX, $annotations) = @_;
+	my ($OUT) = Open_FH("$OUTPREFIX.bed");
+	foreach my $hoodID (nsort keys %{$queryNeighborhoods}) {
+		foreach my $geneBegin (nsort keys %{$queryNeighborhoods->{$hoodID}}) {
+			foreach my $geneID (keys %{$queryNeighborhoods->{$hoodID}->{$geneBegin}}) {
+				my ($currentgeneID, $currentContigID, $currentFeatureType, $currentAnnotator, $currentBegin, $currentEnd, $currentNULL1, $currentStrand, $currentNULL2, $currentAttributes) = split("\t", $queryNeighborhoods->{$hoodID}->{$geneBegin}->{$geneID});
+				my $queryAnnotation = '.';
+				$queryAnnotation = join(",", nsort keys %{$queryNames->{$currentgeneID}}) if (exists $queryNames->{$currentgeneID});
+				my $functionalAnnotations = '.';
+				if (defined $annotations && exists $annotations->{$geneID}) {
+					my @annotationArray;
+					foreach my $annField (nsort keys %{$annotations->{$geneID}}) {
+						push @annotationArray, "$annField=".join("|", @{$annotations->{$geneID}->{$annField}});
+					}
+					$functionalAnnotations = join(";", @annotationArray);
+				}
+				print $OUT "$currentContigID\t$currentBegin\t$currentEnd\t$currentgeneID\t$queryAnnotation\t$currentStrand\t$hoodID\t$functionalAnnotations\n";
+			}
+		}
+	}	
+}
+
+sub Parse_neighborhood_genes {
+	my ($queryNeighborhoods) = @_;
+	my %geneIDs;
+	foreach my $hoodID (keys %{$queryNeighborhoods}) {
+		foreach my $geneBegin (keys %{$queryNeighborhoods->{$hoodID}}) {
+			foreach my $geneID (keys %{$queryNeighborhoods->{$hoodID}->{$geneBegin}}) {
+				my ($currentgeneID, $currentContigID, $currentFeatureType, $currentAnnotator, $currentBegin, $currentEnd, $currentNULL1, $currentStrand, $currentNULL2, $currentAttributes) = split("\t", $queryNeighborhoods->{$hoodID}->{$geneBegin}->{$geneID});
+				$geneIDs{$currentgeneID} = 1;
+			}
+		}
+	}	
+	return(\%geneIDs);
+}
+
+sub Parse_neighborhood_coordinates {
+	my ($neighborhoodInfo) = @_;
+	my ($hoodBegin, $hoodEnd, $hoodGeneCount) = (100000000000000000000, 0, 0); 
+	my $hoodContig;
+	#find begin and end coordinates for the neighborhood
+	#this loop will find the smallest and largest value across all genes in neighborhood in order to define the beginning and end of the region
+	foreach my $geneBegin (keys %{$neighborhoodInfo}) {
+		foreach my $geneID (keys %{$neighborhoodInfo->{$geneBegin}}) {
+			my ($currentgeneID, $currentContigID, $currentFeatureType, $currentAnnotator, $currentBegin, $currentEnd, $currentNULL1, $currentStrand, $currentNULL2, $currentAttributes) = split("\t", $neighborhoodInfo->{$geneBegin}->{$geneID});
+			$hoodContig = $currentContigID; # will be the same for all geneIDs in this neighborhood
+			$hoodBegin = $currentBegin if ($currentBegin < $hoodBegin);
+			$hoodEnd = $currentEnd if ($currentEnd > $hoodEnd);
+			$hoodGeneCount++;
+		}
+	}
+	return($hoodContig, $hoodBegin, $hoodEnd, $hoodGeneCount);
+}
+
+sub Populate_neighborhood {
+	my ($queryNeighborhoods, $allGenes, $FLANKINGDIST) = @_;
+	my (%flankingHoods);
+	
+	foreach my $hoodID (keys %{$queryNeighborhoods}) {
+		# parse neighborhood coordinates and adjust based on flanking distance
+		my ($hoodContig, $hoodBegin, $hoodEnd) = Parse_neighborhood_coordinates(\%{$queryNeighborhoods->{$hoodID}}); 
+		if ($hoodBegin - $FLANKINGDIST > 0) {
+			$hoodBegin = $hoodBegin - $FLANKINGDIST;
+		} else {
+			$hoodBegin = 0; #set to 0 to accomodate 0-counting
+		}
+		$hoodEnd = $hoodEnd + $FLANKINGDIST;
+
+		#add all genes within the boundaries of the neighborhood to the neighborhood (ie., not just queries)
+		my ($hoodFlankBegin, $hoodFlankEnd) = (100000000000000000000, 0); #absolute coordinates of region + flank, in bp (for sequence retrieval)
+		foreach my $geneBegin (keys %{$allGenes->{$hoodContig}}) {
+			foreach my $geneID (keys %{$allGenes->{$hoodContig}->{$geneBegin}}) {
+				my ($currentGeneID, $currentContigID, $currentFeatureType, $currentAnnotator, $currentBegin, $currentEnd, $currentNULL1, $currentStrand, $currentNULL2, $currentAttributes) = split("\t", $allGenes->{$hoodContig}->{$geneBegin}->{$geneID});
+			
+				#there are three scenarios where gene would be defined as 'inside' the neighborhood
+				#1) if it falls entirely within the hood boundaries
+				#2) if the upstream hood boundary is found within it
+				#3) if the downstream hood boundary is found within it
+
+				if ((($currentBegin >= $hoodBegin) && ($currentEnd <= $hoodEnd)) || (($currentBegin <= $hoodBegin) && ($currentEnd >= $hoodBegin)) || (($currentBegin <= $hoodEnd) && ($currentEnd >= $hoodEnd))) {
+					$flankingHoods{$hoodID}{$currentBegin}{$currentGeneID} = $allGenes->{$hoodContig}->{$geneBegin}->{$currentGeneID};
+					$hoodFlankBegin = $currentBegin if ($currentBegin < $hoodFlankBegin);
+					$hoodFlankEnd = $currentEnd if ($currentEnd > $hoodFlankEnd); # update the boundaries
+				}
+			}
+		}
+	}
+	return(\%flankingHoods);	
+}
+
+sub Merge_genes_into_neighborhood {
+	my ($queryNames, $allGenes, $MERGEDIST, $TAG, $SEP) = @_;
+	my %neighborhoods;
+	my $SEPprint = $SEP;
+	$SEPprint =~ s/\\//g;
+	
+	#iterate through contigs
+	my $hoodcount = 0;
+	foreach my $contig (nsort keys %{$allGenes}) { # nsort through contigs to ensure reproducibility
+		
+		# return array of sorted query genes on current contig, sorted by begin position
+		my @queryCoords;
+		foreach my $beginPos (sort {$a <=> $b} keys %{$allGenes->{$contig}}) {
+			foreach my $seqID (keys %{$allGenes->{$contig}->{$beginPos}}) {
+				next if (not exists $queryNames->{$seqID}); #only load up queries
+				push @queryCoords, $allGenes->{$contig}->{$beginPos}->{$seqID}; #genes in array will be in order in which they appear on the contig
+			}
+		}
+		
+		# merge queries		
+		if (scalar @queryCoords > 0) {
+			$hoodcount++;
+			my $current_queryInfo = shift @queryCoords;
+			my ($currentQueryID, $currentContigID, $currentFeatureType, $currentAnnotator, $currentBegin, $currentEnd, $currentNULL1, $currentStrand, $currentNULL2, $currentAttributes) = split("\t", $current_queryInfo);
+			
+			# initialize neighborhood for first observed query gene
+			my $formattedHoodCount = sprintf("%05d", $hoodcount);
+			my ($genomeID) = split/$SEP/, $currentContigID;
+			my $neighborhoodID = "${genomeID}${SEPprint}${TAG}${formattedHoodCount}";
+			$neighborhoods{$neighborhoodID}{$currentBegin}{$currentQueryID} = $current_queryInfo;
+			
+			# iterate through the rest of the query genes, if any exist
+			while (scalar @queryCoords > 0) {
+				($currentQueryID, $currentContigID, $currentFeatureType, $currentAnnotator, $currentBegin, $currentEnd, $currentNULL1, $currentStrand, $currentNULL2, $currentAttributes) = split("\t", $current_queryInfo);
+				my $next_queryInfo = shift @queryCoords;
+				my ($nextQueryID, $nextContigID, $nextFeatureType, $nextAnnotator, $nextBegin, $nextEnd, $nextNULL1, $nextStrand, $nextNULL2, $nextAttributes) = split("\t", $next_queryInfo);
+				my $interDist = $nextBegin - $currentEnd - 1;
+				$hoodcount++ if ($interDist >= $MERGEDIST); #we have a new hood if the two genes are separated by more than MERGEDIST. if not, then hoodcount wont increment and gene will be added to previous hood
+				$formattedHoodCount = sprintf("%05d", $hoodcount);
+				$neighborhoodID = "${genomeID}${SEPprint}${TAG}${formattedHoodCount}";
+				$neighborhoods{$neighborhoodID}{$nextBegin}{$nextQueryID} = $next_queryInfo;
+				$current_queryInfo = $next_queryInfo; #next gene becomes current gene for the next iteration
+			}
+		}
+	}
+	return(\%neighborhoods);
+}
+
+sub Opts_check {
+	my ($opts) = @_;
+	usage() if (exists $opts->{'h'});
+	usage("\nError: no arguments provided\n") if (scalar keys %{$opts} == 0);
+	usage("\nError: please provide a file to --queries\n") if (not defined $opts->{'queries'});
+	usage("\nError: the file provided to --queries does not exist\n") if (! -f $opts->{'queries'});
+	usage("\nError: please provide an integer to --merge\n") if (not defined $opts->{'merge'});
+	usage("\nError: --merge must be >= 0 \n") if ($opts->{'merge'} !~ m/^\d+$/);
+	usage("\nError: please provide a string to --prefix\n") if (not defined $opts->{'prefix'});
+	usage("\nError: please provide a directory to --outdir\n") if (not defined $opts->{'outdir'});
+	usage("\nError: the directory provided to --outdir does not exist\n") if (! -d $opts->{'outdir'});
+	if (not defined $opts->{'separator'}) {
+		$opts->{'separator'} = '_';
+	} elsif ($opts->{'separator'} eq ':') {
+		usage("\nError: the separator character cannot be ':'\n");
+	} elsif ($opts->{'separator'} eq ';') {
+		usage("\nError: the separator character cannot be ';'\n");
+	} elsif ($opts->{'separator'} eq '|') {
+		usage("\nError: the separator character cannot be '|'\n");
+	}
+	if (defined $opts->{'separator'}) {
+		$opts->{'separator'} = quotemeta($opts->{'separator'});	# to allow splitting on special characters, like '.'
+	}
+	usage("\nError: please provide a string to --idtag\n") if (not defined $opts->{'idtag'});
+	usage("\nError: please provide a file to --gff\n") if (not defined $opts->{'gff'});
+	usage("\nError: the file provided to --gff does not exist\n") if (! -f $opts->{'gff'});
+	if (defined $opts->{'annotation'}) {
+		usage("\nError: the file provided to --annotation does not exist\n") if (! -f $opts->{'annotation'});
+	}
+	if (defined $opts->{'rules'}) {
+		usage("\nError: the file provided to --rules does not exist\n") if (! -f $opts->{'rules'});
+	}
+	if (defined $opts->{'flanking'}) {
+		usage("\nError: --flanking must be an integer >= 0 \n") if ($opts->{'flanking'} !~ m/^\d+$/);
+		usage("\nError: --flanking must be <= --merge\n") if ($opts->{'flanking'} > $opts->{'merge'});
+	} else {
+		$opts->{'flanking'} = 0;
+	}
+	if (not defined $opts->{'nameField'}) {
+		$opts->{'nameField'} = 'Name=';
+	}
+	if (not defined $opts->{'force'}) {
+		$opts->{'force'} = 0;
+	}
+}
