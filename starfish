@@ -48,7 +48,7 @@ Auxiliary commands:
 
 To learn more about a command, type starfish <command> -h
 
-See \/utils for useful standalone scripts
+See \/scripts for useful standalone tools
 
 /;
 	if (not defined $message) {
