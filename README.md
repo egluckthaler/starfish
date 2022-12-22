@@ -5,7 +5,7 @@ starfish is a computational workflow for large mobile element discovery. Built p
 <img
   src="/data/element_logo_color.png"
   title="Starship architecture"
-  style="display: left; margin: 0 auto; max-width: 400px">
+  style="display: left; margin: 0 auto; max-width: 228px; max-height: 251px">
 
 ## overview
 
