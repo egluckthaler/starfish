@@ -50,8 +50,7 @@ Some starfish commands have dependencies that are stand-alone programs in their 
 |`flank`| `cnef` | TBD |
 |`sim`| `sourmash` | TBD |
 |`group`| `mcl` | TBD |
-|`*-viz`|`circos`,`gggenomes`,`mummer4`,
-`mafft`, `minimap2`| TBD |
+|`*-viz`|`circos`,`gggenomes`,`mummer4`, <br />`mafft`, `minimap2`| TBD |
 
 ## license
 
