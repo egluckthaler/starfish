@@ -166,7 +166,8 @@ cnef parameters:
 
 		# now filter the longest candidate repeats by selecting the pairs with the shortest
 		# combined DR distance to the element boundaries
-		my ($bestRepeats, $tsdElementCount, $tsdtirElementCount, $multiRepeatCount) = Choose_closest_repeat_candidate($longestRepeats, $knownElements);
+		# IF multiple pairs were recovered, pick a random one since they are all equally good
+		my ($bestRepeats, $tsdElementCount, $tsdtirElementCount) = Choose_closest_repeat_candidate($longestRepeats, $knownElements);
 
 	########################################
 	#### FIND CLOSEST INSERT BOUNDARIES ####
@@ -186,22 +187,17 @@ cnef parameters:
 		# Print out an updated BED file, where candidate DR and DR-TIR seqs are printed ONLY if they were the
 		# only longest pair to be recovered for this particular captain (see filtering criteria above)
 		# if they are the only pair, then the DR boundaries will replace the insert boundaries
-		# IF multiple pairs were recovered, don't replace insert boundaries to decrease risk of false positive.
 		# print 'insertUP' and 'insertDOWN' boundaries only if they are associated with a captain that did not have any boundaries verified
 		my $bedOutfile = "$opts{'outdir'}/$opts{'prefix'}.flank.bed";
 		Print_bed($bedFeatures, $closestBoundaries, $bestRepeats, $assemblies, $bedOutfile);
 
-		# Otherwise, if multiple best DR/DR-TIR pairs were found, print them out to a stats file
-		# that can be used to manually annotated the BED file, if desired
-		# also print out a separate stats table for single best DRs, for easier parsing of the data, for good record keeping
+		# print out a separate stats table for single best DRs, for easier parsing of the data, for good record keeping
 		# finally, let us know which elements had no repeats found. These elements will retain their 'insert' boundaries
-		my $multiOutfile = "$opts{'outdir'}/$opts{'prefix'}.flank.multiDR.stats";
 		my $singleOutfile = "$opts{'outdir'}/$opts{'prefix'}.flank.singleDR.stats";
-		Print_stats($knownElements, $bestRepeats, $assemblies, $cap2regionID, $multiOutfile, $singleOutfile);
+		Print_stats($knownElements, $bestRepeats, $assemblies, $cap2regionID, $singleOutfile);
 
 		$datestring = localtime();
 		print "[$datestring] found $tsdElementCount captains with DR boundaries and $tsdtirElementCount captains with DR-TIR boundaries out of ".scalar(keys(%{$knownElements}))." input captains with candidate DRs\n";
-		print "[$datestring] $multiRepeatCount captains have multiple 'best' boundaries printed to $multiOutfile: manually replace insert boundaries in $bedOutfile with the best\n" if ($multiRepeatCount != 0);
 		print "[$datestring] done\n";
 		
 }
@@ -263,7 +259,7 @@ sub Choose_longest_repeat_candidate {
 sub Choose_closest_repeat_candidate {
 	my ($flankingRepeats, $knownElements) = @_;
 	my %best;
-	my ($tsdElementCount, $tsdtirElementCount, $multiRepeatCount) = (0,0,0);
+	my ($tsdElementCount, $tsdtirElementCount) = (0,0);
 	foreach my $featureID (keys %{$flankingRepeats}) {
 		my %candidateDRs; # notice here we are summarizing across all patterns
 		foreach my $patternID (keys %{$flankingRepeats->{$featureID}}) {
@@ -303,45 +299,38 @@ sub Choose_closest_repeat_candidate {
 			
 		
 		}
-		# check for the DR pair with the shortest distance. If multiple pairs have shortest distance, will return all of them
+		# check for the DR pair with the shortest distance. If multiple pairs have shortest distance, will return just the first of them since all are equally good (or bad) at this point
 		if (exists $candidateDRs{$featureID}) {
 			# take the shortest DR dist by only iterating through the smallest key 
 			foreach my $tsdLength (sort { $a <=> $b } keys %{$candidateDRs{$featureID}}) {
 				foreach my $patternID (keys %{$candidateDRs{$featureID}{$tsdLength}}) {
 					my ($tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd) = @{$flankingRepeats->{$featureID}->{$patternID}};
-					if (exists $best{$featureID}) {
-						$multiRepeatCount++;
-					} elsif ($tirUpBegin ne 'NA') {
+					if ($tirUpBegin ne 'NA') {
 						$tsdtirElementCount++;
 					} else {
 						$tsdElementCount++;
 					}
 					@{$best{$featureID}{$patternID}} = @{$candidateDRs{$featureID}{$tsdLength}{$patternID}};
+					last;
 				}
 				last;
 			}
 		}
 	}
-	return(\%best, $tsdElementCount, $tsdtirElementCount, $multiRepeatCount);
+	return(\%best, $tsdElementCount, $tsdtirElementCount);
 }
 
 sub Print_stats {
-	my ($knownElements, $flankingRepeats, $assemblies, $cap2regionID, $multiOutfile, $singleOutfile) = @_;
+	my ($knownElements, $flankingRepeats, $assemblies, $cap2regionID, $singleOutfile) = @_;
 	# print out header
-	my ($multiOUT) = Open_FH($multiOutfile, "#contigID\tcaptainID\tcapStrand\tpatternID\telementLength\tupDR\tupDRbegin\tupDRend\tdownDR\tdownDRbegin\tdownDRend\tupTIR\tupTIRbegin\tupTIRend\tdownTIR\tdownTIRbegin\tdownTIRend\n");
 	my ($singleOUT) = Open_FH($singleOutfile, "#contigID\tcaptainID\tcapStrand\tpatternID\telementLength\tupDR\tupDRbegin\tupDRend\tdownDR\tdownDRbegin\tdownDRend\tupTIR\tupTIRbegin\tupTIRend\tdownTIR\tdownTIRbegin\tdownTIRend\n");
 		
  	foreach my $featureID (nsort keys %{$knownElements}) {
 		if (exists $flankingRepeats->{$featureID}) { # if tsds were found for this captain
-			my $OUT;
+			my $OUT = $singleOUT;
 			my ($capStrand, $contigID);
 			foreach my $emptyContigID (nsort keys %{$knownElements->{$featureID}}) {
 				foreach my $capContigID (nsort keys %{$knownElements->{$featureID}->{$emptyContigID}}) {
-					if (scalar keys %{$flankingRepeats->{$featureID}} > 1) { # if > 1 DR pair is associated with this captain
-						$OUT = $multiOUT;
-					} else {
-						$OUT = $singleOUT;
-					}
 					$capStrand = @{$knownElements->{$featureID}->{$emptyContigID}->{$capContigID}}[2];
 					$contigID = $capContigID; # will be the same across all emptyContingIDs
 				}
@@ -386,27 +375,10 @@ sub Print_stats {
 					}
 					print $OUT "\t$tirUpSeq\t$tirUpBegin\t$tirUpEnd\t$tirDownSeq\t$tirDownBegin\t$tirDownEnd\n";
 					
-					# print out bed lines in multiStats to facilitate manual editing
-					if (scalar keys %{$flankingRepeats->{$featureID}} > 1) { # if > 1 DR pair is associated with this captain
-						my $tirUpID = "${featureID}|TIR|up";
-						my $tirDownID = "${featureID}|TIR|down";
-						my $repeatTag = 'flank';
-						print $OUT "#bedTemplate\t$contigID\t$tirUpBegin\t$tirUpEnd\t$tirUpID\t$repeatTag\t$capStrand\t$cap2regionID->{$featureID}\t$tirUpSeq\n";
-						print $OUT "#bedTemplate\t$contigID\t$tirDownBegin\t$tirDownEnd\t$tirDownID\t$repeatTag\t$capStrand\t$cap2regionID->{$featureID}\t$tirDownSeq\n";
-					}
-												
 				} else {
 					print $OUT "\t.\t.\t.\t.\t.\t.\n"
 				}
 
-				# print out bed lines in multiStats to facilitate manual editing
-				if (scalar keys %{$flankingRepeats->{$featureID}} > 1) { # if > 1 DR pair is associated with this captain
-					my $tsdUpID = "${featureID}|DR|up";
-					my $tsdDownID = "${featureID}|DR|down";
-					my $repeatTag = 'flank';
-					print $OUT "#bedTemplate\t$contigID\t$tsdUpBegin\t$tsdUpEnd\t$tsdUpID\t$repeatTag\t$capStrand\t$cap2regionID->{$featureID}\t$tsdUpSeq\n";
-					print $OUT "#bedTemplate\t$contigID\t$tsdDownBegin\t$tsdDownEnd\t$tsdDownID\t$repeatTag\t$capStrand\t$cap2regionID->{$featureID}\t$tsdDownSeq\n";
-				}
 			}
 		} else {
 			foreach my $emptyContigID (nsort keys %{$knownElements->{$featureID}}) {
@@ -429,7 +401,7 @@ sub Print_bed {
 		foreach my $regionID (keys %{$regions->{$contigID}}) {
 			foreach my $position (keys %{$regions->{$contigID}->{$regionID}}) {
 				foreach my $featureID (keys %{$regions->{$contigID}->{$regionID}->{$position}}) {
-					if (exists $flankingRepeats->{$featureID}) { # if this is an element with newly discovered tsd/tsd-tir features
+					if (exists $flankingRepeats->{$featureID}) { # if this is an element with newly discovered DR/DR-tir features
 						if (scalar keys %{$flankingRepeats->{$featureID}} == 1) { # if only 1 DR pair is associated with this captain
 							foreach my $patternID (keys %{$flankingRepeats->{$featureID}}) {
 								my ($tsdUpBegin, $tsdUpEnd, $tsdDownBegin, $tsdDownEnd, $tirUpBegin, $tirUpEnd, $tirDownBegin, $tirDownEnd) = @{$flankingRepeats->{$featureID}->{$patternID}};

@@ -72,6 +72,7 @@ Required if --aligner nucmer, with defaults:
 Optional:
 --tags                     print gene tags in the BED file as gene labels.
 --force                    force all steps even if output already exists.
+--noali                    skip alignment step and keep unaligned fastas.
 -h, --help                 print more details and exit.
 
 /;
@@ -110,6 +111,7 @@ main: {
 		'deltafilteropts=s',
 		'force',
 		'tags',
+		'noali',
 		'h|help');
 	Opts_check(\%opts);
 
@@ -192,21 +194,23 @@ mafft                  $opts{'mafftopts'}\n\n";}
 	############################
 
 		$datestring = localtime();
-		print "[$datestring] executing $opts{aligner} alignments..\n";
+		print "[$datestring] executing $opts{aligner} alignments..\n" if (not defined $opts{'noali'});
 		
 		if ($opts{'aligner'} eq 'nucmer') {
 			
 			# skip alignment if already present
 			# for generating .tsv.links files
-			Nucmer_wrapper($comparisons, $id2sequence, $opts{'color3'}, $opts{'outdir'}, $opts{'force'}, $opts{'nucmeropts'}, $opts{'deltafilteropts'});
-
-			$datestring = localtime();
-			print "[$datestring] executing circos..\n";
+			Nucmer_wrapper($comparisons, $id2sequence, $opts{'color3'}, $opts{'outdir'}, $opts{'force'}, $opts{'nucmeropts'}, $opts{'deltafilteropts'}, $opts{'noali'});
+			
+			if (not defined $opts{'noali'}) {
+				$datestring = localtime();
+				print "[$datestring] executing circos..\n";
 		
-			# print .kar, .config and .coords files
-			Circos_wrapper($comparisons, $insertStarshipCoords, $extendStarshipCoords, $starshipFeatures, $opts{'color1'}, $opts{'color2'}, $opts{'color4'},  $opts{'outdir'}, $opts{'force'}, $opts{'tags'});
+				# print .kar, .config and .coords files
+				Circos_wrapper($comparisons, $insertStarshipCoords, $extendStarshipCoords, $starshipFeatures, $opts{'color1'}, $opts{'color2'}, $opts{'color4'},  $opts{'outdir'}, $opts{'force'}, $opts{'tags'});
+			}
 		} elsif ($opts{'aligner'} eq 'mafft') {
-			Mafft_wrapper($comparisons, $id2sequence, $opts{'mafftopts'}, $opts{'threads'}, $opts{'outdir'}, $opts{'force'});
+			Mafft_wrapper($comparisons, $id2sequence, $opts{'mafftopts'}, $opts{'threads'}, $opts{'outdir'}, $opts{'force'}, $opts{'noali'});
 		}
 		
 		$datestring = localtime();
@@ -216,7 +220,7 @@ mafft                  $opts{'mafftopts'}\n\n";}
 }
 
 sub Mafft_wrapper {
-	my ($comparisons, $id2sequence, $MAFFTOPTS, $THREADS, $OUTDIR, $FORCE) = @_;
+	my ($comparisons, $id2sequence, $MAFFTOPTS, $THREADS, $OUTDIR, $FORCE, $NOALI) = @_;
 	foreach my $queElement (keys %{$comparisons}) {
 		foreach my $refRegion (keys %{$comparisons->{$queElement}}) {
 			my $datestring = localtime();
@@ -261,11 +265,13 @@ sub Mafft_wrapper {
 				print $seqOUT ">$queElement:$queContigID:${queBegin}-${queEnd}:${queStrand}cap\n$queSeq\n";
 				($refSeq) = Reverse_complement($refSeq, $refContigID) if ($highestStrand eq '-');
 				print $seqOUT ">$refRegion:$refContigID:${refBegin}-${refEnd}:$highestStrand\n$refSeq\n";
-
-				my ($mafftCheck) = system("mafft --thread $THREADS $MAFFTOPTS --quiet $seqFile > $outfile");
-				if ($mafftCheck != 0) { die "\n\n[$datestring] error: could not execute mafft on commandline for $seqFile, exiting..\nmafft --thread $THREADS $MAFFTOPTS --quiet $seqFile > $outfile\n$!\n";}
+				
+				if (not defined $NOALI) {
+					my ($mafftCheck) = system("mafft --thread $THREADS $MAFFTOPTS --quiet $seqFile > $outfile");
+					if ($mafftCheck != 0) { die "\n\n[$datestring] error: could not execute mafft on commandline for $seqFile, exiting..\nmafft --thread $THREADS $MAFFTOPTS --quiet $seqFile > $outfile\n$!\n";}
 		
-				system("rm $seqFile $refFile $queFile");
+					system("rm $seqFile $refFile $queFile");
+				}
 			} else {
 				print "[$datestring] $outfile exists, skipping mafft alignment\n";
 				next;
@@ -532,7 +538,7 @@ stroke_thickness    = 0.5p
 }
 
 sub Nucmer_wrapper {
-	my ($comparisons, $id2sequence, $color3, $OUTDIR, $FORCE, $NUCMEROPTS, $DELTAFILTEROPTS) = @_;
+	my ($comparisons, $id2sequence, $color3, $OUTDIR, $FORCE, $NUCMEROPTS, $DELTAFILTEROPTS, $NOALI) = @_;
 	
 	foreach my $queElement (keys %{$comparisons}) {
 		foreach my $refRegion (keys %{$comparisons->{$queElement}}) {
@@ -559,24 +565,27 @@ sub Nucmer_wrapper {
 			my ($queOUT) = Open_FH($queFile);
 			print $queOUT ">$queContigID\n$id2sequence->{$queContigID}\n";
 			
-			my ($nucmerCheck) = system("nucmer $NUCMEROPTS -p $outprefix $queFile $refFile 2>/dev/null");
-			if ($nucmerCheck != 0) { die "\n\n[$datestring] error: could not execute nucmer on commandline for $queFile and $refFile, exiting..\n$!\n";}
+			if (not defined $NOALI) {
 			
-			my ($deltaCheck) = system("delta-filter $DELTAFILTEROPTS $outprefix.delta > $outprefix.filt.delta 2>/dev/null");
-			if ($deltaCheck != 0) { die "\n\n[$datestring] error: could not execute delta-filter on commandline for $queFile and $refFile, exiting..\n$!\n";}
+				my ($nucmerCheck) = system("nucmer $NUCMEROPTS -p $outprefix $queFile $refFile 2>/dev/null");
+				if ($nucmerCheck != 0) { die "\n\n[$datestring] error: could not execute nucmer on commandline for $queFile and $refFile, exiting..\n$!\n";}
 			
-			my $awkArgs = q{'{z+=1;print $8"\t"$1"\t"$2"\t"$9"\t"$3"\t"$4}'};
-			#print "show-coords -TH $outprefix.filt.delta | sort -k5,5nr | awk $awkArgs | perl -pe 's/\\t\$/\\tcolor=\$color3/' > $outprefix.links.tsv";die;
-			my (@coordsLines) = `show-coords -TH $outprefix.filt.delta | sort -k5,5nr | awk $awkArgs`;
-			if (scalar @coordsLines == 0) { 
-				warn("\n\n[$datestring] warning: no nucmer alignments found between $queFile and $refFile, skipping..\n$!\n");
-				system("rm $linksFile");
+				my ($deltaCheck) = system("delta-filter $DELTAFILTEROPTS $outprefix.delta > $outprefix.filt.delta 2>/dev/null");
+				if ($deltaCheck != 0) { die "\n\n[$datestring] error: could not execute delta-filter on commandline for $queFile and $refFile, exiting..\n$!\n";}
+			
+				my $awkArgs = q{'{z+=1;print $8"\t"$1"\t"$2"\t"$9"\t"$3"\t"$4}'};
+				#print "show-coords -TH $outprefix.filt.delta | sort -k5,5nr | awk $awkArgs | perl -pe 's/\\t\$/\\tcolor=\$color3/' > $outprefix.links.tsv";die;
+				my (@coordsLines) = `show-coords -TH $outprefix.filt.delta | sort -k5,5nr | awk $awkArgs`;
+				if (scalar @coordsLines == 0) { 
+					warn("\n\n[$datestring] warning: no nucmer alignments found between $queFile and $refFile, skipping..\n$!\n");
+					system("rm $linksFile");
+				}
+				foreach my $line (@coordsLines) {
+					chomp $line;
+					print $linksOUT "$line\tcolor=$color3\n";
+				}	
+				system("rm $refFile $queFile $outprefix.delta $outprefix.filt.delta");
 			}
-			foreach my $line (@coordsLines) {
-				chomp $line;
-				print $linksOUT "$line\tcolor=$color3\n";
-			}	
-			system("rm $refFile $queFile $outprefix.delta $outprefix.filt.delta");
 		}
 	}
 }

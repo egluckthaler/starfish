@@ -309,7 +309,7 @@ sub Print_filtered_hmm_hits {
 	my $SEPprint = $SEP;
 	$SEPprint =~ s/\\//g;
 	
-	# first edit the sequenceIDs in .fas to conform to naming convention in .hmmout
+	# first edit the sequenceIDs in .fas to conform to naming convention in .hmmout.ids
 	my %renamedSeqs;
 	my ($seqs) = Fasta_hash_nospace($fasFile);
 	foreach my $header (keys %{$seqs}) {
@@ -324,16 +324,16 @@ sub Print_filtered_hmm_hits {
 	while (my $line = <$IN>) {
 		next if ($line =~ m/^#/);
 		chomp $line;
-		# DK051-Scaffold13	gene	MetaEuk	18274	20639	447	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-
-		# DK051-Scaffold13	mRNA	MetaEuk	18274	20639	447	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-_mRNA;Parent=consp.1_660283|DK051-Scaffold13|-
-		# DK051-Scaffold13	exon	MetaEuk	20313	20639	90	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-_exon;Parent=consp.1_660283|DK051-Scaffold13|-_mRNA
-		# DK051-Scaffold13	CDS	MetaEuk	20313	20639	90	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-_CDS;Parent=consp.1_660283|DK051-Scaffold13|-_exon
+		# DK051-Scaffold13	MetaEuk	gene	18274	20639	447	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-|94211
+		# DK051-Scaffold13	MetaEuk	mRNA	18274	20639	447	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-|94211_mRNA;Parent=consp.1_660283|DK051-Scaffold13|-|94211
+		# DK051-Scaffold13	MetaEuk	exon	20313	20639	90	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-|94211_exon;Parent=consp.1_660283|DK051-Scaffold13|-|94211_mRNA
+		# DK051-Scaffold13	MetaEuk	CDS	20313	20639	90	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-|94211_CDS;Parent=consp.1_660283|DK051-Scaffold13|-|94211_exon
 
-		# metaeuk gffs have the source and feature fields reversed according to gff specifications
-		my ($contigID, $featureType, $source, $begin, $end, $NULL1, $strand, $NULL2, $info) = split("\t", $line);
+		my ($contigID, $source, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $info) = split("\t", $line);
 		next if ($featureType ne 'gene'); # only parse gene features
 		my ($otherInfo, $metaeukID) = split/;/, $info;
 		$metaeukID =~ s/TCS_ID=//;
+		$metaeukID =~ s/\|\d+$//;
 		# gff coordinates of gene are +1 greater than the coordinates in the metaeuk headers >:(
 		my $beginFas = $begin - 1;
 		my $endFas = $end - 1;
