@@ -1,10 +1,19 @@
-# starfish: the STARship FInder SHell :rocket:
+# starfish :rocket:
 
-starfish is a computational workflow for large mobile element discovery. Built primarily for annotating [giant *Starship* elements](https://academic.oup.com/mbe/article/39/5/msac109/6588634) in fungal genomes, it can be easily adapted to find any large mobile element (≥6kb) that shares the same basic architecture as a fungal *Starship* or bacterial integrative and conjugative element: a "captain" gene with zero or more "cargo" genes located downstream of its 3' end.
+<img
+  src="/assets/element_logo_color.png"
+  align = "right"
+  style="margin: 0 auto; width: 182px; height: 200px">
+
+starfish is a computational workflow for large mobile element discovery. Built primarily for annotating [giant *Starship* elements](https://academic.oup.com/mbe/article/39/5/msac109/6588634) in fungal genomes, it can be easily adapted to find any large mobile element (≥6kb) that shares the same basic architecture as a fungal *Starship* or a bacterial integrative and conjugative element: a "captain" gene with zero or more "cargo" genes downstream of its 3' end.
 
 ## overview
 
-starfish is organized into three main modules: gene finder, element finder, and region finder. Each has several dedicated commands that are typically run sequentially. Many auxiliary commands that provide additional analyses and generate visualizations are also available through the commandline. Several useful stand-alone scripts are located in the `/scripts` directory. 
+starfish is organized into three main modules: Gene finder, Element finder, and Region finder. Each has dedicated commands that are typically run sequentially. Many auxiliary commands that provide additional utilities and generate visualizations are also available through the commandline. Several useful stand-alone scripts are located in the `/scripts` directory. 
+
+<img
+  src="/assets/starfishWorkflow.png"
+  style="display: center; margin: 0 auto; max-width: 400px">
 
 ## installation
 
@@ -44,11 +53,9 @@ if [ -f $HOME/starfish/util/bash-completion.sh ]; then
 fi
 ```
 
-and you're done!
-
 ### additional dependencies
 
-The R package `gggenomes` is used in some visualization commands and can be installed by visiting [the gggenomes github](https://github.com/thackl/gggenomes)
+The R package `gggenomes` is used in some visualization commands and can be installed by visiting [the gggenomes github page](https://github.com/thackl/gggenomes)
 
 ## documentation
 
