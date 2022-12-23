@@ -82,7 +82,7 @@ main: {
 				$foundAssemblies{$assembly} = 1;
 				($genomeID, $existingCodes, $highestCount) = Assign_genomeID($reports->{$report}, $existingCodes, $highestCount);
 				print "$genomeID\t$report\t$reports->{$report}\n";
-				my ($OUT) = Open_FH("$OUTDIR/$genomeID.fishtank_format.fna");
+				my ($OUT) = Open_FH("$OUTDIR/$genomeID.starfish_format.fna");
 				my ($seqs) = Fasta_hash_nospace($assembly);
 				foreach my $header (keys %{$seqs}) {
 					my ($newHeader) = Format_name($header, $genomeID, $opts{'separator'});
@@ -90,7 +90,7 @@ main: {
 				}
 				close($OUT);
 				# sanity check to confirm that fasta is indeed properly formatted
-				Format_check_fasta("$OUTDIR/$genomeID.fishtank_format.fna", $opts{'separator'});
+				Format_check_fasta("$OUTDIR/$genomeID.starfish_format.fna", $opts{'separator'});
 			}
 		}
 		if ($foundAssembly == 0) {

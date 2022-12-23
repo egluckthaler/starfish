@@ -91,7 +91,7 @@ main: {
 sub Format_fasta {
 	my ($genomeID, $fastaFile, $SEP) = @_;
 	my ($fastaFileName, $fastaOUTDIR, $fastaSuffix) = fileparse($fastaFile, (".aa.fa", ".faa", ".fas", ".filtered.fa", ".fa", ".fasta", ".fna"));
-	my ($OUT) = Open_FH("$fastaOUTDIR/$fastaFileName.fishtank_format$fastaSuffix");
+	my ($OUT) = Open_FH("$fastaOUTDIR/$fastaFileName.starfish_format$fastaSuffix");
 	my ($seqs) = Fasta_hash_nospace($fastaFile);
 	foreach my $header (keys %{$seqs}) {
 		my ($newName) = Format_name($header, $genomeID, $SEP);
@@ -99,13 +99,13 @@ sub Format_fasta {
 	}
 	close($OUT);
 	# sanity check to confirm that fasta is indeed properly formatted
-	Format_check_fasta("$fastaOUTDIR/$fastaFileName.fishtank_format$fastaSuffix", $SEP);
+	Format_check_fasta("$fastaOUTDIR/$fastaFileName.starfish_format$fastaSuffix", $SEP);
 }
 
 sub Format_gff {
 	my ($genomeID, $gffFile, $SEP, $NAMEFIELD) = @_;
 	my ($gffFileName, $gffOUTDIR, $gffSuffix) = fileparse($gffFile, (".gff", ".gff3"));
-	my ($OUT) = Open_FH("$gffOUTDIR/$gffFileName.fishtank_format$gffSuffix");
+	my ($OUT) = Open_FH("$gffOUTDIR/$gffFileName.starfish_format$gffSuffix");
 	open (my $IN, '<', $gffFile) or usage("\nError: can't open $gffFile for reading\n");
 	while (my $line = <$IN>) {
 		next if ($line =~ m/^#/);
@@ -153,7 +153,7 @@ sub Format_gff {
 	}
 	close($OUT);
 	# sanity check to confirm that gff is indeed properly formatted
-	Format_check_gff("$gffOUTDIR/$gffFileName.fishtank_format$gffSuffix", $SEP, $NAMEFIELD);
+	Format_check_gff("$gffOUTDIR/$gffFileName.starfish_format$gffSuffix", $SEP, $NAMEFIELD);
 }
 
 sub Opts_check {
