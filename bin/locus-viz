@@ -360,19 +360,13 @@ regionFeats = utils::read.table(\"$featConfig\", header = T, sep = '\t')
 $linkLine
 $gcLine1
 
-widthFrac = max(regionSeqs\$length) \/ 27000
+widthFrac = max(regionSeqs\$length) \/ 20000
 #heightFrac = nrow(regionSeqs) \/ 2 # for default cases
 heightFrac = nrow(regionSeqs) \/ 1.1 # for when OG ids are included as gene_name
-expandFrac = 0.6
-if (max(regionSeqs\$length) < 100000) {
-	expandFrac = 1.5
-} else if (max(regionSeqs\$length) < 200000) {
-	expandFrac = 1.2
-} 
 
 align <- gggenomes(genes = regionGenes, seqs = regionSeqs, feats = regionFeats, links = linkFeats) $gcLine2 +
   geom_link(offset = 0.04) +
-  geom_bin_label(size = 3, expand_left = expandFrac, nudge_left = 0.05) +
+  geom_bin_label(size = 3, expand_x = -100000, nudge_left = 0.05) +
   geom_feat(alpha=.6, size=3, position="identity", color = "#ff0000") +
   geom_seq(size = 0.5) +
   geom_gene(aes(fill=name), show.legend = T, shape = 3) + $gcFeatures

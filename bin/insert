@@ -28,9 +28,9 @@ predict element boundaries and insertion sites.
 Required:
 -a, --assembly      FILE   2 column tsv: genome code, path to assembly FASTA.
 -d, --database      PATH   BLAST database containing all assemblies in --assembly.
--b, --bed           FILE   BED file with coordinates of candidate captain tyrs.
+-b, --bed           FILE   BED file with coordinates of candidate captains.
                            (output by starfish sketch)
--i, --idtag         STR    string used for tyrs in tag column of --bed.
+-i, --idtag         STR    string used for candidate captains in tag col of --bed.
 -x, --prefix        STR    prefix for naming all output files.
 -o, --outdir        DIR    output directory.
 
@@ -39,9 +39,9 @@ Required, with defaults:
                            (default: '_')
 -T, --threads       INT    number of threads for parallel BLASTn search.
                            (default: 2)
---upstream          I-I    bp range to search upstream of tyrs.
+--upstream          I-I    bp range to search upstream of candidate captains.
                            (default: 0-17000)
---downstream        I-I    bp range to search downstream of hits to tyr upstreams.
+--downstream        I-I    bp range to search downstream of hits to upstreams.
                            (default: 0-14000)
 --length            I-I    min-max insertion length.
                            (default: 2000-700000)
@@ -181,10 +181,10 @@ delta-filt             $opts{deltafilteropts}\n\n";
 	############################
 		
 		$datestring = localtime();
-		print "[$datestring] parsing upstream regions of ".scalar(keys(%{$candidateCaptains}))." candidate DUF3435 captains..\n";
+		print "[$datestring] parsing upstream regions of ".scalar(keys(%{$candidateCaptains}))." candidate $opts{'idtag'} captains..\n";
 
 		$datestring = localtime();
-		print "[$datestring] searching for hits to the upstream regions of ".scalar(keys(%{$elementUpstreams}))." candidate DUF3435 captains..\n";
+		print "[$datestring] searching for hits to the upstream regions of ".scalar(keys(%{$elementUpstreams}))." candidate $opts{'idtag'} captains..\n";
 
 		# Search sequence in other genomes for hits to regions upstream of candidate captains
 		# prints each captain search to checkpoint file, and picks up from last search if file exists
@@ -195,14 +195,14 @@ delta-filt             $opts{deltafilteropts}\n\n";
 		my ($emptyUpstreamHits) = Element_upstream_search($elementUpstreams, $assemblies, $opts{'separator'}, $opts{'pid'}, $opts{'hsp'}, $opts{'blastopts'},  $opts{'outdir'}, $opts{'prefix'}, $taxa, $taxaExclude, $ome2assemblyPath, $dbPath, $threads);
 		
 		$datestring = localtime();
-		print "[$datestring] found ".scalar(keys(%{$emptyUpstreamHits}))." captains with candidate insertion sites\n";		
+		print "[$datestring] found ".scalar(keys(%{$emptyUpstreamHits}))." $opts{'idtag'} captains with candidate insertion sites\n";		
 
 		# Grab regions downstream and adjacent to empty site upstream
 		# structured: @{$emptyDownstreams{$capID}{$starshipID}{$capContigID}{$emptyContigID}}, $sstart, $ssend, $sstrand, $tag, '.';
 		my ($emptyDownstreams) = Parse_downstream_region_from_empty($emptyUpstreamHits, $assemblies, $opts{'downstream'}, $opts{'separator'});
 		
 		$datestring = localtime();
-		print "[$datestring] searching for hits to the downstream regions of candidate insertion sites for ".scalar(keys(%{$emptyDownstreams}))." captains that are also downstream of those captains..\n";
+		print "[$datestring] searching for hits to the downstream regions of candidate insertion sites for ".scalar(keys(%{$emptyDownstreams}))." $opts{'idtag'} captains that are also downstream of those captains..\n";
 
 		# Search sequence downstream of candidate captains with sequence adjacent to hit
 		# prints each captain search to checkpoint file, and picks up from last search if file exists
@@ -224,7 +224,7 @@ delta-filt             $opts{deltafilteropts}\n\n";
 		# also get the absolute boundaries for empty sites
 		# structured: @{$emptyBoundaries{$capID}{$starshipID}{$capContigID}{$emptyContigID}}, $emptyBegin, $emptyEnd, strand, '.', '.';
 		$datestring = localtime();		
-		print "[$datestring] filtering out similar upstream and downstream flanks of insertion sites associated with ".scalar(keys(%{$candidateBoundaries}))." candidate DUF3435 captains..\n";
+		print "[$datestring] filtering out similar upstream and downstream flanks of insertion sites associated with ".scalar(keys(%{$candidateBoundaries}))." candidate $opts{'idtag'} captains..\n";
 
 		my ($emptyBoundaries) = Filter_empty_boundaries($emptyUpstreamHits, $emptyDownstreams, $opts{'separator'}, $opts{'length'}, $opts{'pid'}, $opts{'flankcov'},  $opts{'blastopts'}, $assemblies, $opts{'outdir'}, $opts{'prefix'});
 
@@ -236,12 +236,12 @@ delta-filt             $opts{deltafilteropts}\n\n";
 		# filter out any insertion sites that >$maxEmpty, these are likely false positives
 
 		$datestring = localtime();		
-		print "[$datestring] refining boundary predictions of ".scalar(keys(%{$candidateBoundaries}))." candidate DUF3435 captains with insertion sites..\n";
+		print "[$datestring] refining boundary predictions of ".scalar(keys(%{$candidateBoundaries}))." candidate $opts{'idtag'} captains with insertion sites..\n";
 
 		my ($refinedBoundaries) = Refine_element_boundaries($candidateCaptains, $candidateBoundaries, $emptyBoundaries, $assemblies, $opts{'separator'}, $opts{'length'}, $opts{'pid'}, $opts{'blastopts'}, $opts{'hsp'}, $threads, $opts{'outdir'}, $opts{'prefix'});
 
 		$datestring = localtime();
-		print "[$datestring] found ".scalar(keys(%{$refinedBoundaries}))." candidate DUF3435 captains with refined insertion sites\n";
+		print "[$datestring] found ".scalar(keys(%{$refinedBoundaries}))." candidate $opts{'idtag'} captains with refined insertion sites\n";
 
 	#################################
 	#### INSERTION SANITY CHECK  ####
@@ -274,7 +274,7 @@ delta-filt             $opts{deltafilteropts}\n\n";
 		my ($capBoundaries, $falsePositiveFlags) =  Remove_redundant_boundaries($bedFeatures, $finalBoundaries);
 
 		$datestring = localtime();		
-		print "[$datestring] found element boundaries and insertion sites for ".scalar(keys %{$capBoundaries})." captains out of ".scalar(keys(%{$candidateCaptains}))." input captains\n";
+		print "[$datestring] found element boundaries and insertion sites for ".scalar(keys %{$capBoundaries})." $opts{'idtag'} captains out of ".scalar(keys(%{$candidateCaptains}))." input captains\n";
 
 		# Identify and print the end coordinate of longest downstream region as the downstream boundary
 		# Print some summary statistics based on this script's specific findings
@@ -285,7 +285,7 @@ delta-filt             $opts{deltafilteropts}\n\n";
 		Print_stats($candidateCaptains, $capBoundaries, $finalBoundaries, $assemblies, $opts{'separator'}, $statsOutfile);
 	} else {
 		$datestring = localtime();		
-		print "[$datestring] did not find new boundaries for any of the candidate DUF3435 captains in $opts{'bed'}, so no results to print..\n";
+		print "[$datestring] did not find new boundaries for any of the candidate $opts{'idtag'} captains in $opts{'bed'}, so no results to print..\n";
 	}
 		
 	$datestring = localtime();

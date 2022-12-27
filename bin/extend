@@ -22,10 +22,10 @@ Required:
 -a, --assembly    FILE   2 column tsv with: assembly name, path to assembly FASTA.
 -q, --query       FILE   BED file with feature coordinates of mobile elements.
                          (output by starfish summarize)
--t, --target      FILE   BED file with coordinates of candidate captain tyrs.
+-t, --target      FILE   BED file with coordinates of candidate captains.
                          (output by starfish sketch)
--i, --idtag       STR    tag used to identify tyrs in --target.
--g, --group       FILE   MCL-formatted group file with tyr geneIDs.
+-i, --idtag       STR    tag used to identify candidate captains in --target.
+-g, --group       FILE   MCL-formatted group file with captain geneIDs.
 -x, --prefix      STR    prefix for naming all output files.
 -o, --outdir      DIR    output directory.
 
@@ -43,7 +43,7 @@ Required, with defaults:
 --blastopts       STR    options to pass to BLASTn.
                          (default: '-task dc-megablast -evalue 0.0001
                          -max_target_seqs 1000000')
---upstream        INT    bp to begin aligning upstream of tyrs.
+--upstream        INT    bp to begin aligning upstream of captains.
                          (default: 10000)
 
 Optional:
@@ -214,7 +214,7 @@ main: {
 		print "[$datestring] found extended boundaries for ".scalar(keys(%{$capBoundaries}))." candidate captains out of ".scalar(keys(%{$longestBoundaries}))." input candidate captains\n";
 	} else {
 		$datestring = localtime();		
-		print "[$datestring] no boundaries found for any of the candidate DUF3435 captains in $opts{'bed'}, so no results to print\n";
+		print "[$datestring] no boundaries found for any of the candidate $opts{'idtag'} captains in $opts{'bed'}, so no results to print\n";
 	}
 
 	$datestring = localtime();		

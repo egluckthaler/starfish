@@ -136,7 +136,7 @@ cnef parameters:
 	######################################
 
 		$datestring = localtime();
-		print "[$datestring] searching for DR-TIR pairs $opts{'upstream'} bp upstream and $opts{'downstream'} bp downstream of the insert boundaries of ".scalar(keys(%{$candidateDRs}))." input DUF3435 captains with candidate DRs..\n";
+		print "[$datestring] searching for DR-TIR pairs $opts{'upstream'} bp upstream and $opts{'downstream'} bp downstream of the insert boundaries of ".scalar(keys(%{$candidateDRs}))." input captains with candidate DRs..\n";
 	
 		# Search for DR/DR-TIR pairs flanking candidate captain sequences (within -u and -d)
 		# only looks for known DRs and for de novo TIRs

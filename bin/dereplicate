@@ -300,7 +300,7 @@ main: {
 	#############################################
 	
 		$datestring = localtime();
-		print "[$datestring] searching for fragmented haplotypes missing element insertions and empty sites but with homology to known region groups..\n";
+		print "[$datestring] searching for fragmented haplotypes missing element insertions but with homology to known region groups..\n";
 		
 		# for each gene that has an OG in the element flanks, find the up and downstream OG string (max --flanking)
 		# structured: {gene}{up/down} = \@OGs, \@coords, $contigID
@@ -439,7 +439,7 @@ main: {
 		Print_median_Jaccard_sim($haplotype2OGs, $haploJaccardOutfile, $regionJaccardOutfile);
 
 		$datestring = localtime();					
-		print "[$datestring] benchmarking: $failedFlankCount\t".scalar(keys %{$element2og})."\t".scalar(keys %{$region2element})."\t$emptyHaplotypeCount\t$emptyHaploRegionCount\t$fragHaplotypeCount\t$fragHaploRegionCount\t$validatedSiteCount\t".scalar(keys %{$dereplicatedValidatedCount})."\t$singletonEmptyCount\t$multiEmptyCount\t$singletonCount\t$multiCount\n";
+		#print "[$datestring] benchmarking: $failedFlankCount\t".scalar(keys %{$element2og})."\t".scalar(keys %{$region2element})."\t$emptyHaplotypeCount\t$emptyHaploRegionCount\t$fragHaplotypeCount\t$fragHaploRegionCount\t$validatedSiteCount\t".scalar(keys %{$dereplicatedValidatedCount})."\t$singletonEmptyCount\t$multiEmptyCount\t$singletonCount\t$multiCount\n";
 		print "[$datestring] done\n";
 
 }
