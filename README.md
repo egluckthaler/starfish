@@ -83,7 +83,7 @@ starfish is an open source tool available under the GNU Affero General Public Li
 
 We have provided example data from *Gluck-Thaler et al. 2022* to illustrate a step-by-step analysis. These data consist of 6 *Starship Voyager* and 1 *Starship Defiant* insertions found in 6 *Macrophomina phaseolina* genomes. Takes ~25 min with 2 processors. Many commands produce checkpoint files that are useful for restarting an interrupted analysis. Simply remove these \*.checkpoint files to start an analysis from scratch.
 
-## get ready
+## prepare workspace
 
 activate the starfish conda environment:
 ```
@@ -298,7 +298,7 @@ as before, it is strongly recommended to look at haplotype alignments within eac
 
 ```
 mkdir locusViz
-starfish locus-viz -T 2 -m region-align -a ome2assembly.txt -b elementFinder/macpha6.elements.bed -x macpha6 -o locusViz/ -A nucmer -r regionFinder/macpha6.fog6.d600000.m1.regions.txt -d regionFinder/macpha6.fog6.d600000.m1.dereplicated.txt -j regionFinder/macpha6.fog6.d600000.m1.haplotype_jaccard.sim  -g ome2consolidatedGFF.txt --tags geneFinder/macpha6_tyr.filt_intersect.ids --gc macpha6.assemblies.gcContent_w1000.bed
+starfish locus-viz -T 2 -m region-align -a ome2assembly.txt -b elementFinder/macpha6.elements.bed -x macpha6 -o locusViz/ -A nucmer -r regionFinder/macpha6.fog3.d600000.m1.regions.txt -d regionFinder/macpha6.fog3.d600000.m1.dereplicated.txt -j regionFinder/macpha6.fog3.d600000.m1.haplotype_jaccard.sim  -g ome2consolidatedGFF.txt --tags geneFinder/macpha6_tyr.filt_intersect.ids --gc macpha6.assemblies.gcContent_w1000.bed
 ```
 
 the gggenomes script printed out by default should accomodate most regions. But depending on the region length, the visualization may be wonky. Edit the R script or the \*.seqs.config file (to flip sequence orientations) and re-run the R script manually in case you want to make custom edits. 
