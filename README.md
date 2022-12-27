@@ -174,7 +174,7 @@ neighbourhoods will often contain intervening genes located between genes of int
 grep -P '\ttyr\t' geneFinder/macpha6.bed > geneFinder/macpha6.tyr.bed 
 ```
 
-### key output files
+#### key output files:
 
 * the \*.filt_intersect.\* files contain all newly predicted genes and amino acid sequences. Newly predicted genes that overlap with an existing gene will keep their original sequenceID (or if overlapping with multiple existing genes, will be assigned a new sequenceID consisting of the concatenated existing gene IDs) but will be assigned the newly predicted amino acid sequence. Newly predicted genes that don't overlap with an existing gene will be assigned a new sequenceID. 
 * the *.bed file contains the coordinates of all genes of interest organized into neighbourhoods
@@ -220,7 +220,7 @@ mkdir pairViz
 starfish pair-viz -m all -t empty -T 2 -A nucmer -a ome2assembly.txt -b elementFinder/macpha6.elements.bed -f elementFinder/macpha6.flank.singleDR.stats -S elementFinder/macpha6.elements.named.stats -o pairViz/
 ```
 
-### key output files
+#### key output files:
 
 * \*.insert.bed contains coordinates of all predicted element boundaries based on all candidate insertions. 
 * \*.insert.stats contains useful metadata on candidate insertions.
@@ -303,7 +303,7 @@ starfish locus-viz -T 2 -m region-align -a ome2assembly.txt -b elementFinder/mac
 
 the gggenomes script printed out by default should accomodate most regions. But depending on the region length, the visualization may be wonky. Edit the R script or the \*.seqs.config file (to flip sequence orientations) and re-run the R script manually in case you want to make custom edits. 
 
-### key output files
+#### key output files:
 
 * \*.mat files contain matrix-formatted data useful for visualizing alongside phylogenetic trees (e.g., using ```scripts/mat2tree.py```). 
 * \*.sim files contain pairwise jaccard similarities between different regions and haplotypes within regions that among other things, will be useful for logically arranging haplotypes within synteny plots. 
