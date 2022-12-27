@@ -17,7 +17,7 @@ Required:
 -q    FILE    query MCL-formatted group file
 
 Required, with defaults:
--s    STR     separator between the merged groupIDs (default: '|')\n/;
+-s    STR     separator between the merged groupIDs (default: '-')\n/;
 
 	if (not defined $message) {
 		$message = qq/
@@ -89,6 +89,6 @@ sub Opts_check {
 	usage("\nError: please provide a file to -q\n") if (not defined $opts->{'q'});
 	usage("\nError: the file provided to -q does not exist\n") if (! -f $opts->{'q'});
 	if (not defined $opts->{'s'}) {
-		$opts->{'s'} = '|';
+		$opts->{'s'} = '-';
 	}
 }

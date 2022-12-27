@@ -127,7 +127,7 @@ main: {
 if ($opts{'aligner'} eq 'nucmer') {
 	print "
 nucmer                 $opts{'nucmeropts'}
-delta-filter           $opts{'deltafilteropts'}";}
+delta-filter           $opts{'deltafilteropts'}\n\n";}
 if ($opts{'aligner'} eq 'mafft') {
 	print "
 mafft                  $opts{'mafftopts'}\n\n";}
