@@ -33,7 +33,7 @@ Required, if --type prot:
 
 Required, with defaults:
 --kmer              STR    k-mer size for sourmash.
-                           (default: 51 if 'nucl', 17 if 'prot')
+                           (default: 510 if 'nucl', 17 if 'prot')
 --scaled            STR    scaled parameter for sourmash.
                            (default: 100 if 'nucl', 20 if 'prot')
 

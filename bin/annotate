@@ -119,7 +119,7 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 					my ($failCheckMetaeuk) = system("metaeuk easy-predict $assemblies->{$assemblyName} $opts{proteins} $opts{outdir}/metaeukData/$assemblyName $opts{outdir}/metaeukTemp/ --local-tmp $opts{outdir}/metaeukTemp/ --threads $opts{threads} $opts{metaeukopts} &>$opts{outdir}/$opts{prefix}.metaeuk.log");
 					$datestring = localtime();					
 					if ($failCheckMetaeuk != 0) { die "\n\n[$datestring] error: could not execute metaeuk on commandline, exiting..\n$!\n";}
-					system("rm -r $opts{outdir}/metaeukTemp/*"); # clean up temp directory
+					system("rm -r $opts{outdir}/metaeukTemp/*") if (-d "$opts{outdir}/metaeukTemp/"); # clean up temp directory
 				} else {
 					$datestring = localtime();
 					print "[$datestring] the assembly $assemblies->{$assemblyName} does not exist, skipping metaeuk annotation\n";
@@ -134,7 +134,7 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 		system("mv $opts{outdir}/metaeukData/*.codon.fas $opts{outdir}/metaeukData/codon");
 		system("cat $opts{outdir}/metaeukData/*.fas > $opts{outdir}/$opts{prefix}.fas");
 		system("cat $opts{outdir}/metaeukData/*.gff > $opts{outdir}/$opts{prefix}.gff");
-		system("rm -r $opts{outdir}/metaeukTemp/");
+		system("rm -r $opts{outdir}/metaeukTemp/") if (-d "$opts{outdir}/metaeukTemp/");
 
 	} else {
 		$datestring = localtime();
@@ -422,7 +422,7 @@ sub Opts_check {
 		# --disk-space-limit  Set max disk space to use for reverse profile searches (defaults to all available)
 		# --max-seqs INT     Maximum results per query sequence allowed to pass the prefilter (affects sensitivity) [0.000]
 		#	shouldn't be an issue for use because we do a search per genome, never expect more than 300 copies of a given gene per genome
-		$opts->{'metaeukopts'} = '-v 3 -s 7.5 -e 0.0001 --max-intron 2000 --max-seqs 300 --metaeuk-eval 0.001 --exhaustive-search 1 --metaeuk-tcov 0.25 --allow-deletion 1 --protein 1 --disk-space-limit 100G --remove-tmp-files 1 --compressed 1';
+		$opts->{'metaeukopts'} = '-v 3 -s 7.5 -e 0.0001 --max-intron 2000 --max-seqs 300 --metaeuk-eval 0.001 --exhaustive-search 1 --metaeuk-tcov 0.25 --allow-deletion 1 --protein 1 --disk-space-limit 100G --compressed 1';
 	}
 
 

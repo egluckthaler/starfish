@@ -3,7 +3,7 @@ use warnings;
 use strict;
 use Data::Dumper;
 use File::Basename;
-use Getopt::Std;
+use Getopt::Long qw(:config auto_abbrev no_ignore_case);
 use FileHandle;
 $|=1;
 
@@ -14,7 +14,10 @@ usage: $0 [OPTIONS]
 
 Required:
 -i    FILE     input file (accepted formats: fasta, tsv)
--r    FILE     2 column tsv: search term, replacement\n/;
+-r    FILE     2 column tsv: search term, replacement
+
+Optional: 
+--strict       only replace space delimted whole words in -i (much faster)\n/;
 
 	if (not defined $message) {
 		$message = qq/
@@ -29,7 +32,11 @@ will be replaced in -i. Replaced text will be printed to STDOUT. \n\n/;
 
 main: {
 	my %opts;
-	getopt('r:i:h', \%opts);
+	GetOptions(\%opts, 
+		'r=s',
+		'i=s',
+		'strict',
+		'h|help');
 	Opts_check(\%opts);
 	my ($termFile, $inputFile) = ($opts{'r'}, $opts{'i'});
 	
@@ -54,20 +61,22 @@ main: {
 				}
 			} else {
 				
-				# replace all instances of x with y
-				foreach my $x (keys %{$term2replace}) {
-					my $y = $term2replace->{$x};
-					$field =~ s/$x([:]*)/$y$1/g;
+				if (not defined $opts{'strict'}) {
+					# replace all instances of x with y
+					foreach my $x (keys %{$term2replace}) {
+						my $y = $term2replace->{$x};
+						$field =~ s/$x([:]*)/$y$1/g;
+					}
+					print "$field";
+				} else {
+					# strict replacement rules
+					if (exists $term2replace->{$field}) {
+						print "$term2replace->{$field}";
+					} else {
+						print "$field";
+					}
 				}
-				
-				# strict replacement rules
-# 				if (exists $term2replace->{$field}) {
-# 					print "$term2replace->{$field}";
-# 				} else {
-# 					print "$field";
-# 				}
 			}
-			print "$field";
 			print "\t" if ($currentIndex != $maxIndex);
 		}
 		print "\n";

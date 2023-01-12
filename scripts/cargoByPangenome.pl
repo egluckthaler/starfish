@@ -46,7 +46,7 @@ main: {
 	Opts_check(\%opts);
 	
 	# read in data
-	my ($omesToIgnore) = dim_0_hash($opts{'e'}, "\t", "0");
+	my ($omesToIgnore) = dim_0_hash($opts{'e'}, "\t", "0") if (defined $opts{'e'});
 	my ($og2gene) = Parse_group_file_by_og($opts{'o'}, $omesToIgnore);
 	my ($gene2og) = Parse_group_file_by_member($opts{'o'}, $omesToIgnore);
 
