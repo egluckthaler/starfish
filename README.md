@@ -5,11 +5,11 @@
   align = "right"
   style="margin: 0 auto; width: 182px; height: 200px">
 
-```starfish``` is a computational workflow for large mobile element discovery. Built primarily for annotating [giant *Starship* elements](https://academic.oup.com/mbe/article/39/5/msac109/6588634) in fungal genomes, it can be easily adapted to find any large mobile element (≥6kb) that shares the same basic architecture as a fungal *Starship* or a bacterial integrative and conjugative element: a "captain" gene with zero or more "cargo" genes downstream of its 3' end.
+```starfish``` is a modular toolkit for large mobile element discovery. Built primarily for annotating [giant *Starship* elements](https://academic.oup.com/mbe/article/39/5/msac109/6588634) in fungal genomes, it can be easily adapted to find any large mobile element (≥6kb) that shares the same basic architecture as a fungal *Starship* or a bacterial integrative and conjugative element: a "captain" gene with zero or more "cargo" genes downstream of its 3' end.
 
 ## Overview
 
-```starfish``` is organized into three main modules: Gene finder, Element finder, and Region finder. Each has dedicated commands that are typically run sequentially. Auxiliary commands that provide additional utilities and generate visualizations are also available through the commandline. Several useful stand-alone scripts are located in the `/scripts` directory. 
+The ```starfish``` workflow is organized into three main modules: Gene finder, Element finder, and Region finder. Each has dedicated commands that are typically run sequentially. Auxiliary commands that provide additional utilities and generate visualizations are also available through the commandline. Several useful stand-alone scripts are located in the `/scripts` directory. 
 
 <img
   src="/assets/starfishWorkflow.png"
