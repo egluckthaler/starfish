@@ -9,7 +9,7 @@
 
 ## Overview
 
-The ```starfish``` workflow is organized into three main modules: Gene finder, Element finder, and Region finder. Each has dedicated commands that are typically run sequentially. Auxiliary commands that provide additional utilities and generate visualizations are also available through the commandline. Several useful stand-alone scripts are located in the `/scripts` directory. 
+The ```starfish``` workflow is organized into three main modules: Gene Finder, Element Finder, and Region Finder. Each has dedicated commands that are typically run sequentially. Auxiliary commands that provide additional utilities and generate visualizations are also available through the commandline. Several useful stand-alone scripts are located in the `/scripts` directory. 
 
 <img
   src="/assets/starfishWorkflow.png"
