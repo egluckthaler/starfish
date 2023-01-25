@@ -17,7 +17,7 @@ The ```starfish``` workflow is organized into three main modules: Gene Finder, E
 
 ## Documentation
 
-Head to our [GitHub Wiki](https://github.com/egluckthaler/starfish/wiki) for useful resources, including [installation instructions](https://github.com/egluckthaler/starfish/wiki/Installation) and a [step-by-step tutorials](https://github.com/egluckthaler/starfish/wiki/Step-by-step-tutorial). If you run into difficulties, please open an issue on [GitHub](https://github.com/egluckthaler/starfish/issues)
+Head to our [GitHub Wiki](https://github.com/egluckthaler/starfish/wiki) for useful resources, including [installation instructions](https://github.com/egluckthaler/starfish/wiki/Installation), a [manual](https://github.com/egluckthaler/starfish/wiki/Manual) with important details and considerations for each command, and a [step-by-step tutorial](https://github.com/egluckthaler/starfish/wiki/Step-by-step-tutorial). If you run into difficulties, please open an issue on [GitHub](https://github.com/egluckthaler/starfish/issues)
 
 ## Citations and dependencies
 
