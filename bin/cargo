@@ -47,6 +47,7 @@ Optional:
 -i, --idtag         STR    prefix of members of interest in --group.
                            (only members with this prefix will be parsed)
 -h, --help                 print more details and exit.
+
 /;
 	if (not defined $message) {
 		$message = $usage;

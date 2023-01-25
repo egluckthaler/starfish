@@ -16,11 +16,9 @@ sub usage {
 	my $usage = qq/
 usage: starfish group [args]
 
-group captains or elements into families based on k-mers.
+sort captains or elements into homologous groups using mcl.
 
 Required:
--m, --mode        STR    clustering algorithm, either 'mcl' or 'apc'.
-                         (apc not currently implemented)
 -s, --sim         FILE   3-column tsv: refID, queID, similarity.
                          (e.g., output by starfish sim)
 -i, --idtag       STR    string used as a prefix to name groups.
@@ -32,7 +30,7 @@ Required, with defaults:
 -T, --threads     INT    number of threads.
                          (default: 1)
 -I, --infl        FLT    inflation paramenter.
-                         (for --mode mcl; default: 1.5)
+                         (default: 1.5)
 
 Optional:
 -f, --feat        FILE   .feat file.
@@ -53,7 +51,6 @@ main: {
 	# parse and check options
 	my %opts;
 	GetOptions(\%opts, 
-		'mode|m=s',
 		'sim|s=s',
 		'feat|f=s',
 		'outdir|o=s',
@@ -93,7 +90,7 @@ main: {
 	######################################
 	
 		$datestring = localtime();					
-		print "[$datestring] grouping genetic loci into families based on $opts{'mode'} clustering algorithm..\n";
+		print "[$datestring] grouping genetic loci into families based on the mcl clustering algorithm..\n";
 		my ($outFilename) = fileparse($opts{'sim'}, ".sim");
 		my $clusteringOutfile = "$opts{'outdir'}/$outFilename.I$opts{'infl'}.mcl";
 		
@@ -292,11 +289,6 @@ sub Opts_check {
 			usage("\nError: the string provided to --idtag cannot begin with 'sng'\n")
 		}
 	}
-	if (not defined $opts->{'mode'}) {
-		usage("\nError: you must specify an option for --mode, either 'mcl' or 'apc'\n");
-	} elsif ($opts->{'mode'} !~ m/^mcl$|^apc$/) {
-		usage("\nError: unrecognized option for --mode, must be either 'mcl' or 'apc'\n");
-	} 
 	if (not defined $opts->{'threads'}) {
 		$opts->{'threads'} = 1;
 	}
