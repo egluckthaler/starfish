@@ -28,12 +28,12 @@ Upon publication, please cite both the main ```starfish``` manuscript in additio
 
 | Command | Dependency | Citation |
 |:---:|:---:|:---|
-|`annotate`, `augment`| `metaeuk`, `hmmer`, `bedtools` | TBD |
-|`insert`, `extend`| `blastn`,`mummer4` | TBD |
-|`flank`| `cnef` | TBD |
-|`sim`| `sourmash` | TBD |
-|`group`| `mcl` | TBD |
-|`*-viz`|`circos`,`gggenomes`,`mummer4`, <br />`mafft`, `minimap2`| TBD |
+|`annotate`, `augment`| `metaeuk`, `hmmer`, `bedtools` | [Karin et al. 2020](https://pubmed.ncbi.nlm.nih.gov/32245390/), [Eddy 2011](https://pubmed.ncbi.nlm.nih.gov/22039361/), [Quinlan and Hall 2010](https://pubmed.ncbi.nlm.nih.gov/20110278/) |
+|`insert`, `extend`| `blastn`,`mummer4` | [Camacho et al. 2009](https://pubmed.ncbi.nlm.nih.gov/20003500/), [Marcais et al 2018](https://pubmed.ncbi.nlm.nih.gov/29373581/) |
+|`flank`| `cnef` | [Ayad et al. 2018](https://pubmed.ncbi.nlm.nih.gov/30423090/) |
+|`sim`| `sourmash` | [Pierce et al 2019](https://pubmed.ncbi.nlm.nih.gov/31508216/) |
+|`group`| `mcl` | [Enright et al. 2002](https://pubmed.ncbi.nlm.nih.gov/11917018/) |
+|`*-viz`|`circos`,`gggenomes`,`mummer4`, <br />`mafft`, `minimap2`| [Krzywinski et al. 2009](https://pubmed.ncbi.nlm.nih.gov/19541911/), [Hackl and Ankenbrand 2022](https://thackl.github.io/gggenomes/authors.html), [Marcais et al 2018](https://pubmed.ncbi.nlm.nih.gov/29373581/), [Katoh and Standley](https://pubmed.ncbi.nlm.nih.gov/23329690/), [Li 2018](https://pubmed.ncbi.nlm.nih.gov/29750242/)|
 
 ## License
 
