@@ -24,7 +24,7 @@ Head to our [GitHub Wiki](https://github.com/egluckthaler/starfish/wiki) for use
 Many ```starfish``` commands have dependencies that are stand-alone programs in their own right. If you use ```starfish``` in your research, please contact us as it has not yet been published.
 
 Upon publication, please cite both the main ```starfish``` manuscript in addition to any dependencies you may have used (see Table below for a guide). For example:
-> We used starfish v1.0 in conjunction with metaeuk, mummer4, and blastn to annotate and visualize Starships in our genome assemblies.
+> We used starfish v1.0 (Gluck-Thaler and Vogan 2023) in conjunction with metaeuk (Karin et al. 2020), mummer4 (Marcais et al 2018), and blastn (Camacho et al. 2009) to annotate and visualize giant mobile elements.
 
 | Command | Dependency | Citation |
 |:---:|:---:|:---|
