@@ -10,7 +10,7 @@ use FileHandle;
 use POSIX;
 $|=1;
 # Fishtank lib
-use Fishtank::Utils qw(Parse_known_elements Commandline_check Fasta_hash_many_files Glofish_bed_hash Gff_sortable_gene_hash dim_0_hash dim_1_hash dim_2_hash Open_FH);
+use Fishtank::Utils qw(Parse_region_boundaries Parse_known_elements Commandline_check Fasta_hash_many_files Glofish_bed_hash Gff_sortable_gene_hash dim_0_hash dim_1_hash dim_2_hash Open_FH);
 
 sub usage {
 	my $message = shift;
@@ -71,6 +71,7 @@ Optional:
 --featureID                label all gene models with their featureID.
 --regionOrder              arrange haplotypes as they appear in the regions file.
                            (for --mode region-align only)
+--nocap                    parse all elements, even if they do not have a captain
 --force                    force all steps even if output already exists.
 -h, --help                 print more details and exit.
 
@@ -113,6 +114,7 @@ main: {
 		'dedup',
 		'featureID',
 		'regionOrder',
+		'nocap',
 		'h|help');
 	Opts_check(\%opts);
 
@@ -144,12 +146,19 @@ minimap2               $opts{minimapopts} -t $opts{threads}\n\n";
 		# Parse info from Starship regions
 		# structured: {contigID}{locusID}{featureID} = [begin, end, strand, tag, annotation]
 		my ($starshipFeatures) = Glofish_bed_hash($opts{'bed'});
-
-		# Parse the coordinates of any elements with 'cap' DUF3435 genes
-		# elementBegin and elementEnd are the upmost and downmost coordinates associated with this captain
-		# structured: starshipCoords{locusID} = [elementBegin, elementEnd, strand, tag, ann, contigID]
-		my ($starshipCoordsTemp) = Parse_known_elements($starshipFeatures);
-		my ($starshipCoords) = Reshape_starship_coords($starshipCoordsTemp);
+		
+		my $starshipCoords;
+		if (defined $opts{'nocap'}) { # if --nocap specified, dont assume each element has a captain
+			# structured $boundaries{$contigID}{$starshipID}}, $hoodBegin, $hoodEnd;
+			my ($starshipCoordsTemp) = Parse_region_boundaries($starshipFeatures);
+			($starshipCoords) = Reshape_all_element_coords($starshipCoordsTemp);
+		} else {
+			# Parse the coordinates of any elements with 'cap' DUF3435 genes
+			# elementBegin and elementEnd are the upmost and downmost coordinates associated with this captain
+			# structured: starshipCoords{locusID} = [elementBegin, elementEnd, strand, tag, ann, contigID]
+			my ($starshipCoordsTemp) = Parse_known_elements($starshipFeatures);
+			($starshipCoords) = Reshape_starship_coords($starshipCoordsTemp);
+		}
 		
 		# Load up all assembly sequences into a single hash
 		# Structured: {contigID} = sequence
@@ -826,6 +835,24 @@ sub Reshape_starship_coords {
 	return(\%starshipCoords);	
 }
 
+sub Reshape_all_element_coords {
+	my ($starshipFeatures) = @_;
+	my %starshipCoords;
+	foreach my $contigID (keys %{$starshipFeatures}) {
+		foreach my $starshipID (keys %{$starshipFeatures->{$contigID}}) {
+			my ($elementStart, $elementEnd) = @{$starshipFeatures->{$contigID}->{$starshipID}};
+			my ($strand, $tag, $ann) = ('+', 'nocap', 'NA');
+			if (not exists $starshipCoords{$starshipID}) {
+				push @{$starshipCoords{$starshipID}}, $elementStart, $elementEnd, $strand, $tag, $ann, $contigID;
+			} else { # means that this particular starship has >1 captain
+				next;
+			}
+		}
+	}
+	return(\%starshipCoords);	
+}
+
+
 sub Parse_feature_file {
 	my ($featureFile) = @_;
 	my %features;
@@ -1076,6 +1103,7 @@ sub Update_tags {
 		}
 	}
 	return(\%newFeatures);
+	
 }
 
 sub Opts_check {

@@ -101,9 +101,8 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 		# load up assembly hash
 		my ($assemblies) = dim_1_hash($opts{'assembly'}, "\t", "0:1");
 
-		# make a temp data directory
+		# make the final output directory
 		system("mkdir -p $opts{outdir}/metaeukData/");
-		system("mkdir -p $opts{outdir}/metaeukTemp/");
 
 		# iterate through each assembly, and execute metaeuk
 		$datestring = localtime();
@@ -116,10 +115,9 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 					Format_check_fasta($assemblies->{$assemblyName}, $opts{'separator'});
 				}
 				if (-f $assemblies->{$assemblyName}) {
-					my ($failCheckMetaeuk) = system("metaeuk easy-predict $assemblies->{$assemblyName} $opts{proteins} $opts{outdir}/metaeukData/$assemblyName $opts{outdir}/metaeukTemp/ --local-tmp $opts{outdir}/metaeukTemp/ --threads $opts{threads} $opts{metaeukopts} &>$opts{outdir}/$opts{prefix}.metaeuk.log");
+					my ($failCheckMetaeuk) = system("metaeuk easy-predict $assemblies->{$assemblyName} $opts{proteins} $opts{outdir}/metaeukData/$assemblyName $opts{tempdir} --local-tmp $opts{tempdir} --remove-tmp-files 1 --threads $opts{threads} $opts{metaeukopts} &>$opts{outdir}/$opts{prefix}.metaeuk.log");
 					$datestring = localtime();					
 					if ($failCheckMetaeuk != 0) { die "\n\n[$datestring] error: could not execute metaeuk on commandline, exiting..\n$!\n";}
-					system("rm -r $opts{outdir}/metaeukTemp/*") if (-d "$opts{outdir}/metaeukTemp/"); # clean up temp directory
 				} else {
 					$datestring = localtime();
 					print "[$datestring] the assembly $assemblies->{$assemblyName} does not exist, skipping metaeuk annotation\n";
@@ -134,7 +132,6 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 		system("mv $opts{outdir}/metaeukData/*.codon.fas $opts{outdir}/metaeukData/codon");
 		system("cat $opts{outdir}/metaeukData/*.fas > $opts{outdir}/$opts{prefix}.fas");
 		system("cat $opts{outdir}/metaeukData/*.gff > $opts{outdir}/$opts{prefix}.gff");
-		system("rm -r $opts{outdir}/metaeukTemp/") if (-d "$opts{outdir}/metaeukTemp/");
 
 	} else {
 		$datestring = localtime();
@@ -406,6 +403,8 @@ sub Opts_check {
 	}
 	if (not defined $opts->{'tempdir'}) {
 		$opts->{'tempdir'} = $opts->{'outdir'};
+	} elsif (! -d $opts->{'tempdir'}) {
+		usage("\nError: the directory provided to --tempdir does not exist\n");
 	}
 	if (not defined $opts->{'force'}) {
 		$opts->{'force'} = 0;

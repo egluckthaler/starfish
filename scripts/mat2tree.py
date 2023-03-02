@@ -44,7 +44,7 @@ my_parser.add_argument('-p',
                        '--prune',
                        metavar='FILE',
                        type=str,
-                       help='a single column file of IDs to use to prune tree (optional)')
+                       help='a list of IDs in first column to use to prune tree (optional)')
 
 my_parser.add_argument('-r',
                        '--root',
@@ -144,7 +144,8 @@ if args.prune is not None:
 	pruningIDs = []
 	with open(prune_file, 'r') as f:
 		for line in f:
-			pruningIDs.append(line.strip('\n'))
+			splitLine = re.split(r'\t', line)
+			pruningIDs.append(splitLine[0].strip('\n'))
 		
 	# prune tree
 	tree.prune(pruningIDs, preserve_branch_length = True)
