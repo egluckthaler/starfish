@@ -113,8 +113,8 @@ main: {
 		# read in relevant info for insert and flank neighborhood metadata
 		# structured: $neighborhood2feat{$neighborhoodID}}, $start-stop, $contigID, $boundaryType
 		# structured: $contig2neighborhood{$contigID}{$neighborhoodID} = $range;
-		my ($bedFeatures) = Glofish_bed_hash($opts{'query'});
-		my ($neighborhood2feat, $contig2neighborhood) = Parse_neighborhood_features($opts{'bed'}); 
+		my ($bedFeatures) = Glofish_bed_hash($opts{'bed'});
+		my ($neighborhood2feat, $contig2neighborhood) = Parse_neighborhood_features($bedFeatures); 
 		
 		# read in each gene's OG
 		my ($gene2og) = Parse_group_file_by_member($opts{'orthologs'});
@@ -382,7 +382,7 @@ main: {
 		Print_median_Jaccard_sim($haplotype2OGs, $haploJaccardOutfile, $regionJaccardOutfile);
 
 		$datestring = localtime();					
-		print "[$datestring] benchmarking: $failedFlankCount\t".scalar(keys %{$neighborhood2og})."\t".scalar(keys %{$region2neighborhood})."\t$emptyHaplotypeCount\t$emptyHaploRegionCount\t$fragHaplotypeCount\t$fragHaploRegionCount\t.\t.\t$singletonEmptyCount\t$multiEmptyCount\t$singletonCount\t$multiCount\n";
+		#print "[$datestring] benchmarking: $failedFlankCount\t".scalar(keys %{$neighborhood2og})."\t".scalar(keys %{$region2neighborhood})."\t$emptyHaplotypeCount\t$emptyHaploRegionCount\t$fragHaplotypeCount\t$fragHaploRegionCount\t.\t.\t$singletonEmptyCount\t$multiEmptyCount\t$singletonCount\t$multiCount\n";
 		print "[$datestring] done\n";
 
 }

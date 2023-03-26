@@ -20,7 +20,7 @@ usage: starfish locus-viz [args]
 execute alignments with nucmer and generate synteny schematics with gggenomes.
 
 Required:
--m, --mode          STR    either 'region-align', 'element-align' or 'schematic'.
+-m, --mode          STR    either 'region', 'element' or 'schematic'.
 -a, --assembly      FILE   2 column tsv: genome code, path to assembly FASTA.
 -b, --bed           FILE   BED file with feature coordinates of mobile elements.
 -x, --prefix        STR    prefix for naming output files.
@@ -36,7 +36,7 @@ Required, with defaults:
 --units             STR    units of .png, either 'cm' or 'in'.
                            (default: in)
 
-Required, if --mode region-align or element-align:
+Required, if --mode region or element:
 -A, --aligner       STR    aligner to use, either 'nucmer' or 'minimap2'.
 --nucmeropts        STR    options to pass to nucmer.
                            (default: \\'--mum\\')
@@ -45,14 +45,14 @@ Required, if --mode region-align or element-align:
 --minimapopts       STR    options to pass to minimap2.
                            (default: \\'-x asm20 -N 0 -c\\')
 
-Required, if --mode region-align (all output by starfish dereplicate):
+Required, if --mode region (all output by starfish dereplicate):
 -r, --regions       FILE   regions.txt file.
 -d, --dereplicated  FILE   dereplicated.txt file.
 -j, --jaccard       FILE   haplotype_jaccard.sim file.
 
-Required, if --mode element-align or schematic
+Required, if --mode element or schematic
 -l, --list          FILE   1 column of elementID(s) to visualize.
-                           (order will reflect figure if --mode element-align)
+                           (order will reflect figure if --mode element)
 
 Required, if --mode schematic
 -t, --ticks         INT    length in bp between tick marks scale.
@@ -70,7 +70,7 @@ Optional:
                            (useful if visualizing many genomes)
 --featureID                label all gene models with their featureID.
 --regionOrder              arrange haplotypes as they appear in the regions file.
-                           (for --mode region-align only)
+                           (for --mode region only)
 --nocap                    parse all elements, even if they do not have a captain
 --force                    force all steps even if output already exists.
 -h, --help                 print more details and exit.
@@ -211,24 +211,24 @@ minimap2               $opts{minimapopts} -t $opts{threads}\n\n";
 		# if dedup specified, ignore haplotypes with identical jaccard similarity to reference and within 10% of each others length
 		# structured: regionCoords{regionID}{elementID/emptyID/fragID|tag} = [haplotypeBegin, haplotypeEnd, strand, tag, 'regionBegin-regionEnd', contigID]
 		# structured: @{$regionList{$regionID}}, "${queID}|${queTag}";
-		my ($regionList, $regionCoords) = Parse_haplotype_order($opts{'dereplicated'}, $opts{'jaccard'}, $opts{'regions'}, $starshipCoords, $opts{'dedup'}, $opts{'regionOrder'}) if ($opts{'mode'} eq 'region-align');
+		my ($regionList, $regionCoords) = Parse_haplotype_order($opts{'dereplicated'}, $opts{'jaccard'}, $opts{'regions'}, $starshipCoords, $opts{'dedup'}, $opts{'regionOrder'}) if ($opts{'mode'} eq 'region');
 
 		# check that >1 region provided, if --mode align
-		usage("\n[$datestring] error: >1 elementID must be specified in --list if using --mode element-align\n") if (($opts{'mode'} eq 'element-align') && (scalar @{$elementList} == 1));
+		usage("\n[$datestring] error: >1 elementID must be specified in --list if using --mode element\n") if (($opts{'mode'} eq 'element') && (scalar @{$elementList} == 1));
 		
 	###########################
 	#### EXECUTE ALIGNMENT ####
 	###########################
 		
 		# skip step if --mode schematic
-		if ($opts{'mode'} eq 'element-align' || $opts{'mode'} eq 'region-align') {
+		if ($opts{'mode'} eq 'element' || $opts{'mode'} eq 'region') {
 
 			$datestring = localtime();
 			print "[$datestring] executing $opts{'aligner'} alignments..\n";
 		
 			# skip alignment if already present, unless force in effect
 			# for generating $OUTDIR/$PREFIX.tsv.links file
-			if ($opts{'mode'} eq 'element-align') {
+			if ($opts{'mode'} eq 'element') {
 				if ((! -f "$opts{'outdir'}/$opts{'prefix'}.links.tsv") || ($opts{'force'} == 1)) {
 					if ($opts{'aligner'} eq 'nucmer') {
 						my ($failcheck) = Nucmer_wrapper($elementList, $starshipCoords, $id2sequence, $opts{'prefix'}, $opts{'nucmeropts'}, $opts{'deltafilteropts'}, $opts{'threads'}, $opts{'outdir'});
@@ -240,7 +240,7 @@ minimap2               $opts{minimapopts} -t $opts{threads}\n\n";
 				} else {
 					print "[$datestring] $opts{'outdir'}/$opts{'prefix'}.links.tsv exists, skipping alignment\n";
 				}
-			} elsif ($opts{'mode'} eq 'region-align') {
+			} elsif ($opts{'mode'} eq 'region') {
 
 				# iterate through each region, print out region-specific alignment files based on $prefix
 				foreach my $regionID (nsort keys %{$regionCoords}) {
@@ -280,11 +280,11 @@ minimap2               $opts{minimapopts} -t $opts{threads}\n\n";
 		$datestring = localtime();
 		print "[$datestring] printing config files and executing gggenomes script..\n";
 		my $configFiles;
-		if ($opts{'mode'} eq 'element-align' || $opts{'mode'} eq 'schematic') {
+		if ($opts{'mode'} eq 'element' || $opts{'mode'} eq 'schematic') {
 			($configFiles) = Print_config_files($elementList, $starshipFeatures, $starshipCoords, \%contig2gene, $seq2gc, $opts{'upstream'}, $opts{'downstream'}, $opts{'mode'}, $opts{'ticks'}, $opts{'prefix'}, $opts{'outdir'});
 			Filter_links($elementList, $starshipCoords, $opts{'upstream'}, $opts{'downstream'}, $opts{'mode'}, $opts{'aligner'}, $opts{'prefix'}, $opts{'outdir'});
 			Execute_gggenomes($configFiles, $opts{'mode'}, $opts{'aligner'}, $opts{'units'}, $opts{'outdir'});
-		} elsif ($opts{'mode'} eq 'region-align') {
+		} elsif ($opts{'mode'} eq 'region') {
 			foreach my $regionID (nsort keys %{$regionCoords}) {
 				my @haplotypeList = @{$regionList->{$regionID}};
 				my %haplotypeCoords = %{$regionCoords->{$regionID}};
@@ -344,13 +344,13 @@ lengthFrac = floor(as.integer(regionSeqs\$length) \/ 100) # may have to adjust t
 
 schematic <- gggenomes(genes = regionGenes, seqs = regionSeqs, feats = regionFeats) +
   add_feats(regionTicks) +
-  geom_seq(size = 3, alpha = 0.4, color = "#ff0000") +
-  geom_seq(size = 0.5) +
+  geom_seq(linewidth = 3, alpha = 0.4, color = "#ff0000") +
+  geom_seq(linewidth = 0.5) +
   geom_bin_label() +
   geom_gene(aes(fill=name), show.legend = F, shape = 3, stroke = 0.15) +
   scale_fill_manual("Gene tags", values = c("cap" = "#ff0000", "tyr" = "#ff0000", "d37" = "#92e9ff", "fre" = "#b17227", "plp" = "#fdb735", "nlr" = "#048dfb"), na.value = "cornsilk3") +
   geom_gene_tag(aes(label=name), nudge_y=0.25, check_overlap = FALSE) +
-  geom_feat(alpha=.6, size=10, position="identity") +
+  geom_feat(alpha=.6, linewidth=10, position="identity") +
   geom_feat_text(aes(label=type), nudge_y=-0.3, check_overlap = TRUE) +
   geom_feat_text(data=feats(regionTicks), aes(label=feat_id), nudge_y=-0.25, check_overlap = TRUE, size = 1.5) +
   theme_void() + 
@@ -359,7 +359,7 @@ ggsave(\"$outPNG\", plot = schematic, units = "px", height = 200, width = length
 ggsave(\"$outSVG\", plot = schematic, units = "px", height = 200, width = lengthFrac)
 /;		
 		
-		} elsif ($MODE eq 'element-align' || $MODE eq 'region-align') {
+		} elsif ($MODE eq 'element' || $MODE eq 'region') {
 		
 			print $OUT qq/#!\/usr\/bin\/env Rscript
 library(gggenomes)
@@ -376,8 +376,8 @@ heightFrac = nrow(regionSeqs) \/ 1.1 # for when OG ids are included as gene_name
 align <- gggenomes(genes = regionGenes, seqs = regionSeqs, feats = regionFeats, links = linkFeats) $gcLine2 +
   geom_link(offset = 0.04) +
   geom_bin_label(size = 3, expand_x = -100000, nudge_left = 0.05) +
-  geom_feat(alpha=.6, size=3, position="identity", color = "#ff0000") +
-  geom_seq(size = 0.5) +
+  geom_feat(alpha=.6, linewidth=3, position="identity", color = "#ff0000") +
+  geom_seq(linewidth = 0.5) +
   geom_gene(aes(fill=name), show.legend = T, shape = 3) + $gcFeatures
   scale_fill_manual("Gene tags", values = c("cap" = "#ff0000", "tyr" = "#ff0000", "d37" = "#92e9ff", "fre" = "#b17227", "plp" = "#fdb735", "nlr" = "#048dfb"), na.value = "cornsilk3") +
   geom_gene_tag(aes(label=name), size = 2, nudge_y=0.1, check_overlap = FALSE)
@@ -415,7 +415,7 @@ sub Filter_links {
 	
 		my ($locusBegin, $locusEnd, $locusStrand, $locusTag, $locusAnn, $contigID) = @{$starshipCoords->{$locusID}};
 
-		if ($MODE eq 'element-align' || $MODE eq 'schematic') {
+		if ($MODE eq 'element' || $MODE eq 'schematic') {
 			
 			# print 'seqs' file
 			if ($UPSTREAM != '0' || $DOWNSTREAM != '0') {
@@ -431,7 +431,7 @@ sub Filter_links {
 			}
 			$locusCoords{$locusID} = "${locusBegin}-${locusEnd}";
 
-		} elsif ($MODE eq 'region-align') {
+		} elsif ($MODE eq 'region') {
 			
 			# print 'seqs' file for both elements and empty
 			my ($regionBegin, $regionEnd) = split/-/, $locusAnn;
@@ -548,13 +548,13 @@ sub Print_config_files {
 	my (@configFiles, @alignFiles);
 	
 	# print a single type of config for the whole analysis if align
-	my ($genesOUT) = Open_FH("$OUTDIR/$PREFIX.genes.config", "seq_id\tstart\tend\tstrand\tfeat_id\tname\n") if ($MODE eq 'element-align' || $MODE eq 'region-align');
-	my ($featsOUT) = Open_FH("$OUTDIR/$PREFIX.feats.config", "seq_id\tstart\tend\tstrand\tfeat_id\ttype\n" ) if ($MODE eq 'element-align' || $MODE eq 'region-align');
-	my ($seqsOUT) = Open_FH("$OUTDIR/$PREFIX.seqs.config", "seq_id\tstart\tend\tstrand\tlength\n") if ($MODE eq 'element-align' || $MODE eq 'region-align');
-	my ($gcOUT) = Open_FH("$OUTDIR/$PREFIX.gc.config") if ((defined $seq2gc) && (($MODE eq 'element-align') || ($MODE eq 'region-align')));
+	my ($genesOUT) = Open_FH("$OUTDIR/$PREFIX.genes.config", "seq_id\tstart\tend\tstrand\tfeat_id\tname\n") if ($MODE eq 'element' || $MODE eq 'region');
+	my ($featsOUT) = Open_FH("$OUTDIR/$PREFIX.feats.config", "seq_id\tstart\tend\tstrand\tfeat_id\ttype\n" ) if ($MODE eq 'element' || $MODE eq 'region');
+	my ($seqsOUT) = Open_FH("$OUTDIR/$PREFIX.seqs.config", "seq_id\tstart\tend\tstrand\tlength\n") if ($MODE eq 'element' || $MODE eq 'region');
+	my ($gcOUT) = Open_FH("$OUTDIR/$PREFIX.gc.config") if ((defined $seq2gc) && (($MODE eq 'element') || ($MODE eq 'region')));
 	
-	push @alignFiles, "$PREFIX", "$OUTDIR/$PREFIX.genes.config", "$OUTDIR/$PREFIX.feats.config", "$OUTDIR/$PREFIX.seqs.config", "$OUTDIR/$PREFIX.links.filt.tsv", "$OUTDIR/$PREFIX.gc.config" if ($MODE eq 'element-align' || $MODE eq 'region-align');; # links file was printed out in sub Nucmer_wrapper
-	push @configFiles, \@alignFiles if ($MODE eq 'element-align' || $MODE eq 'region-align');
+	push @alignFiles, "$PREFIX", "$OUTDIR/$PREFIX.genes.config", "$OUTDIR/$PREFIX.feats.config", "$OUTDIR/$PREFIX.seqs.config", "$OUTDIR/$PREFIX.links.filt.tsv", "$OUTDIR/$PREFIX.gc.config" if ($MODE eq 'element' || $MODE eq 'region');; # links file was printed out in sub Nucmer_wrapper
+	push @configFiles, \@alignFiles if ($MODE eq 'element' || $MODE eq 'region');
 
 	foreach my $locusID (@{$locusList}) {
 	
@@ -576,7 +576,7 @@ sub Print_config_files {
 		# some awkward id parsing, since we have changed name of locus id to include locustag for printing purposes
 		my %printedIDs; # avoid printing same gene twice
 		my $ogLocusID = $locusID;
-		($ogLocusID) = split/\|/, $locusID if ($MODE eq 'region-align');
+		($ogLocusID) = split/\|/, $locusID if ($MODE eq 'region');
 		
 		if ((exists $starshipFeatures->{$contigID}) && (exists $starshipFeatures->{$contigID}->{$ogLocusID})) {
 			foreach my $featureID (nsort keys %{$starshipFeatures->{$contigID}->{$ogLocusID}}) {
@@ -601,7 +601,7 @@ sub Print_config_files {
 		
 		# print 'feats' file with locus range
 		my $locusLength;
-		if ($MODE eq 'element-align' || $MODE eq 'schematic') {
+		if ($MODE eq 'element' || $MODE eq 'schematic') {
 			
 			print $featsOUT "$locusID\t$locusBegin\t$locusEnd\t$locusStrand\t$locusID\t$contigID\n";
 			# print 'seqs' file
@@ -631,7 +631,7 @@ sub Print_config_files {
 					}
 				}
 			}
-		} elsif ($MODE eq 'region-align') {
+		} elsif ($MODE eq 'region') {
 			
 			# print 'seqs' file for both elements and empty
 			my ($regionBegin, $regionEnd) = split/-/, $locusAnn;
@@ -812,7 +812,8 @@ sub Parse_element_list {
 	while (my $line = <$IN>) {
 		chomp $line;
 		next if ($line !~ m/^.+$/); # to avoid empty lines
-		push @regions, $line;
+		my ($elementID) = split/\t/, $line;
+		push @regions, $elementID;
 	}
 	return(\@regions);	
 }
@@ -1118,12 +1119,12 @@ sub Opts_check {
 	usage("\nError: the path provided to --outdir does not exist\n") if (! -d $opts->{'outdir'});
 	usage("\nError: please provide a string to --prefix\n") if (not defined $opts->{'prefix'});
 	if (not defined $opts->{'mode'}) {
-		usage("\nError: you must specify an option for --mode, either 'region-align', 'element-align' or 'schematic'\n");
-	} elsif ($opts->{'mode'} !~ m/^region-align$|^schematic$|^element-align$/) {
-		usage("\nError: unrecognized option for --mode, must be either 'region-align', 'element-align' or 'schematic'\n");
+		usage("\nError: you must specify an option for --mode, either 'region', 'element' or 'schematic'\n");
+	} elsif ($opts->{'mode'} !~ m/^region$|^schematic$|^element$/) {
+		usage("\nError: unrecognized option for --mode, must be either 'region', 'element' or 'schematic'\n");
 	}
 	
-	if ($opts->{'mode'} eq 'element-align' || $opts->{'mode'} eq 'region-align') {
+	if ($opts->{'mode'} eq 'element' || $opts->{'mode'} eq 'region') {
 		if (not defined $opts->{'aligner'}) {
 			usage("\nError: you must specify an option for --aligner, either 'nucmer' or 'minimap2'\n");
 		} elsif ($opts->{'aligner'} !~ m/^nucmer$|^minimap2$/) {
@@ -1151,7 +1152,7 @@ sub Opts_check {
 	if (not defined $opts->{'downstream'}) {
 		$opts->{'downstream'} = '0';
 	}
-	if ($opts->{'mode'} eq 'element-align' || $opts->{'mode'} eq 'schematic') {
+	if ($opts->{'mode'} eq 'element' || $opts->{'mode'} eq 'schematic') {
 		usage("\nError: please provide a file to --list\n") if (not defined $opts->{'list'});
 		usage("\nError: the file provided to --list does not exist\n") if (! -f $opts->{'list'});
 	}
@@ -1175,7 +1176,7 @@ sub Opts_check {
 	if (not defined $opts->{'threads'}) {
 		$opts->{'threads'} = 1;
 	}
-	if ($opts->{'mode'} eq 'region-align') {
+	if ($opts->{'mode'} eq 'region') {
 		usage("\nError: please provide a file to --dereplicated\n") if (not defined $opts->{'dereplicated'});
 		usage("\nError: the file provided to --dereplicated does not exist\n") if (! -f $opts->{'dereplicated'});
 		usage("\nError: please provide a file to --regions\n") if (not defined $opts->{'regions'});
