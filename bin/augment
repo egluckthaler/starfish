@@ -139,7 +139,7 @@ metaeuk        $opts{'metaeukopts'}\n\n";
 					Format_check_fasta($contigFasta, $opts{'separator'});
 				}
 				if (-f $contigFasta) {
-					my ($failCheckMetaeuk) = system("metaeuk easy-predict $contigFasta $opts{profdb} $opts{outdir}/metaeukRegionData.$opts{'prefix'}/$contigID $opts{outdir}/metaeukRegionTemp.$opts{'prefix'}/ --local-tmp $opts{outdir}/metaeukRegionTemp.$opts{'prefix'}/ --threads $opts{threads} $opts{'metaeukopts'} &>$opts{outdir}/$opts{prefix}.metaeuk.log");
+					my ($failCheckMetaeuk) = system("metaeuk easy-predict $contigFasta $opts{profdb} $opts{outdir}/metaeukRegionData.$opts{'prefix'}/$contigID $opts{outdir}/metaeukRegionTemp.$opts{'prefix'}/ --local-tmp $opts{outdir}/metaeukRegionTemp.$opts{'prefix'}/ --threads $opts{threads} $opts{'metaeukopts'} >>$opts{outdir}/$opts{prefix}.metaeuk.log 2>&1");
 					$datestring = localtime();					
 					if ($failCheckMetaeuk != 0) { warn "\n\n[$datestring] error: could not execute metaeuk on commandline for $contigID, exiting..\n$!\n";}
 					system("rm -r $opts{outdir}/metaeukRegionTemp.$opts{'prefix'}/*"); # clean up temp directory

@@ -65,17 +65,25 @@ main: {
 			if ($seqcount == 0 || $seqcount >= $maxseq) {
 				$part++;
 				$seqcount = 1; #reset seqcount, or initialize it if seq = 0
-				my ($OUT) = Open_FH("$outdir/$filename.filt$part$suffix");
+				($OUT) = Open_FH("$outdir/$filename.filt$part$suffix");
 				$header =~ m/^([^\s]+)/; #grab first string of nonwhitespace characters
 				my $modheader = $1;
-				$fasta->{$header} =~ s/\*//g;
-				print $OUT ">$modheader\n$fasta->{$header}\n";
+				if (exists $fasta->{$header}) {
+					$fasta->{$header} =~ s/\*//g;
+					print $OUT ">$modheader\n$fasta->{$header}\n";
+				} else {
+					warn("Warning: can't find sequence associated with $header, skipping printout\n");
+				}
 			} else {
 				$header =~ m/^([^\s]+)/; #grab first string of nonwhitespace characters
 				my $modheader = $1;
 				$fasta->{$header} =~ s/\*//g;
-				print $OUT ">$modheader\n$fasta->{$header}\n";
-				$seqcount++;
+				if (exists $fasta->{$header}) {
+					print $OUT ">$modheader\n$fasta->{$header}\n";
+					$seqcount++;
+				} else {
+					warn("Warning: can't find sequence associated with $header, skipping printout\n");
+				}
 			}
 		}
 		print "$part fasta files have been created with at most $maxseq sequences each\n";

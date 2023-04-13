@@ -115,7 +115,8 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 					Format_check_fasta($assemblies->{$assemblyName}, $opts{'separator'});
 				}
 				if (-f $assemblies->{$assemblyName}) {
-					my ($failCheckMetaeuk) = system("metaeuk easy-predict $assemblies->{$assemblyName} $opts{proteins} $opts{outdir}/metaeukData/$assemblyName $opts{tempdir} --local-tmp $opts{tempdir} --remove-tmp-files 1 --threads $opts{threads} $opts{metaeukopts} &>$opts{outdir}/$opts{prefix}.metaeuk.log");
+					#print "metaeuk easy-predict $assemblies->{$assemblyName} $opts{proteins} $opts{outdir}/metaeukData/$assemblyName $opts{tempdir} --local-tmp $opts{tempdir} --remove-tmp-files 1 --threads $opts{threads} $opts{metaeukopts} >>$opts{outdir}/$opts{prefix}.metaeuk.log 2>&1\n";
+					my ($failCheckMetaeuk) = system("metaeuk easy-predict $assemblies->{$assemblyName} $opts{proteins} $opts{outdir}/metaeukData/$assemblyName $opts{tempdir} --local-tmp $opts{tempdir} --remove-tmp-files 1 --threads $opts{threads} $opts{metaeukopts} >>$opts{outdir}/$opts{prefix}.metaeuk.log 2>&1");
 					$datestring = localtime();					
 					if ($failCheckMetaeuk != 0) { die "\n\n[$datestring] error: could not execute metaeuk on commandline, exiting..\n$!\n";}
 				} else {

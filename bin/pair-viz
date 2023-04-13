@@ -529,7 +529,7 @@ stroke_thickness    = 0.5p
 \n";
 			
 			
-			my ($circosCheck) = system("circos -conf $configFile -outputfile $pngprefix &>/dev/null");
+			my ($circosCheck) = system("circos -conf $configFile -outputfile $pngprefix >/dev/null 2>&1");
 			if ($circosCheck != 0) { warn("\n\n[$datestring] warning: could not execute circos on commandline for $queElement and $refRegion, skipping..\n$!\n");}
 			
 		}

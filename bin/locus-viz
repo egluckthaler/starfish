@@ -17,7 +17,7 @@ sub usage {
 	my $usage = qq/
 usage: starfish locus-viz [args]
 
-execute alignments with nucmer and generate synteny schematics with gggenomes.
+execute alignments and generate synteny schematics with gggenomes.
 
 Required:
 -m, --mode          STR    either 'region', 'element' or 'schematic'.

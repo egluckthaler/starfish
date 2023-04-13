@@ -419,7 +419,7 @@ thickness          = 2p
  		}
 		print $configOUT "</plots>\n";
 			
-		my ($circosCheck) = system("circos -conf $configFile -outputfile $outprefix &>/dev/null");
+		my ($circosCheck) = system("circos -conf $configFile -outputfile $outprefix >/dev/null 2>&1");
 		if ($circosCheck != 0) { die "\n\n[$datestring] error: could not execute circos on commandline for $genomeID, exiting..\n$!\n";}
 	}
 			
