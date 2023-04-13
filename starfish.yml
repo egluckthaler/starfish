@@ -7,7 +7,7 @@ dependencies:
   - mummer4=4.0.0
   - bedtools=2.30.0
   - sourmash=4.6.1
-  - blast=2.13.0
+  - blast=2.12.0
   - mcl=14.137
   - circos=0.69.8
   - minimap2=2.24
