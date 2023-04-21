@@ -390,7 +390,7 @@ ggsave(\"$outSVG\", plot = align, units = \"$UNITS\", height = heightFrac, width
 		sleep(2);
 		system("chmod +x $OUTDIR/$PREFIX.R");
 		sleep(2);
-		system("$OUTDIR/$PREFIX.R 1&>/dev/null");
+		system("$OUTDIR/$PREFIX.R >/dev/null 2>&1");
 		sleep(2);
 	}
 }

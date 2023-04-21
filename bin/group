@@ -175,27 +175,23 @@ sub Print_results {
 	
 	my (%groups);
 	open (my $IN, '<', $clusteringOutfile) or usage("\n\n[$datestring] error: cannot read $clusteringOutfile, exiting\n");
-	my ($groupCount, $singletonCount, $elementCount) = (0, 0, 0);
+	my ($groupCount, $singletonCount, $multiCount, $elementCount) = (0, 0, 0, 0);
 	while (my $line = <$IN>) {
 		chomp $line;
 		
-		# check that this group contains >1 member
+		# do not discriminate between groups with only 1 member and those with >1 for naming, only for counting and summarizing data
 		my @fields = split/\t/, $line;
-		if (scalar @fields > 1) {
-			$groupCount++;		
-			my $formattedCount = sprintf("%04d", $groupCount);
-			my $groupName = "$groupPrefix$formattedCount";
-			foreach my $element (@fields) {
-				$elementCount++;
-				push @{$groups{$groupName}}, $element;
-			}
-		} else {
+		if (scalar @fields == 1) {
 			$singletonCount++;
-			my $formattedCount = sprintf("%04d", $singletonCount);
-			my $groupName = "sng$formattedCount";
-			foreach my $element (@fields) {
-				push @{$groups{$groupName}}, $element;
-			}
+		} else {
+			$elementCount+= scalar @fields;
+			$multiCount++;
+		}
+		$groupCount++;			
+		my $formattedCount = sprintf("%04d", $groupCount);
+		my $groupName = "$groupPrefix$formattedCount";
+		foreach my $element (@fields) {
+			push @{$groups{$groupName}}, $element;
 		}
 	}
 	close($IN);	
@@ -208,7 +204,7 @@ sub Print_results {
 		print $OUT "\n";
 	}
 		
-	print "[$datestring] grouped $elementCount loci into $groupCount groups\n";
+	print "[$datestring] grouped $elementCount loci into $multiCount multimember groups\n";
 	print "[$datestring] $singletonCount loci are singletons\n";
 }
 
@@ -239,7 +235,7 @@ sub Parse_group_file {
 		chomp $line;
 		my (@elements) = split/\t/, $line;
 		my $group = shift @elements;
-		next if ($group =~ m/^sng/); # skip singletons
+		next if (scalar @elements == 1); # skip singletons
 		foreach my $element (@elements) {
 			$element2group{$element} = $group;
 		}

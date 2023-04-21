@@ -151,7 +151,7 @@ mafft                  $opts{'mafftopts'}\n\n";}
 		# Parse empty sites for elements with flank boundaries (located in singleDR.stats file)
 		# structured: {capID} = emptyContigID
 		my ($flankCoords) = Parse_flank_empty($opts{'flank'}) if (defined $opts{'flank'});
-
+		
 		# Filter coords to retain only 'insert' and 'flank' element
 		# (insert elements consist of elements with either flank or insert boundaries)
 		# Empty sites for elements with insert boundaries are located in the .bed file as part of the feature name
@@ -163,7 +163,7 @@ mafft                  $opts{'mafftopts'}\n\n";}
 		# structured: emptySites{contigID}{regionID}{emptyContig} = [emptyBegin, emptyEnd, strand, emptySiteID]
 		my ($emptyCoords) = Parse_insertion_sites($opts{'stats'}) if (defined $opts{'stats'});
 
-		# Load up all assembly sequences into a single hash
+		# Load up only the assembly sequences into a single hash
 		# Structured: {sequenceID} = sequence
 		my ($sequencePaths) = dim_0_hash($opts{'assembly'}, "\t", "1");
 		my ($id2sequence) = Fasta_hash_many_files($sequencePaths);
@@ -194,8 +194,12 @@ mafft                  $opts{'mafftopts'}\n\n";}
 	############################
 
 		$datestring = localtime();
-		print "[$datestring] executing $opts{aligner} alignments..\n" if (not defined $opts{'noali'});
-		
+		if (not defined $opts{'noali'}) {
+			print "[$datestring] executing $opts{aligner} alignments..\n";
+		} else {
+			print "[$datestring] printing fasta files and skipping alignment..\n";
+		}
+
 		if ($opts{'aligner'} eq 'nucmer') {
 			
 			# skip alignment if already present
@@ -238,10 +242,12 @@ sub Mafft_wrapper {
 				print $queOUT ">$queElement:$queContigID:${queBegin}-${queEnd}:$queStrand\n$queSeq\n";
 				
 				# reverse complement the subject sequence if necessary
-				my $refFile = "$OUTDIR/$refRegion.fna";
+				my $refFile = "$OUTDIR/${refRegion}_of_${queElement}.fna";
 				my ($refOUT) = Open_FH($refFile);
 				my $refSeq = substr($id2sequence->{$refContigID}, $refBegin, $refEnd - $refBegin);
-				print $refOUT ">$refRegion:$refContigID:${refBegin}-${refEnd}:$refStrand\n$refSeq\n";
+				my $refSeqID = $refRegion;
+				$refSeqID = $queElement if ($refRegion eq $refContigID); # make it easy to match each element to its empty site contig, if the refContig matches the refRegion anyways, as it would during an empty site comparison
+				print $refOUT ">$refSeqID:$refContigID:${refBegin}-${refEnd}:$refStrand\n$refSeq\n";
 				
 				# determine orientation using a quick blastn search: for some reason, the strand info isn't working properly here, but its working in the circos plots..
 				my $blastString = `blastn -query $queFile -subject $refFile -outfmt 6 -evalue 0.001`;
