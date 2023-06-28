@@ -1,7 +1,7 @@
 <img
   src="/assets/STARFISH_LOGO.png"
   align = "center"
-  style="margin: 0 auto; width: 567px; height: 210px">
+  style="margin: 20 auto; width: 567px; height: 210px">
 
 <img
   src="/assets/element_logo_color.png"
