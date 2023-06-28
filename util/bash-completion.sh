@@ -10,7 +10,7 @@ _starfish() {
 	cur="${COMP_WORDS[COMP_CWORD]}"
 
 	if [[ ${COMP_CWORD} -eq 1 ]] ; then
-		opts="annotate consolidate sketch augment dereplicate-hood insert dereplicate flank extend summarize sim group cargo pair-viz locus-viz genome-viz format format-ncbi"
+		opts="annotate consolidate coverage sketch augment dereplicate-hood insert dereplicate flank extend summarize sim group cargo pair-viz locus-viz genome-viz format format-ncbi"
 		COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
 		return 0
 	fi

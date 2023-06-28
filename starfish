@@ -38,6 +38,7 @@ Auxiliary commands:
    sim                calculate k-mer similarity between captains or elements.
    group              group captains or elements into families based on k-mers.
    extend             extend downstream element boundary using BLASTn alignments.
+   coverage           map short reads to a reference element library.
    augment            de novo gene annotation with metaeuk and a profile database.
    cargo              define element pangenomes and calculate cargo-based
                       similarities between elements.
@@ -79,6 +80,10 @@ main: {
 		usage("\n[$datestring] error: the \'extend\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/extend");
 		print "[$datestring] executing command: starfish extend $ARGS\n";
 		system("perl -I $starfishLIB $starfishDIR/bin/extend $ARGS");
+	} elsif ($COMMAND eq 'coverage') {
+		usage("\n[$datestring] error: the \'coverage\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/coverage");
+		print "[$datestring] executing command: starfish coverage $ARGS\n";
+		system("perl -I $starfishLIB $starfishDIR/bin/coverage $ARGS");
 	} elsif ($COMMAND eq 'insert') {
 		usage("\n[$datestring] error: the \'insert\' script should be located in $starfishDIR/bin/, but it\'s not..\n") if (! -f "$starfishDIR/bin/insert");
 		print "[$datestring] executing command: starfish insert $ARGS\n";
@@ -150,6 +155,6 @@ sub Opts_check {
 	my ($COMMAND) = @_;
 	usage() if (not defined $COMMAND);
 	usage() if ($COMMAND =~ m/^help$|^-h$|^--help$/);
-	usage("\nError: please specify a valid command\n") if ($COMMAND !~ m/^sim$|^group$|^dereplicate$|^flank$|^extend$|^summarize$|^insert$|^cargo$|^pair-viz$|^locus-viz$|^genome-viz$|^format$|^format-ncbi$|^annotate$|^consolidate$|^sketch$|^augment$|^dereplicate-hood$/);
+	usage("\nError: please specify a valid command\n") if ($COMMAND !~ m/^sim$|^group$|^dereplicate$|^flank$|^extend$|^summarize$|^insert$|^cargo$|^pair-viz$|^locus-viz$|^coverage$|^genome-viz$|^format$|^format-ncbi$|^annotate$|^consolidate$|^sketch$|^augment$|^dereplicate-hood$/);
 }
 

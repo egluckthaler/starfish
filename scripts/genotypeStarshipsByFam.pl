@@ -15,6 +15,7 @@ usage: genotypeStarshipsByFam.pl [options]
 Required:
 -b, --bed         FILE   BED file with Starship feature coordinates
 -f, --family      FILE   2 column tsv with: starshipID, familyID
+-g, --genomes     FILE   1 column tsv with: genomeID
 -s, --separator   STR    the character separating genomeID from featureID (default: '_')
 
 Optional:
@@ -23,7 +24,7 @@ Optional:
 	if (not defined $message) {
 		$message = qq/
 This script will genotype the copy number of each Starship present in --family at
-the family level for each genome in --bed. Prints to STDOUT. \n\n/;
+the family level for each genome in --genomes. Prints to STDOUT. \n\n/;
 	} else {
 		$message = "$message\nuse -h for more details\n\n" ;
 	}	
@@ -37,6 +38,7 @@ main: {
 	GetOptions(\%opts, 
 		'bed|b=s',
 		'family|f=s',
+		'genomes|g=s',
 		'separator|s=s',
 		'h|help');
 	Opts_check(\%opts);
@@ -48,6 +50,7 @@ main: {
 	# parse query info
 	my ($starship2family) = dim_1_hash($opts{'family'}, "\t", "0:1");
 	my ($familyIDs) = dim_0_hash($opts{'family'}, "\t", "1");
+	my ($genomeIDs) = dim_0_hash($opts{'genomes'}, "\t", "0");
 	
 	# parse starships
 	# {omeID}{starshipID} = 1
@@ -58,11 +61,11 @@ main: {
 	
 	# print out starship family x genome matrix
 	print "familyID\t";
-	print join ("\t", sort keys %{$genome2starship});
+	print join ("\t", sort keys %{$genomeIDs});
 	print "\n";
-	foreach my $familyID (sort keys %{$family2genome}) {
+	foreach my $familyID (sort keys %{$familyIDs}) {
 		print "$familyID";
-		foreach my $omeID (sort keys %{$genome2starship}) {
+		foreach my $omeID (sort keys %{$genomeIDs}) {
 			if (exists $family2genome->{$familyID}->{$omeID}) {
 				print "\t$family2genome->{$familyID}->{$omeID}";
 			} else {

@@ -88,8 +88,8 @@ main: {
 			print $OUT "${opts{groupid}}${newOGid}:";
 			print $OUTMAP "${opts{groupid}}${newOGid}:" if (defined $old2new);
 		} else {
-			print $OUT "sng$newOGid:";
-			print $OUTMAP "sng$newOGid:" if (defined $old2new);
+			print $OUT "${opts{groupid}}${newOGid}:";
+			print $OUTMAP "${opts{groupid}}${newOGid}:" if (defined $old2new);
 		}
 		foreach my $geneID (sort keys %{$og2gene->{$og}}) {
 			

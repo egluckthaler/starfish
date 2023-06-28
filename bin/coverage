@@ -1,0 +1,263 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use Data::Dumper;
+use File::Basename;
+use Getopt::Long qw(:config auto_abbrev no_ignore_case);
+use Sort::Naturally;
+use Storable;
+use FileHandle;
+$|=1;
+# Fishtank lib
+use Fishtank::Utils qw(Commandline_check Open_FH dim_1_hash Fasta_hash);
+
+sub usage {
+	my $message = shift;
+	my $usage = qq/
+usage: starfish coverage [args]
+
+map short reads to a reference element library.
+
+Required:
+-m, --mode        STR    read library type, either 'paired' or 'single'.
+-r, --reads       FILE   2 or 3-column tsv: sampleID, read fastq1, read fastq2 if
+                         --mode paired
+-l, --lib         FILE   nucleotide fasta file of full length reference elements.
+-x, --prefix      STR    prefix for naming all output files.
+-o, --outdir      DIR    output directory.
+
+Required, with defaults:
+-d, --mindepth    INT    minimum read depth to consider a position as covered
+                         (default: 5)
+-a, --aligner     STR    alignment software to use, 'minimap2' or 'strobealign'
+                         (default: strobealign)
+-T, --threads     INT    number of threads.
+                         (default: 1)
+--minimapopts     STR    options to pass to minimap2
+                         (default: \\'-ax sr\\')
+--strobeopts      STR    options to pass to strobealign
+                         (default: \\'-N 0 -U\\')
+
+Optional:
+-c, --clean       STR    remove all intermediate mapping files
+-h, --help               print more details and exit.
+
+/;
+	if (not defined $message) {
+		$message = $usage;
+	} else {
+		$message = "$message\nuse -h for more details\n\n" ;
+	}	
+	die($message);
+}
+
+main: {
+
+	# parse and check options
+	my %opts;
+	GetOptions(\%opts, 
+		'mode|m=s',
+		'reads|r=s',
+		'lib|l=s',
+		'prefix|x=s',
+		'outdir|o=s',
+		'aligner|a=s',
+		'threads|T=i',
+		'mindepth|d=i',
+		'minimapopts=s',
+		'strobeopts=s',
+		'clean|c',
+		'h|help');
+	Opts_check(\%opts);
+
+	# check dependencies
+	my @commandlines = ("samtools", "bedtools");
+
+	if ($opts{'aligner'} eq 'minimap2') {
+		push @commandlines, "minimap2";	
+		print "
+Key parameters:
+minimap2               $opts{minimapopts} -t $opts{threads}\n\n";
+	}	
+
+	if ($opts{'aligner'} eq 'strobealign') {
+		push @commandlines, "strobealign";	
+		print "
+Key parameters:
+strobealign            $opts{strobeopts} -t $opts{threads}\n\n";
+	}	
+
+	Commandline_check(\@commandlines);
+
+	######################
+	#### READ IN DATA ####
+	######################
+
+	my $datestring = localtime();
+	print "\n[$datestring] reading in data..\n";
+	
+	# read in read paths
+	my ($ome2forward, $ome2reverse);
+	if ($opts{'mode'} eq 'paired') {
+		($ome2forward) = dim_1_hash($opts{'reads'}, "\t", "0:1");
+		($ome2reverse) = dim_1_hash($opts{'reads'}, "\t", "0:2");
+	} elsif ($opts{'mode'} eq 'single') {
+		($ome2forward) = dim_1_hash($opts{'reads'}, "\t", "0:1");
+	}
+	
+	# read in element library
+	my ($elementLib) = Fasta_hash($opts{'lib'});
+
+	##########################################
+	#### MAP READS AND CALCULATE COVERAGE ####
+	##########################################
+	
+	# also convert to bam to save on space
+	$datestring = localtime();
+	print "[$datestring] executing $opts{mode} mapping with $opts{aligner} for ".scalar(%{$ome2forward})." samples..\n";
+
+	foreach my $genomeID (nsort keys %{$ome2forward}) {
+		
+		$datestring = localtime();
+		my $outputFilePrefix = "$opts{outdir}/$opts{prefix}.$genomeID";
+		
+		if (! -f "$outputFilePrefix.cov") {
+			
+			if (! -f "$ome2forward->{$genomeID}") {
+				print "[$datestring] warning: can't find read file $ome2forward->{$genomeID}, skipping read mapping and coverage calculations for $genomeID\n";
+				next;
+			}
+			if ($opts{'mode'} eq 'paired' && ! -f "$ome2reverse->{$genomeID}") {
+				print "[$datestring] warning: can't find read file $ome2reverse->{$genomeID}, skipping read mapping and coverage calculations for $genomeID\n";
+				next;
+			}
+			
+			
+			if ($opts{'aligner'} eq 'minimap2') {
+	
+				if ($opts{'mode'} eq 'single') {
+			
+					# single-end alignment
+					my ($minimapCheck) = system("minimap2 -t $opts{threads} $opts{minimapopts} $opts{lib} $ome2forward->{$genomeID} 1>$outputFilePrefix.sam 2>/dev/null");
+					if ($minimapCheck != 0) { die "\n\n[$datestring] error: could not execute minimap2 on commandline for $genomeID, exiting..\n$!\n";}
+
+				} elsif ($opts{'mode'} eq 'paired') {
+
+					# paired-end alignment	
+					my ($minimapCheck) = system("minimap2 -t $opts{threads} $opts{minimapopts} $opts{lib} $ome2forward->{$genomeID} $ome2reverse->{$genomeID} 1>$outputFilePrefix.sam 2>/dev/null");
+					if ($minimapCheck != 0) { die "\n\n[$datestring] error: could not execute minimap2 on commandline for $genomeID, exiting..\n$!\n";}
+
+				}
+			} elsif ($opts{'aligner'} eq 'strobealign') {
+
+				if ($opts{'mode'} eq 'single') {
+			
+					# single-end alignment
+					my ($strobealignCheck) = system("strobealign --no-progress -t $opts{threads} $opts{strobeopts} $opts{lib} $ome2forward->{$genomeID} 1>$outputFilePrefix.sam 2>/dev/null");
+					if ($strobealignCheck != 0) { die "\n\n[$datestring] error: could not execute strobealign on commandline for $genomeID, exiting..\n$!\n";}
+
+				} elsif ($opts{'mode'} eq 'paired') {
+
+					# paired-end alignment	
+					my ($strobealignCheck) = system("strobealign --no-progress -t $opts{threads} $opts{strobeopts} $opts{lib} $ome2forward->{$genomeID} $ome2reverse->{$genomeID} 1>$outputFilePrefix.sam 2>/dev/null");
+					if ($strobealignCheck != 0) { die "\n\n[$datestring] error: could not execute strobealign on commandline for $genomeID, exiting..\n$!\n";}
+
+				}
+	
+			}
+		
+			# convert SAM to sorted BAM
+			$datestring = localtime();
+			my ($samtoolsCheck1) = system("samtools view -S -b $outputFilePrefix.sam 1>$outputFilePrefix.temp.bam 2>/dev/null");
+			if ($samtoolsCheck1 != 0) { die "\n\n[$datestring] error: could not execute samtools view on commandline for $genomeID, exiting..\n$!\n";}
+			
+			$datestring = localtime();
+			my ($samtoolsCheck2) = system("samtools sort $outputFilePrefix.temp.bam 1>$outputFilePrefix.bam 2>/dev/null");
+			if ($samtoolsCheck2 != 0) { die "\n\n[$datestring] error: could not execute samtools sort on commandline for $genomeID, exiting..\n$!\n";}
+
+			# clean up sam
+			system("rm $outputFilePrefix.sam $outputFilePrefix.temp.bam");
+			
+			# calculate coverage
+			$datestring = localtime();
+			my ($bedtoolsCheck) = system("bedtools genomecov -ibam $outputFilePrefix.bam -d 1>$outputFilePrefix.temp.cov 2>/dev/null");
+			if ($bedtoolsCheck != 0) { die "\n\n[$datestring] error: could not execute bedtools genomecov on commandline for $genomeID, exiting..\n$!\n";}
+			
+			# summarize % coverage and avg depth per sequence
+			my (%seq2cov, %seq2depth);
+			$datestring = localtime();
+			open(my $COVIN, '<', "$outputFilePrefix.temp.cov") or usage("[$datestring] error: could not open $outputFilePrefix.temp.cov for reading\n");
+			while (my $line = <$COVIN>) {
+				chomp $line;
+				my ($seqID, $pos, $depth) = split/\t/, $line;
+				if ($depth >= $opts{'mindepth'}) {
+					$seq2depth{$seqID}+=$depth; # only sum depth at sites >= mindepth
+					$seq2cov{$seqID}++;
+				}
+			}
+
+			# print summary	per sequence in the elementLib file
+			my ($OUT) = Open_FH("$outputFilePrefix.cov");
+			print $OUT "#sampleID\telementID\telementLength\tfracCov\tavgDepth\n";
+			foreach my $seqID (nsort keys %{$elementLib}) {
+				my ($perCov, $avgDepth) = (0,0);
+				my $elementLength = length($elementLib->{$seqID});
+				
+				if (exists $seq2cov{$seqID}) {
+					$perCov = sprintf("%.3f", $seq2cov{$seqID} / $elementLength);
+					$avgDepth = sprintf("%.3f", $seq2depth{$seqID} / $elementLength);
+				}
+				print $OUT "$genomeID\t$seqID\t$elementLength\t$perCov\t$avgDepth\n";
+			}
+			
+			# remove .bam, if --clean 
+			system("rm $outputFilePrefix.temp.cov");
+			system("rm $outputFilePrefix.bam") if (defined $opts{'clean'});
+			
+		} else {
+			my $datestring = localtime();
+			print "[$datestring] $outputFilePrefix.cov already exists, skipping read mapping and coverage calculations for $genomeID\n";
+		}
+	}
+	
+	$datestring = localtime();
+	print "[$datestring] done\n";
+
+}
+
+
+
+sub Opts_check {
+	my ($opts) = @_;
+	usage() if (exists $opts->{'h'});
+	usage("\nError: no arguments provided\n") if (scalar keys %{$opts} == 0);
+	usage("\nError: please provide a file to --reads\n") if (not defined $opts->{'reads'});
+	usage("\nError: the file provided to --reads does not exist\n") if (! -f $opts->{'reads'});
+	usage("\nError: please provide a file to --lib\n") if (not defined $opts->{'lib'});
+	usage("\nError: the file provided to --lib does not exist\n") if (! -f $opts->{'lib'});
+	usage("\nError: please provide a string to --prefix\n") if (not defined $opts->{'prefix'});
+	usage("\nError: please provide directory to --outdir\n") if (not defined $opts->{'outdir'});
+	usage("\nError: the directory provided to --outdir does not exist\n") if (! -d $opts->{'outdir'});
+	if (not defined $opts->{'mode'}) {
+		usage("\nError: you must specify an option for --mode, either 'paired' or 'single'\n");
+	} elsif ($opts->{'mode'} !~ m/^paired$|^single$/) {
+		usage("\nError: unrecognized option for --mode, must be either 'paired' or 'single'\n");
+	} 
+	if (not defined $opts->{'aligner'}) {
+		usage("\nError: you must specify an option for --aligner, either 'minimap2' or 'strobealign'\n");
+	} elsif ($opts->{'aligner'} !~ m/^minimap2$|^strobealign$/) {
+		usage("\nError: unrecognized option for --aligner, must be either 'minimap2' or 'strobealign'\n");
+	} 
+	if (not defined $opts->{'minimapopts'}) {
+		$opts->{'minimapopts'} = '-ax sr';
+	}
+	if (not defined $opts->{'strobeopts'}) {
+		$opts->{'strobeopts'} = "-N 0 -U";
+	}
+	if (not defined $opts->{'mindepth'}) {
+		$opts->{'mindepth'} = 5;
+	}
+	if (not defined $opts->{'threads'}) {
+		$opts->{'threads'} = '1';
+	}
+}
