@@ -41,7 +41,7 @@ Required, with defaults:
                          (default: '--max -E 0.001')
 
 Optional:
--g, --gff         FILE   GFF3 file containing gene coordinates from all assemblies.
+-g, --gff         FILE   2 column tsv: genome code, path to GFF.
 --noCheck                skip format checking.
 -f, --force              force all steps, instead of skipping if output already exists.
 -h, --help               print more details and exit.
@@ -116,7 +116,7 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 				}
 				if (-f $assemblies->{$assemblyName}) {
 					#print "metaeuk easy-predict $assemblies->{$assemblyName} $opts{proteins} $opts{outdir}/metaeukData/$assemblyName $opts{tempdir} --local-tmp $opts{tempdir} --remove-tmp-files 1 --threads $opts{threads} $opts{metaeukopts} >>$opts{outdir}/$opts{prefix}.metaeuk.log 2>&1\n";
-					my ($failCheckMetaeuk) = system("metaeuk easy-predict $assemblies->{$assemblyName} $opts{proteins} $opts{outdir}/metaeukData/$assemblyName $opts{tempdir} --local-tmp $opts{tempdir} --remove-tmp-files 1 --threads $opts{threads} $opts{metaeukopts} >>$opts{outdir}/$opts{prefix}.metaeuk.log 2>&1");
+					my ($failCheckMetaeuk) = system("metaeuk easy-predict $assemblies->{$assemblyName} $opts{proteins} $opts{outdir}/metaeukData/$assemblyName $opts{tempdir} --local-tmp $opts{tempdir} --threads $opts{threads} --remove-tmp-files 1 $opts{metaeukopts} >>$opts{outdir}/$opts{prefix}.metaeuk.log 2>&1");
 					$datestring = localtime();					
 					if ($failCheckMetaeuk != 0) { die "\n\n[$datestring] error: could not execute metaeuk on commandline, exiting..\n$!\n";}
 				} else {
@@ -133,6 +133,17 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 		system("mv $opts{outdir}/metaeukData/*.codon.fas $opts{outdir}/metaeukData/codon");
 		system("cat $opts{outdir}/metaeukData/*.fas > $opts{outdir}/$opts{prefix}.fas");
 		system("cat $opts{outdir}/metaeukData/*.gff > $opts{outdir}/$opts{prefix}.gff");
+		
+		# metaeuk easy predict generates tons of directories that consist of a very long string of numbers: lets get rid of them
+		opendir(my $metaDIRIN, "$opts{outdir}") or die "\n\n[$datestring] error: could not read directory $opts{outdir} on commandline, exiting..\n$!\n";
+		while (my $dirName = readdir($metaDIRIN)) {
+			if ((-d "$opts{outdir}/$dirName") && ($dirName =~ m/^\d+$/)) {
+		 		system("rm -r $opts{outdir}/$dirName");
+			}
+		}
+		closedir($metaDIRIN);		
+		system("rm -r $opts{outdir}/latest") if (-d "$opts{outdir}/latest");
+		system("rm $opts{outdir}/latest") if (-f "$opts{outdir}/latest");
 
 	} else {
 		$datestring = localtime();
@@ -187,18 +198,36 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 		if (! -f "$opts{outdir}/$opts{prefix}.filt_intersect.fas" || ! -f "$opts{outdir}/$opts{prefix}.filt_intersect.gff" || $opts{'force'} == 1) {
 
 			$datestring = localtime();
-			print "[$datestring] lifting over names from overlapping genes in $opts{'gff'} to metaeuk annotations..\n";
-		
+			print "[$datestring] lifting over overlapping gene names from GFFs in $opts{'gff'} to metaeuk annotations..\n";
+			
+			my ($gffFiles) = dim_0_hash($opts{'gff'}, "\t", "1");
+			
 			# check gff formatting
-			if (not defined $opts{'noCheck'}) {
-				print "[$datestring] checking formatting of $opts{'gff'}..\n";
-				Format_check_gff($opts{'gff'}, $opts{'separator'}, $opts{'nameField'}) if (defined $opts{'gff'});
+			if ((not defined $opts{'noCheck'}) && (defined $opts{'gff'})) {
+				print "[$datestring] checking formatting of GFFs in $opts{'gff'}..\n";
+				foreach my $gffFile (nsort keys %{$gffFiles}) {
+					if (! -f $gffFile) { die "\n\n[$datestring] error: could not find GFF file $gffFile in $opts{'gff'}, exiting..\n$!\n";}
+					Format_check_gff($gffFile, $opts{'separator'}, $opts{'nameField'});
+				}
 			}
+			
+			# print a temporary GFF file containing all GFFs in $gffFiles
+# 			my $bigGFFfile = "$opts{outdir}/$opts{prefix}_bigGFF.gff";
+# 			my ($bigGFFOUT) = Open_FH($bigGFFfile);
+# 			foreach my $gffFile (nsort keys %{$gffFiles}) {
+# 				open(my $IN, '<', $gffFile) or usage("\n\n[$datestring] error: can't open $gffFile for reading\n$!\n");
+# 				while (my $line = <$IN>) {
+# 					print $bigGFFOUT $line;
+# 				}
+# 			}
 		
 			# find the newly predicted genes that overlap with existing genes, and those that don't, then filter by hmm hits
 			# -wao Write the original A and B entries plus the number of base pairs of overlap between the two features. A features w/o overlap are also reported with a NULL B feature and overlap = 0.
-			my ($bedtoolsFailCheck) = system("bedtools intersect -a $opts{outdir}/$opts{prefix}.filt.gff -b $opts{gff} -wao > $opts{outdir}/$opts{prefix}.intersect.gff");
-			if ($bedtoolsFailCheck != 0) { die "\n\n[$datestring] error: could not execute bedtools intersect on commandline, exiting..\n$!\n";}
+			system("rm $opts{outdir}/$opts{prefix}.intersect.gff") if (-f "$opts{outdir}/$opts{prefix}.intersect.gff"); # remove intersect file if it exists, because we print using '>>'
+			foreach my $gffFile (nsort keys %{$gffFiles}) {
+				my ($bedtoolsFailCheck) = system("bedtools intersect -a $opts{outdir}/$opts{prefix}.filt.gff -b $gffFile -wao >> $opts{outdir}/$opts{prefix}.intersect.gff");
+				if ($bedtoolsFailCheck != 0) { die "\n\n[$datestring] error: could not execute bedtools intersect on commandline for $opts{outdir}/$opts{prefix}.filt.gff and $gffFile, exiting..\n$!\n";}
+			}
 			sleep(5); # to avoid issues with bedtools I/O
 			my ($idConversions) = Parse_overlap_gff("$opts{outdir}/$opts{prefix}.intersect.gff", $opts{'separator'}, $opts{'nameField'});
 			
@@ -209,6 +238,9 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 				$datestring = localtime();
 				print "[$datestring] no metaeuk genes intersect with gene features in $opts{'gff'}, so there are no gene names to lift over\n";
 			}
+			
+			# clean up
+			# system("rm $bigGFFfile") if (-f $bigGFFfile);
 			
 		} else {
 			$datestring = localtime();
