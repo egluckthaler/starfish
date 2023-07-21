@@ -495,7 +495,7 @@ sub Print_element_features {
 			# get some info about the empty site
 			# will invoke for flank elements
 			my ($emptySiteID, $emptyBegin, $emptyEnd, $emptyStrand, $emptySeq) = (".", ".", ".", ".", ".");
-			if ((defined $flankCoords) && (exists $flankCoords->{$captainID})) {
+			if ((defined $flankCoords) && (exists $flankCoords->{$captainID}) && (defined $emptyContigID) && (exists $emptyCoords->{$contigID}->{$starshipID}->{$emptyContigID})) {
 				$emptyContigID = $flankCoords->{$captainID};
 				($emptyBegin, $emptyEnd, $emptyStrand, $emptySiteID) = @{$emptyCoords->{$contigID}->{$starshipID}->{$emptyContigID}};
 				$emptySeq = substr($assemblies->{$emptyContigID}, $emptyBegin - 1, $emptyEnd - $emptyBegin + 1);
