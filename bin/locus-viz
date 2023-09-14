@@ -777,7 +777,7 @@ sub Nucmer_wrapper {
 		my $queFile = "$OUTDIR/que.fna";
 		my ($queOUT) = Open_FH($queFile);
 		print $queOUT ">$queLocus\n$id2sequence->{$queContigID}\n";
-		
+
 		my ($nucmerCheck) = system("nucmer $NUCMEROPTS -t $THREADS -p $outprefix $queFile $refFile 2>/dev/null");
 		if ($nucmerCheck != 0) { die "\n\n[$datestring] error: could not execute nucmer on commandline for $queFile and $refFile, exiting..\n$!\n";}
 		

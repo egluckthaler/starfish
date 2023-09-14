@@ -28,10 +28,10 @@ Required, with defaults:
 
 At least one pair of old and new files:
 -g, --oldGff      FILE   GFF3 file of existing gene coordinates.
--G, --newGff      FILE   GFF3 file of new gene coordinates.
--p, --oldProtein  FILE   FASTA file of existing amino acid sequences.
+-G, --newGff      FILE   GFF3 file of new coordinates output by starfish annotate.
+-p, --oldProtein  FILE   FASTA file of existing AA sequences.
                          (matching -g)
--P, --newProtein  FILE   FASTA file of new amino acid sequences.
+-P, --newProtein  FILE   FASTA file of new AA sequences output by starfish annotate.
                          (matching -G)
 -a, --oldAnn      FILE   3 column tsv: sequenceID (matching -g), fieldID, ann.
 -A, --newAnn      FILE   3 column tsv: sequenceID (matching -G), fieldID, ann.
@@ -207,7 +207,7 @@ sub	Consolidate_gffs {
 	my %replaced;
 	my $SEPprint = $SEP;
 	$SEPprint =~ s/\\//g;
-
+		
 	# first check for any metaeuk genes that overlap with MULTIPLE existing genes
 	foreach my $contigID (keys %{$newGenes}) {
 		foreach my $newGene (keys %{$newGenes->{$contigID}}) {

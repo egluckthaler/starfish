@@ -15,17 +15,20 @@ sub usage {
 	my $usage = qq/
 usage: starfish augment [args]
 
-de novo gene annotation with metaeuk and a profile database.
+de novo gene annotation with metaeuk and an amino acid database.
 
 Required:
--p, --profdb      FILE   mmseqs2 profile database of interest.
--F, --annField    STR    fieldID in --bed ann column to add new ann to.
--b, --bed         FILE   BED file with neighborhoods or mobile elements.
-                         (output by starfish sketch or summarize)
+-m, --mode        STR    either 'region' or 'contig'
+-d, --db          FILE   mmseqs2 amino acid database of interest.
 -a, --assembly    FILE   2 column tsv with: genomeID, path to assembly FASTA.
 -x, --prefix      STR    prefix for naming all output files.
 -i, --idtag       STR    string used as prefix for predicted gene featureIDs.
 -o, --outdir      DIR    output directory.
+
+Required, if --mode region:
+-F, --annField    STR    fieldID in --bed ann column to add new ann to.
+-b, --bed         FILE   BED file with neighborhoods or mobile elements.
+                         (output by starfish sketch or summarize)
 
 Required, with defaults:
 -s, --separator   STR    character separating genomeID from featureID.
@@ -33,13 +36,17 @@ Required, with defaults:
 -n, --nameField   STR    GFF3 attribute field where gene features will be named.
                          (default: 'Name=')
 -T, --threads     INT    number of threads to use for parallel processes.
-                         (default: 6)
+                         (default: 6)                         
 --metaeukopts     STR    options to pass to metaeuk easy-predict.
                          (default: see -h)
 
+Optional, if --mode contig:
+--bygenome               annotate all contigs from the same genome at once
+--allcontigs             annotate all contigs at once
+
 Optional:
--m, --mappings    FILE   2 column tsv: database entry, annotation.
-                         (entries must be found in --profdb)
+--mappings        FILE   2 column tsv: database entry, annotation.
+                         (entries must be found in --db)
 --noCheck                skip format checking.
 -f, --force              force all steps even if output already exists.
 -h, --help               print more details and exit.
@@ -58,7 +65,8 @@ main: {
 	# parse and check options
 	my %opts;
 	GetOptions(\%opts, 
-		'profdb|p=s',
+		'mode|m=s',
+		'db|d=s',
 		'annField|F=s',
 		'assembly|a=s',
 		'separator|s=s',
@@ -68,9 +76,11 @@ main: {
 		'threads|T=i',
 		'nameField|namefield|n=s',
 		'outdir|o=s',
-		'mappings|m=s',
+		'mappings=s',
 		'noCheck|nocheck',
 		'metaeukopts=s',
+		'bygenome=s',
+		'allcontigs=s',
 		'force|f',
 		'h|help');
 	Opts_check(\%opts);
@@ -89,20 +99,6 @@ metaeuk        $opts{'metaeukopts'}\n\n";
 	my $datestring = localtime();
 	print "[$datestring] reading in data..\n";
 		
-	# Parse info from candidate Starship regions
-	# structured: {contigID}{regionID}{featureID} = [begin, end, strand, tag, annotation]
-	my ($bedFeatures) = Glofish_bed_hash($opts{'bed'});
-	
-	# Parse absolute boundaries of regions based on their feature coordinates
-	# structured: $regionCoords{$contigID}{$regionID}}, $hoodBegin, $hoodEnd
-	my ($regionCoords) = Parse_region_boundaries($bedFeatures);
-	my $regionCount = 0;
-	foreach my $contigID (keys %{$regionCoords}) {
-		foreach my $regionID (keys %{$regionCoords->{$contigID}}) {
-			$regionCount++;
-		}
-	}
-	
 	# Load up all assembly sequences into a single hash
 	# Structured: {contigID} = sequence
 	my ($assemblyPaths) = dim_0_hash($opts{'assembly'}, "\t", "1");
@@ -110,12 +106,46 @@ metaeuk        $opts{'metaeukopts'}\n\n";
 
 	# load up profileDB mappings
 	my ($entryToAnn) = dim_1_hash($opts{'mappings'}, "\t", "0:1") if (defined $opts{'mappings'});
+
+	# Parse info from candidate Starship regions, if --mode region. else just retrieve contigs and treat as regions
+	my ($bedFeatures, $regionCoords, $regionCount);
 	
+	if ($opts{'mode'} eq 'region') {
+		# structured: {contigID}{regionID}{featureID} = [begin, end, strand, tag, annotation]
+		my ($bedFeatures) = Glofish_bed_hash($opts{'bed'});
+	
+		# Parse absolute boundaries of regions based on their feature coordinates
+		# structured: $regionCoords{$contigID}{$regionID}}, $hoodBegin, $hoodEnd
+		my ($regionCoords) = Parse_region_boundaries($bedFeatures);
+		my $regionCount = 0;
+		foreach my $contigID (keys %{$regionCoords}) {
+			foreach my $regionID (keys %{$regionCoords->{$contigID}}) {
+				$regionCount++;
+			}
+		}
+	} elsif ($opts{'mode'} eq 'contig') {
+		foreach my $contigID (keys %{$assemblies}) {
+			my $length = length($assemblies->{$contigID});
+			
+			# organize by genome instead of by contig, if requested
+			if (defined $opts{'bygenome'}) {
+				my ($genomeID) = split/$opts{'separator'}/, $contigID;
+				push @{$regionCoords->{$genomeID}->{$contigID}}, 1, $length;
+			} elsif (defined $opts{'allcontigs'}) {
+				my $genomeID = "allContigs";
+				push @{$regionCoords->{$genomeID}->{$contigID}}, 1, $length;				
+			} else {
+				push @{$regionCoords->{$contigID}->{$contigID}}, 1, $length;
+			}
+			$regionCount++;		
+		}
+	}
+		
 	#########################
 	#### EXECUTE METAEUK ####
 	#########################
 	
-	# execute metaeuk easy-predict for all contigs that have regions of interest on them
+	# execute metaeuk easy-predict for all contigs that have regions of interest (if --mode region), or all contigs (if --mode contig) on them
 	if (! -f "$opts{outdir}/$opts{prefix}.augmented_contigs_raw.fas" || ! -f "$opts{outdir}/$opts{prefix}.augmented_contigs_raw.gff" || -z "$opts{outdir}/$opts{prefix}.augmented_contigs_raw.fas" || -z "$opts{outdir}/$opts{prefix}.augmented_contigs_raw.gff" || $opts{'force'} == 1) {
 
 		# make a temp data directory
@@ -124,29 +154,40 @@ metaeuk        $opts{'metaeukopts'}\n\n";
 
 		# iterate through each contig with a regions of interest, and execute metaeuk
 		$datestring = localtime();
-		print "[$datestring] running metaeuk easy-predict for ".scalar(keys %{$regionCoords})." contigs with regions of interest..\n";
+		my $unitType = "contigs";
+		$unitType = "genomes" if (defined $opts{'bygenome'});
+		$unitType = "concatenated file of all contigs" if (defined $opts{'allcontigs'});
+		print "[$datestring] running metaeuk easy-predict for ".scalar(keys %{$regionCoords})." $unitType of interest..\n";
 
-		foreach my $contigID (nsort keys %{$regionCoords}) {
-			if (! -f "$opts{outdir}/metaeukRegionData.$opts{'prefix'}/$contigID.fas") { # check for metaeuk output
+		# unit can either be contigID or genomeID
+		foreach my $unitID (nsort keys %{$regionCoords}) {
+			if (! -f "$opts{outdir}/metaeukRegionData.$opts{'prefix'}/$unitID.fas") { # check for metaeuk output
 				
-				# print out contig sequence
-				my $contigFasta = "$opts{outdir}/metaeukRegionData.$opts{'prefix'}/$contigID.fna";
+				# print out the individual contig sequence, or all contigs sequences in a genome if requested
+				my $contigFasta = "$opts{outdir}/metaeukRegionData.$opts{'prefix'}/$unitID.fna";
 				my ($OUT) = Open_FH($contigFasta);
-				print $OUT ">$contigID\n$assemblies->{$contigID}\n";
+				
+				if ((defined $opts{'bygenome'} && $opts{'mode'} eq 'contig') || (defined $opts{'allcontigs'} && $opts{'mode'} eq 'contig')) {
+					foreach my $contigID (keys %{$regionCoords->{$unitID}}) {
+						print $OUT ">$contigID\n$assemblies->{$contigID}\n";
+					}
+				} else {
+					print $OUT ">$unitID\n$assemblies->{$unitID}\n";
+				}
 				
 				# format check: check sequence IDs in fastas are correctly labeled (assumes if metaeuk results are present, format check has already been run)				
 				if (not defined $opts{'noCheck'}) {
 					Format_check_fasta($contigFasta, $opts{'separator'});
 				}
 				if (-f $contigFasta) {
-					my ($failCheckMetaeuk) = system("metaeuk easy-predict $contigFasta $opts{profdb} $opts{outdir}/metaeukRegionData.$opts{'prefix'}/$contigID $opts{outdir}/metaeukRegionTemp.$opts{'prefix'}/ --local-tmp $opts{outdir}/metaeukRegionTemp.$opts{'prefix'}/ --threads $opts{threads} $opts{'metaeukopts'} >>$opts{outdir}/$opts{prefix}.metaeuk.log 2>&1");
+					my ($failCheckMetaeuk) = system("metaeuk easy-predict $contigFasta $opts{db} $opts{outdir}/metaeukRegionData.$opts{'prefix'}/$unitID $opts{outdir}/metaeukRegionTemp.$opts{'prefix'}/ --local-tmp $opts{outdir}/metaeukRegionTemp.$opts{'prefix'}/ --threads $opts{threads} $opts{'metaeukopts'} >>$opts{outdir}/$opts{prefix}.metaeuk.log 2>&1");
 					$datestring = localtime();					
-					if ($failCheckMetaeuk != 0) { warn "\n\n[$datestring] error: could not execute metaeuk on commandline for $contigID, exiting..\n$!\n";}
+					if ($failCheckMetaeuk != 0) { warn "\n\n[$datestring] error: could not execute metaeuk on commandline for $unitID, exiting..\n$!\n";}
 					system("rm -r $opts{outdir}/metaeukRegionTemp.$opts{'prefix'}/*"); # clean up temp directory
 				} 
 			} else {
 				$datestring = localtime();
-				print "[$datestring] $opts{outdir}/metaeukRegionData.$opts{'prefix'}/$contigID.fas already exists, skipping metaeuk annotation\n";
+				print "[$datestring] $opts{outdir}/metaeukRegionData.$opts{'prefix'}/$unitID.fas already exists, skipping metaeuk annotation\n";
 			}
 		}
 
@@ -179,25 +220,33 @@ metaeuk        $opts{'metaeukopts'}\n\n";
 	#### FIND OVERLAP WITH EXISTING GENES ####
 	##########################################
 	
-	$datestring = localtime();
-	print "[$datestring] finding newly predicted genes that do not overlap with existing genes in the input regions..\n";
+	my $finalGFF = "$opts{outdir}/$opts{prefix}.augmented_contigs_renamed.gff"; # default value, corresponds to final GFF of --mode contig
 
-	# find the newly predicted genes that DO NOT overlap with existing genes in the regions
-	# -v Only report those entries in A that have _no overlaps_ with B
-	my ($bedtoolsFailCheck) = system("bedtools intersect -a $opts{outdir}/$opts{prefix}.augmented_contigs_renamed.gff -b $opts{bed} -v > $opts{outdir}/$opts{prefix}.augmented_contigs_renamed.unique.gff");
-	if ($bedtoolsFailCheck != 0) { die "\n\n[$datestring] error: could not execute bedtools intersect on commandline, exiting..\n$!\n";}
-	sleep(5); # to avoid issues with bedtools I/O
+	# only for --mode region with a bed file
+	if ($opts{'mode'} eq 'region') {
 	
-	# if no unique genes exist, then exit script
-	if (! -f "$opts{outdir}/$opts{prefix}.augmented_contigs_renamed.unique.gff" || -z "$opts{outdir}/$opts{prefix}.augmented_contigs_renamed.unique.gff") {
 		$datestring = localtime();
-		print "[$datestring] all newly predicted genes overlap with existing genes so no results to print, exiting..\n";
-		die;
+		print "[$datestring] finding newly predicted genes that do not overlap with existing genes in the input regions..\n";
+		
+		$finalGFF = "$opts{outdir}/$opts{prefix}.augmented_contigs_renamed.unique.gff";
+		
+		# find the newly predicted genes that DO NOT overlap with existing genes in the regions
+		# -v Only report those entries in A that have _no overlaps_ with B
+		my ($bedtoolsFailCheck) = system("bedtools intersect -a $opts{outdir}/$opts{prefix}.augmented_contigs_renamed.gff -b $opts{bed} -v > $finalGFF");
+		if ($bedtoolsFailCheck != 0) { die "\n\n[$datestring] error: could not execute bedtools intersect on commandline, exiting..\n$!\n";}
+		sleep(5); # to avoid issues with bedtools I/O
+	
+		# if no unique genes exist, then exit script
+		if (! -f $finalGFF || -z $finalGFF) {
+			$datestring = localtime();
+			print "[$datestring] all newly predicted genes overlap with existing genes so no results to print, exiting..\n";
+			die;
+		}
 	}
 	
 	# Sort GFF of unique genes by contig and gene coordinate
 	# structured: $allGenes{$contig}{$begin}{$seqID} = $seqID\t$gffLine;
-	my ($allGenes) = Gff_sortable_gene_hash("$opts{outdir}/$opts{prefix}.augmented_contigs_renamed.unique.gff", $opts{'nameField'});
+	my ($allGenes) = Gff_sortable_gene_hash($finalGFF, $opts{'nameField'});
 	
 	# retrieve the database entry associated with each newly predicted gene
 	# also retrieve all GFF line info out of convenience
@@ -207,29 +256,60 @@ metaeuk        $opts{'metaeukopts'}\n\n";
 	#### POPULATE REGIONS AND PRINT ####
 	####################################
 	
-	# Populate regions with newly predicted features from gff file
-	# otherwise, just return regions hash and the featureToRegion
-	my ($populatedRegions, $featureToRegion, $newGenes) = Populate_regions($bedFeatures, $allGenes, $geneToEntry, $entryToAnn, $opts{'annField'});
+
+	my $bedOutfile = "$opts{'outdir'}/$opts{'prefix'}.augmented.bed";
+	my $newGffFile = "$opts{outdir}/$opts{prefix}.augmented.gff";
+	my $newFastaFile = "$opts{outdir}/$opts{prefix}.augmented.fasta";
+	my $newAnnotationFile = "$opts{outdir}/$opts{prefix}.augmented.ann";
+
+	if ($opts{'mode'} eq 'region') {
+
+		# Populate regions with newly predicted features from gff file
+		# otherwise, just return regions hash and the featureToRegion
+		my ($populatedRegions, $featureToRegion, $newGenes) = Populate_regions($bedFeatures, $allGenes, $geneToEntry, $entryToAnn, $opts{'annField'});
+
+		$datestring = localtime();
+		print "[$datestring] found ".scalar(keys %{$newGenes})." newly predicted genes in $regionCount input regions\n";
+
+		# Print out finalized BED files, if --mode region
+		Print_region_bed($populatedRegions, $featureToRegion, $bedOutfile);
+
+		# Print out GFF file with only newly predicted genes in regions
+		Print_region_GFF($newGenes, $newGffFile, $allGenes);
 	
-	$datestring = localtime();
-	print "[$datestring] found ".scalar(keys %{$newGenes})." newly predicted genes in $regionCount input regions\n";
+		# Print out fasta file with only newly predicted genes in regions
+		Print_region_Fasta($newGenes, $newFastaFile, "$opts{outdir}/$opts{prefix}.augmented_contigs_renamed.fas");
 
-	# Print out finalized BED files 
-	my $bedOutfile = "$opts{'outdir'}/$opts{'prefix'}.augmented_regions.bed";
-	Print_region_bed($populatedRegions, $featureToRegion, $bedOutfile);
-
-	# Print out GFF file with only newly predicted genes in regions
-	my $newGffFile = "$opts{outdir}/$opts{prefix}.augmented_regions.gff";
-	Print_region_GFF($newGenes, $newGffFile, $allGenes);
+		# Print out new annotation file with only newly predicted genes in regions
+		Print_annotations($newGenes, $geneToEntry, $entryToAnn, $opts{'annField'}, $newAnnotationFile);
 	
-	# Print out fasta file with only newly predicted genes in regions
-	my $newFastaFile = "$opts{outdir}/$opts{prefix}.augmented_regions.fasta";
-	Print_region_Fasta($newGenes, $newFastaFile, "$opts{outdir}/$opts{prefix}.augmented_contigs_renamed.fas");
+	} elsif ($opts{'mode'} eq 'contig') {
+		
+		# if --mode contig, consider all newly predicted genes as new genes
+		
+		my $newGenes;
+		foreach my $contigID (keys %{$allGenes}) {
+			foreach my $geneBegin (keys %{$allGenes->{$contigID}}) {
+				foreach my $geneID (keys %{$allGenes->{$contigID}->{$geneBegin}}) {
+					$newGenes->{$geneID} = 1;
+				}
+			}
+		}
+	
+		$datestring = localtime();
+		print "[$datestring] found ".scalar(keys %{$newGenes})." newly predicted genes in $regionCount input contigs\n";
 
-	# Print out new annotation file with only newly predicted genes in regions
-	my $newAnnotationFile = "$opts{outdir}/$opts{prefix}.augmented_regions.ann";
-	Print_annotations($newGenes, $geneToEntry, $entryToAnn, $opts{'annField'}, $newAnnotationFile);
+		# Print out GFF file with all newly predicted genes
+		Print_region_GFF($newGenes, $newGffFile, $allGenes);
+	
+		# Print out fasta file with all newly predicted genes
+		Print_region_Fasta($newGenes, $newFastaFile, "$opts{outdir}/$opts{prefix}.augmented_contigs_renamed.fas");
 
+		# Print out new annotation file with all newly predicted genes
+		Print_annotations($newGenes, $geneToEntry, $entryToAnn, $opts{'annField'}, $newAnnotationFile);
+	
+	}
+	
 	$datestring = localtime();
 	print "[$datestring] done\n";
 
@@ -238,6 +318,7 @@ metaeuk        $opts{'metaeukopts'}\n\n";
 sub Print_annotations {
 	my ($newGenes, $geneToEntry, $entryToAnn, $annField, $newAnnotationFile) = @_;
 	my ($OUT) = Open_FH($newAnnotationFile);
+	$annField = "Target_ID" if (not defined $annField);
 	foreach my $newGene (nsort keys %{$newGenes}) {
 		my $entry = $geneToEntry->{$newGene};
 		my $ann = $entry;
@@ -292,7 +373,7 @@ sub Parse_database_entry {
 		foreach my $geneBegin (keys %{$allGenes->{$contigID}}) {
 			foreach my $geneID (keys %{$allGenes->{$contigID}->{$geneBegin}}) {
 				# geneID and currentGeneID are equivalent, just named differently here because the same value appears twice
-				my ($currentGeneID, $currentContigID, $currentFeatureType, $currentAnnotator, $currentBegin, $currentEnd, $currentNULL1, $currentStrand, $currentNULL2, $currentAttributes) = split("\t", $allGenes->{$contigID}->{$geneBegin}->{$geneID});
+				my ($currentGeneID, $currentContigID, $currentAnnotator, $currentFeatureType, $currentBegin, $currentEnd, $currentNULL1, $currentStrand, $currentNULL2, $currentAttributes) = split("\t", $allGenes->{$contigID}->{$geneBegin}->{$geneID});
 				$currentAttributes =~ m/Target_ID=([^;]+)/;
 				my $entryID = $1;
 				$entryID =~ s/\.\d+$// if ($entryID =~ m/^PF/); # pfam entryIDs sometimes have a .\d suffix, but the entry annotation doesn't have one
@@ -367,6 +448,14 @@ sub Rename_sequence_hits {
 	my ($seqs) = Fasta_hash_nospace($fasFile);
 	foreach my $header (keys %{$seqs}) {
 		my (@fields) = split/\|/, $header;
+		# fasta header: UniRef50_A0A5N7CSQ8|aspfumC-1-80s-1_JAIBRV010000151.1|-|502|2.482e-142|2|54859|55727
+		# aspfumC-1-80s-1_JAIBRV010000151.1	MetaEuk	gene	54860	55728	502	-	.	Target_ID=UniRef50_A0A5N7CSQ8;TCS_ID=UniRef50_A0A5N7CSQ8|aspfumC-1-80s-1_JAIBRV010000151.1|-|54859
+		# aspfumC-1-80s-1_JAIBRV010000151.1	MetaEuk	mRNA	54860	55728	502	-	.	Target_ID=UniRef50_A0A5N7CSQ8;TCS_ID=UniRef50_A0A5N7CSQ8|aspfumC-1-80s-1_JAIBRV010000151.1|-|54859_mRNA;Parent=UniRef50_A0A5N7CSQ8|aspfumC-1-80s-1_JAIBRV010000151.1|-|54859
+		# aspfumC-1-80s-1_JAIBRV010000151.1	MetaEuk	exon	55390	55728	222	-	.	Target_ID=UniRef50_A0A5N7CSQ8;TCS_ID=UniRef50_A0A5N7CSQ8|aspfumC-1-80s-1_JAIBRV010000151.1|-|54859_exon_0;Parent=UniRef50_A0A5N7CSQ8|aspfumC-1-80s-1_JAIBRV010000151.1|-|54859_mRNA
+		# aspfumC-1-80s-1_JAIBRV010000151.1	MetaEuk	CDS	55390	55728	222	-	.	Target_ID=UniRef50_A0A5N7CSQ8;TCS_ID=UniRef50_A0A5N7CSQ8|aspfumC-1-80s-1_JAIBRV010000151.1|-|54859_CDS_0;Parent=UniRef50_A0A5N7CSQ8|aspfumC-1-80s-1_JAIBRV010000151.1|-|54859_exon_0
+		# aspfumC-1-80s-1_JAIBRV010000151.1	MetaEuk	exon	54860	55348	282	-	.	Target_ID=UniRef50_A0A5N7CSQ8;TCS_ID=UniRef50_A0A5N7CSQ8|aspfumC-1-80s-1_JAIBRV010000151.1|-|54859_exon_1;Parent=UniRef50_A0A5N7CSQ8|aspfumC-1-80s-1_JAIBRV010000151.1|-|54859_mRNA
+		# aspfumC-1-80s-1_JAIBRV010000151.1	MetaEuk	CDS	54860	55339	282	-	.	Target_ID=UniRef50_A0A5N7CSQ8;TCS_ID=UniRef50_A0A5N7CSQ8|aspfumC-1-80s-1_JAIBRV010000151.1|-|54859_CDS_1;Parent=UniRef50_A0A5N7CSQ8|aspfumC-1-80s-1_JAIBRV010000151.1|-|54859_exon_1
+	
 		my $newHeader = "$fields[0]\|$fields[1]\|$fields[2]\|$fields[6]\|$fields[7]";
 		$renamedSeqs{$newHeader} = $seqs->{$header};
 	}
@@ -377,20 +466,18 @@ sub Rename_sequence_hits {
 	while (my $line = <$IN>) {
 		next if ($line =~ m/^#/);
 		chomp $line;
-		# DK051-Scaffold13	gene	MetaEuk	18274	20639	447	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-
-		# DK051-Scaffold13	mRNA	MetaEuk	18274	20639	447	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-_mRNA;Parent=consp.1_660283|DK051-Scaffold13|-
-		# DK051-Scaffold13	exon	MetaEuk	20313	20639	90	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-_exon;Parent=consp.1_660283|DK051-Scaffold13|-_mRNA
-		# DK051-Scaffold13	CDS	MetaEuk	20313	20639	90	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-_CDS;Parent=consp.1_660283|DK051-Scaffold13|-_exon
 
-		# metaeuk gffs have the source and feature fields reversed according to gff specifications
-		my ($contigID, $featureType, $source, $begin, $end, $NULL1, $strand, $NULL2, $info) = split("\t", $line);
+		# some metaeuk gffs have the source and feature fields reversed according to gff specifications
+		my ($contigID, $source, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $info) = split("\t", $line);
 		next if ($featureType ne 'gene'); # only parse gene features
 		my ($otherInfo, $metaeukID) = split/;/, $info;
 		$metaeukID =~ s/TCS_ID=//;
-		# gff coordinates of gene are +1 greater than the coordinates in the metaeuk headers >:(
+		my ($field1, $field2, $field3) = split/\|/, $metaeukID;
+		
+		# gff coordinates of gene are +1 greater than the coordinates in the metaeuk fasta headers >:(
 		my $beginFas = $begin - 1;
 		my $endFas = $end - 1;
-		$metaeukID = "$metaeukID|$beginFas|$endFas"; # format to a unique identifier (for some reason, this is not done automatically in the metaeuk output)
+		$metaeukID = "$field1|$field2|$field3|$beginFas|$endFas"; # format to a unique identifier (for some reason, this is not done automatically in the metaeuk output)
 		my ($genomeID) = split/$SEP/, $contigID;
 		$newGeneCounter++;
 		#my $formattedCount = sprintf("%05d", $newGeneCounter);
@@ -406,18 +493,29 @@ sub Opts_check {
 	my ($opts) = @_;
 	usage() if (exists $opts->{'h'});
 	usage("\nError: no arguments provided\n") if (scalar keys %{$opts} == 0);
-	usage("\nError: please provide a mmseqs2 profile database file to --profdb\n") if (not defined $opts->{'profdb'});
-	usage("\nError: the mmseqs2 profile database file provided to --profdb does not exist\n") if (! -f $opts->{'profdb'});
+	usage("\nError: please provide a mmseqs2 profile database file to --db\n") if (not defined $opts->{'db'});
+	usage("\nError: the mmseqs2 profile database file provided to --db does not exist\n") if (! -f $opts->{'db'});
 	usage("\nError: please provide a string to --prefix\n") if (not defined $opts->{'prefix'});
-	usage("\nError: please provide a string to --annField\n") if (not defined $opts->{'annField'});
 	usage("\nError: please provide directory to --outdir\n") if (not defined $opts->{'outdir'});
 	usage("\nError: the directory provided to --outdir does not exist\n") if (! -d $opts->{'outdir'});
-	usage("\nError: please provide a file to --bed\n") if (not defined $opts->{'bed'});
-	usage("\nError: the file provided to --bed does not exist\n") if (! -f $opts->{'bed'});
 	usage("\nError: please provide a string to --idtag\n") if (not defined $opts->{'idtag'});
 	usage("\nError: please provide a file to --assembly\n") if (not defined $opts->{'assembly'});
 	usage("\nError: the file provided to --assembly does not exist\n") if (! -f $opts->{'assembly'});
 	usage("\nError: the file provided to --mappings does not exist\n") if ((defined $opts->{'mappings'}) && (! -f $opts->{'mappings'}));
+
+	if (not defined $opts->{'mode'}) {
+		usage("\nError: you must specify an option for --mode, either 'region', or 'contig'\n");
+	} elsif ($opts->{'mode'} !~ m/^region$|^contig$/) {
+		usage("\nError: unrecognized option for --mode, must be either 'region', or 'contig'\n");
+	} 
+	if ($opts->{'mode'} eq 'region') {
+		usage("\nError: please provide a string to --annField if --mode region\n") if (not defined $opts->{'annField'});
+		usage("\nError: please provide a file to --bed if --mode region\n") if (not defined $opts->{'bed'});
+		usage("\nError: the file provided to --bed does not exist\n") if (! -f $opts->{'bed'});
+		usage("\nError: --bygenome switch is only allowed in --mode contig\n") if (defined $opts->{'bygenome'});
+		usage("\nError: --allcontigs switch is only allowed in --mode contig\n") if (defined $opts->{'allcontigs'});
+	}
+
 	if (not defined $opts->{'separator'}) {
 		$opts->{'separator'} = '_';
 	} elsif ($opts->{'separator'} eq ':') {
@@ -454,6 +552,6 @@ sub Opts_check {
 		# --allow-deletion	Allow deletions in a MSA
 		# --protein			translate the joint exons coding sequence to amino acids
 		# --disk-space-limit  Set max disk space to use for reverse profile searches (defaults to all available)
-		$opts->{'metaeukopts'} = '-v 3 -s 4 -e 0.0001 --max-intron 2000 --max-seqs 3000 --metaeuk-eval 0.001 --exhaustive-search 1 --metaeuk-tcov 0.50 --allow-deletion 1 --protein 1 --disk-space-limit 100G --remove-tmp-files 1 --compressed 1';
+		$opts->{'metaeukopts'} = '-v 3 --start-sens 1 --sens-steps 3 -s 7 -e 1 --max-intron 1000 --max-seqs 300 --metaeuk-eval 0.0001 --exhaustive-search 1 --metaeuk-tcov 0.50 --allow-deletion 1 --protein 1 --disk-space-limit 100G --remove-tmp-files 1 --compressed 1';
 	}
 }
