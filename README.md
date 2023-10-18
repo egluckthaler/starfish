@@ -40,8 +40,8 @@ Please cite both the ```starfish``` manuscript in addition to any dependencies y
 |`group`| `mcl` | [Enright et al. 2002](https://pubmed.ncbi.nlm.nih.gov/11917018/) |
 |`*-viz`|`circos`, `gggenomes`, `mummer4`, <br />`mafft`, `minimap2`| [Krzywinski et al. 2009](https://pubmed.ncbi.nlm.nih.gov/19541911/), [Hackl and Ankenbrand 2022](https://thackl.github.io/gggenomes/authors.html), [Marcais et al 2018](https://pubmed.ncbi.nlm.nih.gov/29373581/), <br />[Katoh and Standley](https://pubmed.ncbi.nlm.nih.gov/23329690/), [Li 2018](https://pubmed.ncbi.nlm.nih.gov/29750242/)|
 
-## License
+## License and acknowlegements
 
-Please cite our work if you want to use ```starfish``` in your research.
+Please cite our work if you use ```starfish``` in your research.
 
-```starfish``` is an open source tool available under the GNU Affero General Public License version 3.0 or greater.
+```starfish``` is an open source tool available under the GNU Affero General Public License version 3.0 or greater. This work was supported by funding from the European Union’s Horizon 2020 research and innovation programme under the Marie Skłodowska-Curie grant agreement (grant number 890630).
