@@ -42,6 +42,8 @@ Please cite both the ```starfish``` manuscript in addition to any dependencies y
 
 ## License and acknowlegements
 
-Please cite our work if you use ```starfish``` in your research.
+Please cite our work if you use ```starfish``` in your research:
+
+[*Gluck-Thaler, E., & Vogan, A. A. (2023). Systematic identification of cargo-carrying genetic elements reveals new dimensions of eukaryotic diversity. bioRxiv, 2023-10.*](https://www.biorxiv.org/content/10.1101/2023.10.24.563810v1)
 
 ```starfish``` is an open source tool available under the GNU Affero General Public License version 3.0 or greater. This work was supported by funding from the European Union’s Horizon 2020 research and innovation programme under the Marie Skłodowska-Curie grant agreement (grant number 890630).
