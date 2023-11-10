@@ -268,4 +268,4 @@ setup_heatmap(treeMatrix, ts, header, center_value=0, color_up=0.5, color_down=0
 
 # Finally, open interactive viewer rendering with our tree style
 treeMatrix.render(tree_file+'.pdf', w = 12, h = 26, units = 'in', tree_style=ts)
-treeMatrix.show(tree_style=ts)
+#treeMatrix.show(tree_style=ts)
