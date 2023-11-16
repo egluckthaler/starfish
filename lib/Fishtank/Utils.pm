@@ -501,7 +501,10 @@ sub Format_check_gff {
 		my ($contigID, $annotator, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $info) = split("\t", $line);
 		my $datestring = localtime();
 		die("[$datestring] error: $gffFile should be tab-separated, but likely is not\n") if (not defined $featureType);
-		die("[$datestring] error: $gffFile should only contain 'gene' features but contains $featureType\n") if ($featureType ne 'gene'); # only parse gene features
+		# only look at 'gene' features
+		next if ($featureType ne 'gene');
+		#die("[$datestring] error: $gffFile should only contain 'gene' features but contains $featureType\n") if ($featureType ne 'gene'); # only parse gene features
+		
 		$info = "\t$info"; # for helping with regex parsing
 		$info =~ m/[;\t]$NAMEFIELD([^;]+)/;
 		my $header = $1;
