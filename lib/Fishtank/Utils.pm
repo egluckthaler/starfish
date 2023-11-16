@@ -496,6 +496,7 @@ sub Format_check_gff {
 	die("Error: the namefield string $NAMEFIELD is not defined in sub Format_check_gff\n") if (not defined $NAMEFIELD);
 	
 	while (my $line = <$IN>) {
+		next if ($line =~ m/^#/);
 		chomp $line;
 		my ($contigID, $annotator, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $info) = split("\t", $line);
 		my $datestring = localtime();
