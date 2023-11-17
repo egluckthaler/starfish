@@ -23,12 +23,14 @@ Required:
 Required, with defaults:
 -s, --separator   STR    character separating genomeID from featureID.
                          (default: '_')
--n, --nameField   STR    GFF3 attribute field where gene features are named.
+-n, --nameField   STR    GFF attribute field where features are named.
                          (default: 'Name=')
+--targetFeat      STR    feature to parse from GFF file
+                         (default: mRNA)
 
 At least one pair of old and new files:
--g, --oldGff      FILE   GFF3 file of existing gene coordinates.
--G, --newGff      FILE   GFF3 file of new coordinates output by starfish annotate.
+-g, --oldGff      FILE   GFF file of existing feature coordinates.
+-G, --newGff      FILE   GFF file of new coordinates output by starfish annotate.
 -p, --oldProtein  FILE   FASTA file of existing AA sequences.
                          (matching -g)
 -P, --newProtein  FILE   FASTA file of new AA sequences output by starfish annotate.
@@ -62,6 +64,7 @@ main: {
 		'newAnn|newann|A=s',
 		'separator|s=s',
 		'nameField|namefield|n=s',
+		'targetFeat=s',
 		'outdir|o=s',
 		'force|f',
 		'noCheck|nocheck',
@@ -82,8 +85,8 @@ main: {
 
 		Format_check_fasta($opts{'oldProtein'}, $opts{'separator'}) if (defined $opts{'oldProtein'});
 		Format_check_fasta($opts{'newProtein'}, $opts{'separator'}) if (defined $opts{'newProtein'});
-		Format_check_gff($opts{'oldGff'}, $opts{'separator'}, $opts{'nameField'}) if (defined $opts{'oldGff'});
-		Format_check_gff($opts{'newGff'}, $opts{'separator'}, $opts{'nameField'}) if (defined $opts{'newGff'});
+		Format_check_gff($opts{'oldGff'}, $opts{'separator'}, $opts{'nameField'}, $opts{'targetFeat'}) if (defined $opts{'oldGff'});
+		Format_check_gff($opts{'newGff'}, $opts{'separator'}, $opts{'nameField'}, $opts{'targetFeat'}) if (defined $opts{'newGff'});
 	}
 
 	##############################
@@ -111,8 +114,8 @@ main: {
 		$datestring = localtime();
 		print "[$datestring] consolidating GFF gene coordinates from $opts{'oldGff'} and $opts{'newGff'}..\n";
 
-		my ($oldGenes) = Gff_gene_hash($opts{'oldGff'}, $opts{'nameField'});
-		my ($newGenes) = Gff_gene_hash($opts{'newGff'}, $opts{'nameField'});
+		my ($oldGenes) = Gff_gene_hash($opts{'oldGff'}, $opts{'nameField'}, $opts{'targetFeat'});
+		my ($newGenes) = Gff_gene_hash($opts{'newGff'}, $opts{'nameField'}, $opts{'targetFeat'});
 		my ($gffFileName) = fileparse($opts{'newGff'}, (".gff", ".gff3"));
 		my $gffOutput = "$opts{'outdir'}/$gffFileName.consolidated.gff";
 		Consolidate_gffs($oldGenes, $opts{'separator'}, $newGenes, $gffOutput);
@@ -322,4 +325,8 @@ sub Opts_check {
 	if (not defined $opts->{'nameField'}) {
 		$opts->{'nameField'} = 'Name=';
 	}
+	if (not defined $opts->{'targetFeat'}) {
+		$opts->{'targetFeat'} = 'mRNA';
+	}
+
 }
