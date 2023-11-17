@@ -29,8 +29,10 @@ Required:
 Required, with defaults:
 -s, --separator   STR    character separating genomeID from featureID.
                          (default: '_')
--n, --nameField   STR    GFF3 attribute field where gene features are named.
+-n, --nameField   STR    GFF attribute field where features are named.
                          (default: 'Name=')
+--targetFeat      STR    feature to parse from GFF file
+                         (default: mRNA)
 -t, --tempdir     DIR    directory for writing temporary files.
                          (default: --outdir)
 -T, --threads     INT    number of threads to use for parallel processes.
@@ -68,6 +70,7 @@ main: {
 		'idtag|i=s',
 		'gff|g=s',
 		'nameField|namefield|n=s',
+		'targetFeat=s',
 		'threads|T=i',
 		'outdir|o=s',
 		'tempdir|t=s',
@@ -183,7 +186,7 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 
 	# the sequenceIDs in the metaeuk gff output are not unique. the sequenceIDs in the metaeuk .fas ARE
 	# unique, because they include coordinate info. Parse GFF to recover the coordinates, and filter 
-	($newCount) = Print_filtered_hmm_hits("$opts{outdir}/$opts{prefix}.hmmout.ids", "$opts{outdir}/$opts{prefix}.gff", "$opts{outdir}/$opts{prefix}.fas", $opts{'separator'}, $opts{'idtag'}, $opts{'nameField'});
+	($newCount) = Print_filtered_hmm_hits("$opts{outdir}/$opts{prefix}.hmmout.ids", "$opts{outdir}/$opts{prefix}.gff", "$opts{outdir}/$opts{prefix}.fas", $opts{'separator'}, $opts{'idtag'}, $opts{'nameField'}, $opts{'targetFeat'});
 
 	#############################
 	#### ANNOTATION LIFTOVER ####
@@ -198,7 +201,7 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 		if (! -f "$opts{outdir}/$opts{prefix}.filt_intersect.fas" || ! -f "$opts{outdir}/$opts{prefix}.filt_intersect.gff" || $opts{'force'} == 1) {
 
 			$datestring = localtime();
-			print "[$datestring] lifting over overlapping gene names from GFFs in $opts{'gff'} to metaeuk annotations..\n";
+			print "[$datestring] lifting over names of overlapping feature from GFFs in $opts{'gff'} to metaeuk annotations..\n";
 			
 			my ($gffFiles) = dim_0_hash($opts{'gff'}, "\t", "1");
 			
@@ -207,20 +210,10 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 				print "[$datestring] checking formatting of GFFs in $opts{'gff'}..\n";
 				foreach my $gffFile (nsort keys %{$gffFiles}) {
 					if (! -f $gffFile) { die "\n\n[$datestring] error: could not find GFF file $gffFile in $opts{'gff'}, exiting..\n$!\n";}
-					Format_check_gff($gffFile, $opts{'separator'}, $opts{'nameField'});
+					Format_check_gff($gffFile, $opts{'separator'}, $opts{'nameField'}, $opts{'targetFeat'});
 				}
 			}
-			
-			# print a temporary GFF file containing all GFFs in $gffFiles
-# 			my $bigGFFfile = "$opts{outdir}/$opts{prefix}_bigGFF.gff";
-# 			my ($bigGFFOUT) = Open_FH($bigGFFfile);
-# 			foreach my $gffFile (nsort keys %{$gffFiles}) {
-# 				open(my $IN, '<', $gffFile) or usage("\n\n[$datestring] error: can't open $gffFile for reading\n$!\n");
-# 				while (my $line = <$IN>) {
-# 					print $bigGFFOUT $line;
-# 				}
-# 			}
-		
+					
 			# find the newly predicted genes that overlap with existing genes, and those that don't, then filter by hmm hits
 			# -wao Write the original A and B entries plus the number of base pairs of overlap between the two features. A features w/o overlap are also reported with a NULL B feature and overlap = 0.
 			system("rm $opts{outdir}/$opts{prefix}.intersect.gff") if (-f "$opts{outdir}/$opts{prefix}.intersect.gff"); # remove intersect file if it exists, because we print using '>>'
@@ -330,7 +323,7 @@ sub Parse_overlap_gff {
 }
 
 sub Print_filtered_hmm_hits {
-	my ($hmmIDfile, $gffFile, $fasFile, $SEP, $TAG, $NAMEFIELD) = @_;
+	my ($hmmIDfile, $gffFile, $fasFile, $SEP, $TAG, $NAMEFIELD, $TARGETFEAT) = @_;
 	my ($HMMseqIDs) = dim_0_hash($hmmIDfile, "\t", '0');
 	my ($PREFIX, $OUTDIR) = fileparse($fasFile, ".fas");
 	my ($gffOUT) = Open_FH("$OUTDIR/$PREFIX.filt.gff");
@@ -360,7 +353,7 @@ sub Print_filtered_hmm_hits {
 		# DK051-Scaffold13	MetaEuk	CDS	20313	20639	90	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-|94211_CDS;Parent=consp.1_660283|DK051-Scaffold13|-|94211_exon
 
 		my ($contigID, $source, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $info) = split("\t", $line);
-		next if ($featureType ne 'gene'); # only parse gene features
+		next if ($featureType ne 'gene'); # only parse gene features from the metaeuk file so you can correctly parse the sequence ID
 		my ($otherInfo, $metaeukID) = split/;/, $info;
 		$metaeukID =~ s/TCS_ID=//;
 		$metaeukID =~ s/\|\d+$//;
@@ -374,8 +367,8 @@ sub Print_filtered_hmm_hits {
 			#my $formattedCount = sprintf("%05d", $newGeneCounter);
 			my $formattedCount = $newGeneCounter;
 			my $newSeqID = "$genomeID${SEPprint}${TAG}$formattedCount";
-			# convert to standard gff format
-			print $gffOUT join("\t", $contigID, $source, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $otherInfo).";$NAMEFIELD${newSeqID}\n";
+			# convert to standard gff format, with all features corresponding to TARGETFEAT
+			print $gffOUT join("\t", $contigID, $source, $TARGETFEAT, $begin, $end, $NULL1, $strand, $NULL2, $otherInfo).";$NAMEFIELD${newSeqID}\n";
 			print $fasOUT ">$newSeqID\n$renamedSeqs{$metaeukID}\n";
 			print $idOUT "$newSeqID\t$TAG\n";
 		}
@@ -428,6 +421,9 @@ sub Opts_check {
 	}
 	if (not defined $opts->{'nameField'}) {
 		$opts->{'nameField'} = 'Name=';
+	}
+	if (not defined $opts->{'targetFeat'}) {
+		$opts->{'targetFeat'} = 'mRNA';
 	}
 	if (not defined $opts->{'threads'}) {
 		$opts->{'threads'} = 6;
