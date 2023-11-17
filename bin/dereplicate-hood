@@ -23,15 +23,17 @@ Required:
 -b, --bed           FILE   BED file of neighborhoods of interest.
                            (output by starfish sketch)
 -O, --orthologs     FILE   MCL-formatted group file of all genes in all genomes.
--g, --gff           FILE   2 column tsv: genome code, path to gene GFF.
+-g, --gff           FILE   2 column tsv: genome code, path to GFF.
 -x, --prefix        STR    prefix for naming all output files.
 -o, --outdir        DIR    output directory.
 
 Required, with defaults:
 -s, --separator     STR    character separating genomeID from featureID.
                            (default: '_')
--n, --nameField     STR    GFF3 attribute field where gene features are named.
+-n, --nameField     STR    GFF attribute field where features are named.
                            (default: 'Name=')
+--targetFeat        STR    feature to parse from GFF file
+                           (default: mRNA)
 -f, --flanking      INT    number of flanking OGs up- and downstream of
                            neighborhoods for determining region homology.
                            (default: 6)
@@ -85,6 +87,7 @@ main: {
 		'outdir|o=s',
 		'gff|g=s',
 		'nameField|namefield|n=s',
+		'targetFeat=s',
 		'separator|s=s',
 		'orthologs|O=s',
 		'flanking|f=i',
@@ -140,7 +143,7 @@ main: {
 			# need a temporary contig2gene/neighborhood2gene to be able to parse genes inside of neighborhoods with --restrict, a little annoying
 			my %neighborhood2gene;
 			foreach my $ome (keys %{$ome2gff}) {
-				my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'});
+				my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'}, $opts{'targetFeat'});
 				foreach my $contig (keys %{$gffInfo}) {
 					if (exists $contig2neighborhood->{$contig}) { # we only care about neighborhood-associated contigs for now
 						foreach my $pos (keys %{$gffInfo->{$contig}}) {
@@ -174,7 +177,7 @@ main: {
 		# parse all genes in gff and ignore any gene that overlaps with a restricted coordinate, or that doesn't have an OG with signal
 		my (%contig2gene, %gene2pos);
 		foreach my $ome (keys %{$ome2gff}) {
-			my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'});
+			my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'}, $opts{'targetFeat'});
 			foreach my $contig (keys %{$gffInfo}) {
 				foreach my $pos (keys %{$gffInfo->{$contig}}) {
 					foreach my $seqID (keys %{$gffInfo->{$contig}->{$pos}}) {
@@ -2132,6 +2135,9 @@ sub Opts_check {
 	}
 	if (not defined $opts->{'nameField'}) {
 		$opts->{'nameField'} = 'Name=';
+	}
+	if (not defined $opts->{'targetFeat'}) {
+		$opts->{'targetFeat'} = 'mRNA';
 	}
 	if (not defined $opts->{'flanking'}) {
 		$opts->{'flanking'} = 6;
