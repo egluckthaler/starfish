@@ -32,6 +32,8 @@ Required, with defaults:
                          (default: '_')
 -n, --nameField   STR    GFF3 attribute field where gene features are named.
                          (default: 'Name=')
+--targetFeat      STR    feature to parse from GFF file
+                         (default: mRNA)
 
 Optional:
 -r, --rules       FILE   tag-based rules for identifying regions of interest.
@@ -62,6 +64,7 @@ main: {
 		'prefix|x=s',
 		'outdir|o=s',
 		'nameField|namefield|n=s',
+		'targetFeat=s',
 		'annotation|a=s',
 		'rules|r=s',
 		'noCheck|nocheck',
@@ -92,9 +95,9 @@ main: {
 		if (not defined $opts{'noCheck'}) {
 			$datestring = localtime();
 			print "[$datestring] checking formatting of $ome gff..\n";
-			Format_check_gff($ome2gff->{$ome}, $opts{'separator'}, $opts{'nameField'}) if (defined $opts{'gff'});
+			Format_check_gff($ome2gff->{$ome}, $opts{'separator'}, $opts{'nameField'}, $opts{'targetFeat'}) if (defined $opts{'gff'});
 		}
-		my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'});
+		my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'}, $opts{'targetFeat'});
 		foreach my $contig (keys %{$gffInfo}) {
 			foreach my $pos (keys %{$gffInfo->{$contig}}) {
 				foreach my $seqID (nsort keys %{$gffInfo->{$contig}->{$pos}}) {
@@ -420,6 +423,9 @@ sub Opts_check {
 	}
 	if (not defined $opts->{'nameField'}) {
 		$opts->{'nameField'} = 'Name=';
+	}
+	if (not defined $opts->{'targetFeat'}) {
+		$opts->{'targetFeat'} = 'mRNA';
 	}
 	if (not defined $opts->{'force'}) {
 		$opts->{'force'} = 0;
