@@ -44,28 +44,30 @@ Parse_region_boundaries
 ####### USEFUL UNIVERSAL SUBROUTINES ########
 
 sub Gff_sortable_gene_hash {
-	my ($gffFile, $NAMEFIELD) = @_;
+	my ($gffFile, $NAMEFIELD, $TARGETFEAT) = @_;
 	my (%allGenes);
 	open(my $IN, '<', $gffFile) or die("\nError: could not open $gffFile for reading\n");
+	my $datestring = localtime();
+	print "[$datestring] parsing $gffFile for all $TARGETFEAT features and ignoring everything else..\n";
 	while (my $line = <$IN>) {
 		last if ($line =~ m/^##FASTA/);
 		next if ($line =~ m/^#/);
 		chomp $line;
 		#acquire info
 		my ($contigID, $annotator, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $info) = split("\t", $line);
-		next if ($featureType ne 'gene'); # only parse gene features
+		next if ($featureType ne $TARGETFEAT); # only parse $TARGETFEAT features
 		$info = "\t$info";
 		$info =~ m/[;\t]$NAMEFIELD([^;]+)/;
 		my $seqID = $1;
 		if (not defined $seqID) {
-			my $datestring = localtime();
+			$datestring = localtime();
 			warn("[$datestring] warning: could not parse sequenceID from $line using the provided namefield separator $NAMEFIELD\n");
 		} else {
 			$allGenes{$contigID}{$begin}{$seqID} = "$seqID\t$line"; # to conform to structure of %neighborhood hashes
 		}
 	}
-	my $datestring = localtime();
-	die("[$datestring] warning: could not parse any 'gene' features from $gffFile, but they need to exist for this program to continue\n") if (scalar keys %allGenes == 0);
+	$datestring = localtime();
+	die("[$datestring] warning: could not parse any $TARGETFEAT features from $gffFile, but they need to exist for this program to continue\n") if (scalar keys %allGenes == 0);
 	return(\%allGenes);
 }
 
@@ -298,16 +300,16 @@ sub Fasta_hash_many_files {
 }
 
 sub Gff_gene_hash {
-	my ($gffFile, $NAMEFIELD) = @_;
+	my ($gffFile, $NAMEFIELD, $TARGETFEAT) = @_;
 	my %genes;
 	die("Error: the GFF3 attribute field where gene features are named is not being passed correctly to sub GFF_hash\n") if (not defined $NAMEFIELD);
 	open (my $IN, '<', $gffFile) or die("Error: can't open $gffFile for reading\n");
 	my $datestring = localtime();
-	print "[$datestring] parsing $gffFile and skipping all features not labeled 'gene'..\n";
+	print "[$datestring] parsing $gffFile for all $TARGETFEAT features and ignoring everything else..\n";
 	while (my $line = <$IN>) {
 		chomp $line;
 		my ($contigID, $annotator, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $attributes) = split("\t", $line);
-		next if ($featureType ne 'gene'); # only parse gene features
+		next if ($featureType ne $TARGETFEAT); # only parse TARGETFEAT features
 		$attributes = "\t$attributes";
 		$attributes =~ m/[;\t]$NAMEFIELD([^;]+)/;
 		my $seqID = $1;
@@ -490,7 +492,7 @@ sub Format_check_fasta {
 }
 
 sub Format_check_gff {
-	my ($gffFile, $SEP, $NAMEFIELD) = @_;
+	my ($gffFile, $SEP, $NAMEFIELD, $TARGETFEAT) = @_;
 	open (my $IN, '<', $gffFile) or die("Error: can't open $gffFile for reading\n");
 	die("Error: the separator character $SEP is not defined in sub Format_check_gff\n") if (not defined $SEP);
 	die("Error: the namefield string $NAMEFIELD is not defined in sub Format_check_gff\n") if (not defined $NAMEFIELD);
@@ -501,9 +503,9 @@ sub Format_check_gff {
 		my ($contigID, $annotator, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $info) = split("\t", $line);
 		my $datestring = localtime();
 		die("[$datestring] error: $gffFile should be tab-separated, but likely is not\n") if (not defined $featureType);
-		# only look at 'gene' features
-		next if ($featureType ne 'gene');
-		#die("[$datestring] error: $gffFile should only contain 'gene' features but contains $featureType\n") if ($featureType ne 'gene'); # only parse gene features
+		
+		# only look at '$TARGETFEAT' features
+		next if ($featureType ne $TARGETFEAT);
 		
 		$info = "\t$info"; # for helping with regex parsing
 		$info =~ m/[;\t]$NAMEFIELD([^;]+)/;
