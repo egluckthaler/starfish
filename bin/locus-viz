@@ -60,8 +60,10 @@ Required, if --mode schematic
 
 Optional:
 -g, --gff           FILE   2 column tsv: genome code, path to GFF.
--n, --nameField     STR    GFF3 attribute field where gene features are named.
+-n, --nameField     STR    GFF attribute field where features are named.
                            (required if --gff; default: 'Name=')
+--targetFeat        STR    feature to parse from GFF file
+                           (required if --gff; default: mRNA)
 --gc                FILE   BED file with GC content per contig.
                            (e.g., output by \/utils\/seq-gc.sh)
 --tags              FILE   2 column tsv: geneID, gene tag.
@@ -106,6 +108,7 @@ main: {
 		'units=s',
 		'threads|T=i',
 		'nameField|namefield|n=s',
+		'targetFeat=s',
 		'nucmeropts=s',
 		'deltafilteropts=s',
 		'minimapopts=s',
@@ -184,7 +187,7 @@ minimap2               $opts{minimapopts} -t $opts{threads}\n\n";
 		if (defined $opts{'gff'}) {
 			my ($ome2gff) = dim_1_hash($opts{'gff'}, "\t", "0:1");
 			foreach my $ome (keys %{$ome2gff}) {
-				my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'});
+				my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'}, $opts{'targetFeat'});
 				foreach my $contig (keys %{$gffInfo}) {
 					foreach my $pos (keys %{$gffInfo->{$contig}}) {
 						foreach my $seqID (keys %{$gffInfo->{$contig}->{$pos}}) {
@@ -1144,6 +1147,9 @@ sub Opts_check {
 		usage("\nError: the file provided to --gff does not exist\n") if (! -f $opts->{'gff'});
 		if (not defined $opts->{'nameField'}) {
 			$opts->{'nameField'} = 'Name=';
+		}
+		if (not defined $opts->{'targetFeat'}) {
+			$opts->{'targetFeat'} = 'mRNA';
 		}
 	}
 	if (not defined $opts->{'upstream'}) {
