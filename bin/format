@@ -20,13 +20,15 @@ format fasta and gff files (assumes genomeIDs assigned).
 At least one of the following:
 -f, --fasta       FILE   2 column tsv: genomeID, path to fasta file to format.
                          (can specify multiple times)
--g, --gff         FILE   2 column tsv: genomeID, path to gff3 file to format.
+-g, --gff         FILE   2 column tsv: genomeID, path to GFF file to format.
 
 Required, with defaults:
 -s, --separator   STR    character separating genomeID from featureID.
                          (default: '_')
--n, --nameField   STR    GFF3 attribute field where gene features are named.
+-n, --nameField   STR    GFF attribute field where features are named.
                          (default: 'Name=')
+--targetFeat      STR    feature to parse from GFF file
+                         (default: mRNA)
 
 Optional:
 -h, --help               print more details and exit.
@@ -49,6 +51,7 @@ main: {
 		'gff|g=s',
 		'separator|s=s',
 		'nameField|namefield|n=s',
+		'targetFeat=s',
 		'h|help');
 	Opts_check(\%opts);
 
@@ -80,7 +83,7 @@ main: {
 
 		my ($gffFiles) = dim_1_hash($opts{'gff'}, "\t", "0:1");
 		foreach my $genomeID (keys %{$gffFiles}) {
-			Format_gff($genomeID, $gffFiles->{$genomeID}, $opts{'separator'}, $opts{'nameField'});
+			Format_gff($genomeID, $gffFiles->{$genomeID}, $opts{'separator'}, $opts{'nameField'}, $opts{'targetFeat'});
 		}
 	}
 
@@ -103,7 +106,7 @@ sub Format_fasta {
 }
 
 sub Format_gff {
-	my ($genomeID, $gffFile, $SEP, $NAMEFIELD) = @_;
+	my ($genomeID, $gffFile, $SEP, $NAMEFIELD, $TARGETFEAT) = @_;
 	my ($gffFileName, $gffOUTDIR, $gffSuffix) = fileparse($gffFile, (".gff", ".gff3"));
 	my ($OUT) = Open_FH("$gffOUTDIR/$gffFileName.starfish_format$gffSuffix");
 	open (my $IN, '<', $gffFile) or usage("\nError: can't open $gffFile for reading\n");
@@ -124,9 +127,9 @@ sub Format_gff {
 		my $info = join("", @fields);
 		$info =~ s/\t/_/g;
 		if (defined $featureType) {
-			next if ($featureType ne 'gene'); # only parse gene features
+			next if ($featureType ne $TARGETFEAT); # only parse target features
 			my ($newContigID) = Format_name($contigID, $genomeID, $SEP);
-			if ($info =~ m/$NAMEFIELD([^;]+)/) { # if we can't parse gene name according to the user-provide NAMEFIELD, then skip the line
+			if ($info =~ m/$NAMEFIELD([^;]+)/) { # if we can't parse target feature name according to the user-provide NAMEFIELD, then skip the line
 				my $geneName = $1;
 				my ($newGeneName) = Format_name($geneName, $genomeID, $SEP);
 				next if ($newGeneName eq 'NA');
@@ -153,7 +156,7 @@ sub Format_gff {
 	}
 	close($OUT);
 	# sanity check to confirm that gff is indeed properly formatted
-	Format_check_gff("$gffOUTDIR/$gffFileName.starfish_format$gffSuffix", $SEP, $NAMEFIELD);
+	Format_check_gff("$gffOUTDIR/$gffFileName.starfish_format$gffSuffix", $SEP, $NAMEFIELD, $TARGETFEAT);
 }
 
 sub Opts_check {
@@ -182,6 +185,9 @@ sub Opts_check {
 	}
 	if (not defined $opts->{'nameField'}) {
 		$opts->{'nameField'} = 'Name=';
+	}
+	if (not defined $opts->{'targetFeat'}) {
+		$opts->{'targetFeat'} = 'mRNA';
 	}
 	if (not defined $opts->{'force'}) {
 		$opts->{'force'} = 0;
