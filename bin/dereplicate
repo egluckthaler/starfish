@@ -22,7 +22,7 @@ situate element, site, and frag haplotypes in genomic regions using flanking ort
 Required:
 -e, --element       FILE   MCL-formatted group file with element IDs.
                            (e.g., output by starfish group)
--t, --tagged        FILE   BED or GFF3 file of genes commonly found in elements
+-t, --tagged        FILE   BED or GFF file of genes commonly found in elements
                            but not currently associated with any elements.
                            (e.g., non-captain tyrs)
 -F, --feat          FILE   elements.feat file.
@@ -30,15 +30,17 @@ Required:
 -S, --stats         FILE   named.stats file.
                            (output by starfish summarize)
 -O, --orthologs     FILE   MCL-formatted group file of all genes in all genomes.
--g, --gff           FILE   2 column tsv: genome code, path to gene GFF.
+-g, --gff           FILE   2 column tsv: genome code, path to GFF.
 -x, --prefix        STR    prefix for naming all output files.
 -o, --outdir        DIR    output directory.
 
 Required, with defaults:
 -s, --separator     STR    character separating genomeID from featureID.
                            (default: '_')
--n, --nameField     STR    GFF3 attribute field where gene features are named.
+-n, --nameField     STR    GFF attribute field where features are named.
                            (default: 'Name=')
+--targetFeat        STR    feature to parse from GFF file
+                           (default: mRNA)
 -f, --flanking      INT    number of flanking OGs up- and downstream of
                            neighborhoods for determining region homology.
                            (default: 6)
@@ -94,6 +96,7 @@ main: {
 		'tagged|t=s',
 		'gff|g=s',
 		'nameField|namefield|n=s',
+		'targetFeat=s',
 		'separator|s=s',
 		'orthologs|O=s',
 		'flanking|f=i',
@@ -139,7 +142,7 @@ main: {
 		if ($opts{'tagged'} =~ m/.bed$/) {
 			($tyr2feat, $tag2feat) = Parse_tagged_genes_from_bed($opts{'tagged'}, $captainIDs);
 		} elsif ($opts{'tagged'} =~ m/.gff[3]*$/) {
-			($tyr2feat, $tag2feat) = Parse_tagged_genes_from_gff($opts{'tagged'}, $opts{'nameField'}); # currently no way to identify tyr genes if a gff is provided
+			($tyr2feat, $tag2feat) = Parse_tagged_genes_from_gff($opts{'tagged'}, $opts{'nameField'}, $opts{'targetFeat'}); # currently no way to identify tyr genes if a gff is provided
 		} else {
 			$datestring = localtime();
 			usage("\n[$datestring] error: could not guess file type for $opts{tagged}: it should end in either .bed, .gff or .gff3\n");
@@ -2147,13 +2150,14 @@ sub Parse_tagged_genes_from_bed {
 }
 
 sub Parse_tagged_genes_from_gff {
-	my ($gffFile, $NAMEFIELD) = @_;
+	my ($gffFile, $NAMEFIELD, $TARGETFEAT) = @_;
 	my %tag2feat;
 	my $datestring = localtime();
 	open (my $IN, '<', $gffFile) or die("[$datestring] error: can't open $gffFile for reading\n");
 	while (my $line = <$IN>) {
 		chomp $line;
 		my ($contigID, $annotator, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $attributes) = split("\t", $line);
+		next if ($featureType ne $TARGETFEAT);
 		$attributes = "\t$attributes";
 		$attributes =~ m/[;\t]$NAMEFIELD([^;]+)/;
 		my $seqID = $1;
@@ -2418,9 +2422,6 @@ sub Opts_check {
 	usage("\nError: the directory provided to --outdir does not exist\n") if (! -d $opts->{'outdir'});
 	usage("\nError: please provide a file to --element\n") if (not defined $opts->{'element'});
 	usage("\nError: the file provided to --element does not exist\n") if (! -f $opts->{'element'});
-	if (not defined $opts->{'nameField'}) {
-		$opts->{'nameField'} = 'Name=';
-	}
 	usage("\nError: please provide a file to --orthologs\n") if (not defined $opts->{'orthologs'});
 	usage("\nError: the file provided to --orthologs does not exist\n") if (! -f $opts->{'orthologs'});
 	usage("\nError: please provide a file to --gff\n") if (not defined $opts->{'gff'});
@@ -2474,6 +2475,12 @@ sub Opts_check {
 		usage("\nError: the separator character cannot be ';'\n");
 	} elsif ($opts->{'separator'} eq '|') {
 		usage("\nError: the separator character cannot be '|'\n");
+	}
+	if (not defined $opts->{'nameField'}) {
+		$opts->{'nameField'} = 'Name=';
+	}
+	if (not defined $opts->{'targetFeat'}) {
+		$opts->{'targetFeat'} = 'mRNA';
 	}
 	if (defined $opts->{'separator'}) {
 		$opts->{'separator'} = quotemeta($opts->{'separator'});	# to allow splitting on special characters, like '.'
