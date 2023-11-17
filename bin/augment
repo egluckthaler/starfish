@@ -33,8 +33,10 @@ Required, if --mode region:
 Required, with defaults:
 -s, --separator   STR    character separating genomeID from featureID.
                          (default: '_')
--n, --nameField   STR    GFF3 attribute field where gene features will be named.
+-n, --nameField   STR    GFF attribute field where features are named.
                          (default: 'Name=')
+--targetFeat      STR    feature to parse from GFF file
+                         (default: mRNA)
 -T, --threads     INT    number of threads to use for parallel processes.
                          (default: 6)                         
 --metaeukopts     STR    options to pass to metaeuk easy-predict.
@@ -75,6 +77,7 @@ main: {
 		'bed|b=s',
 		'threads|T=i',
 		'nameField|namefield|n=s',
+		'targetFeat=s',
 		'outdir|o=s',
 		'mappings=s',
 		'noCheck|nocheck',
@@ -214,7 +217,7 @@ metaeuk        $opts{'metaeukopts'}\n\n";
 
 	# the sequenceIDs in the metaeuk gff output are not unique. the sequenceIDs in the metaeuk .fas ARE
 	# unique, because they include coordinate info. Parse GFF to recover the coordinates
-	Rename_sequence_hits("$opts{outdir}/$opts{prefix}.augmented_contigs_raw.gff", "$opts{outdir}/$opts{prefix}.augmented_contigs_raw.fas", $opts{'separator'}, $opts{'idtag'}, $opts{'nameField'});
+	Rename_sequence_hits("$opts{outdir}/$opts{prefix}.augmented_contigs_raw.gff", "$opts{outdir}/$opts{prefix}.augmented_contigs_raw.fas", $opts{'separator'}, $opts{'idtag'}, $opts{'nameField'}, $opts{'targetFeat'});
 
 	##########################################
 	#### FIND OVERLAP WITH EXISTING GENES ####
@@ -244,9 +247,9 @@ metaeuk        $opts{'metaeukopts'}\n\n";
 		}
 	}
 	
-	# Sort GFF of unique genes by contig and gene coordinate
+	# Sort GFF of unique $opts{'targetFeat'} features by contig and gene coordinate
 	# structured: $allGenes{$contig}{$begin}{$seqID} = $seqID\t$gffLine;
-	my ($allGenes) = Gff_sortable_gene_hash($finalGFF, $opts{'nameField'});
+	my ($allGenes) = Gff_sortable_gene_hash($finalGFF, $opts{'nameField'}, $opts{'targetFeat'});
 	
 	# retrieve the database entry associated with each newly predicted gene
 	# also retrieve all GFF line info out of convenience
@@ -436,7 +439,7 @@ sub Populate_regions {
 }
 
 sub Rename_sequence_hits {
-	my ($gffFile, $fasFile, $SEP, $TAG, $NAMEFIELD) = @_;
+	my ($gffFile, $fasFile, $SEP, $TAG, $NAMEFIELD, $TARGETFEAT) = @_;
 	my ($PREFIX, $OUTDIR) = fileparse($fasFile, ".augmented_contigs_raw.fas");
 	my ($gffOUT) = Open_FH("$OUTDIR/$PREFIX.augmented_contigs_renamed.gff");
 	my ($fasOUT) = Open_FH("$OUTDIR/$PREFIX.augmented_contigs_renamed.fas");
@@ -467,9 +470,9 @@ sub Rename_sequence_hits {
 		next if ($line =~ m/^#/);
 		chomp $line;
 
-		# some metaeuk gffs have the source and feature fields reversed according to gff specifications
+		# some metaeuk gffs have the source and feature fields reversed according to gff specifications, but it seems like this bug was corrected
 		my ($contigID, $source, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $info) = split("\t", $line);
-		next if ($featureType ne 'gene'); # only parse gene features
+		next if ($featureType ne 'gene'); # only parse gene features from the metaeuk file so you can correctly parse the sequence ID
 		my ($otherInfo, $metaeukID) = split/;/, $info;
 		$metaeukID =~ s/TCS_ID=//;
 		my ($field1, $field2, $field3) = split/\|/, $metaeukID;
@@ -483,8 +486,8 @@ sub Rename_sequence_hits {
 		#my $formattedCount = sprintf("%05d", $newGeneCounter);
 		my $formattedCount = $newGeneCounter;
 		my $newSeqID = "$genomeID${SEPprint}${TAG}$formattedCount";
-		# convert to standard gff format
-		print $gffOUT join("\t", $contigID, $source, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $otherInfo).";$NAMEFIELD${newSeqID}\n";
+			# convert to standard gff format, with all features corresponding to TARGETFEAT
+		print $gffOUT join("\t", $contigID, $source, $TARGETFEAT, $begin, $end, $NULL1, $strand, $NULL2, $otherInfo).";$NAMEFIELD${newSeqID}\n";
 		print $fasOUT ">$newSeqID\n$renamedSeqs{$metaeukID}\n";
 	}
 }
@@ -530,6 +533,9 @@ sub Opts_check {
 	}
 	if (not defined $opts->{'nameField'}) {
 		$opts->{'nameField'} = 'Name=';
+	}
+	if (not defined $opts->{'targetFeat'}) {
+		$opts->{'targetFeat'} = 'mRNA';
 	}
 	if (not defined $opts->{'threads'}) {
 		$opts->{'threads'} = 6;
