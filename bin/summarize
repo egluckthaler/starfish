@@ -33,8 +33,10 @@ Optional:
 -f, --flank       FILE   singleDR.stats file.
                          (output by starfish flank)
 -g, --gff         FILE   2 column tsv: genome code, path to GFF.
--n, --nameField   STR    GFF3 attribute field where gene features are named.
+-n, --nameField   STR    GFF attribute field where features are named.
                          (default: 'Name=')
+--targetFeat      STR    feature to parse from GFF file
+                         (default: mRNA)
 -A, --ann         FILE   3 column tsv: sequenceID, fieldID, annotation.
                          (for ann field in --bed)
 -t, --tag         FILE   2 column tsv: sequenceID, tag.
@@ -63,6 +65,7 @@ main: {
 		'prefix|x=s',
 		'outdir|o=s',
 		'nameField|namefield|n=s',
+		'targetFeat=s',
 		'gff|g=s',
 		'ann|A=s',
 		'tag|t=s',
@@ -106,7 +109,7 @@ main: {
 		if (defined $opts{'gff'}) {
 			my ($ome2gff) = dim_1_hash($opts{'gff'}, "\t", "0:1");
 			foreach my $ome (keys %{$ome2gff}) {
-				my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'});
+				my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'}, $opts{'targetFeat'});
 				foreach my $contig (keys %{$gffInfo}) {
 					foreach my $pos (keys %{$gffInfo->{$contig}}) {
 						foreach my $seqID (nsort keys %{$gffInfo->{$contig}->{$pos}}) {
@@ -892,5 +895,8 @@ sub Opts_check {
 	}
 	if (not defined $opts->{'nameField'}) {
 		$opts->{'nameField'} = 'Name=';
+	}
+	if (not defined $opts->{'targetFeat'}) {
+		$opts->{'targetFeat'} = 'mRNA';
 	}
 }
