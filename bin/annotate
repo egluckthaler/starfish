@@ -280,7 +280,7 @@ sub Print_overlapping_names {
 		next if ($line =~ m/^#/);
 		chomp $line;
 		my ($contigID, $annotator, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $info) = split("\t", $line);
-		next if ($featureType ne 'gene'); # only parse gene features
+		next if ($featureType ne $IDTAG); # only parse IDTAG features
 		my ($otherInfo, $metaInfo) = split/;/, $info;
 		$metaInfo =~ m/$NAMEFIELD(.+)$/;
 		my $metaSeqID = $1;
