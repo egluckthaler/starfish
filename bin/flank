@@ -31,7 +31,7 @@ usage: starfish flank [args]
 annotate flanking repeats at element boundaries.
 
 Required:
--a, --assembly    FILE   2 column tsv: assembly name, path to assembly FASTA.
+-a, --assembly    FILE   2 column tsv: genomeID, path to assembly FASTA.
 -b, --bed         FILE   BED file with insert features of mobile elements.
                          (output by starfish insert)
 -x, --prefix      STR    prefix for naming all output files.

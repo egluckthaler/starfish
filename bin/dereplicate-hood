@@ -23,7 +23,7 @@ Required:
 -b, --bed           FILE   BED file of neighborhoods of interest.
                            (output by starfish sketch)
 -O, --orthologs     FILE   MCL-formatted group file of all genes in all genomes.
--g, --gff           FILE   2 column tsv: genome code, path to GFF.
+-g, --gff           FILE   2 column tsv: genomeID, path to GFF.
 -x, --prefix        STR    prefix for naming all output files.
 -o, --outdir        DIR    output directory.
 

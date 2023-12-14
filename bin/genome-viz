@@ -21,7 +21,7 @@ visualize elements and sites in a genome with circos.
 
 Required:
 -m, --mode        STR    genomes to visualize, either 'all' or 'single'.
--a, --assembly    FILE   2 column tsv: genome code, path to assembly FASTA.
+-a, --assembly    FILE   2 column tsv: genomeID, path to assembly FASTA.
 -b, --bed         FILE   BED file with feature coordinates of mobile elements. 
 -o, --outdir      DIR    output directory.
 

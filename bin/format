@@ -8,19 +8,19 @@ use Sort::Naturally;
 use FileHandle;
 $|=1;
 # glofish lib
-use Fishtank::Utils qw(Fasta_hash_nospace dim_1_hash Open_FH Format_check_fasta Format_check_gff Format_name);
+use Fishtank::Utils qw(Fasta_hash_nospace dim_1_hash Open_FH Format_check_fasta Format_check_gff Gff_gene_hash Format_name);
 
 sub usage {
 	my $message = shift;
 	my $usage = qq/
 usage: starfish format [args]
 
-format fasta and gff files (assumes genomeIDs assigned).
+format fasta and gff files and databases (assumes genomeIDs assigned).
 
 At least one of the following:
--f, --fasta       FILE   2 column tsv: genomeID, path to fasta file to format.
-                         (can specify multiple times)
--g, --gff         FILE   2 column tsv: genomeID, path to GFF file to format.
+-a, --assembly    FILE   2 column tsv: genomeID, path to assembly FASTA.
+-p, --protein     FILE   2 column tsv: genomeID, path to protein FASTA.
+-g, --gff         FILE   2 column tsv: genomeID, path to GFF.
 
 Required, with defaults:
 -s, --separator   STR    character separating genomeID from featureID.
@@ -31,6 +31,11 @@ Required, with defaults:
                          (default: mRNA)
 
 Optional:
+--check                  check file formatting and skip reformatting
+--truncate               truncate sequence headers to max 50 chars
+--gffdb           FILE   print concatenated gffs to FILE
+--assemblydb      STR    create a blastn database with prefix STR
+--proteindb       STR    create a blastp database with prefix STR
 -h, --help               print more details and exit.
 
 /;
@@ -47,43 +52,223 @@ main: {
 	# parse and check options
 	my %opts;
 	GetOptions(\%opts, 
-		'fasta|f=s@',
+		'assembly|a=s',
+		'protein|p=s',
 		'gff|g=s',
 		'separator|s=s',
 		'nameField|namefield|n=s',
 		'targetFeat=s',
+		'truncate',
+		'gffdb',
+		'assemblydb',
+		'proteindb',
+		'check',
 		'h|help');
 	Opts_check(\%opts);
 
-	#########################
-	#### REFORMAT FASTAS ####
-	#########################
+	# check dependencies
+	my @commandlines = ("makeblastdb");
+	Commandline_check(\@commandlines);
 
-	if (defined $opts{'fasta'}) {
+	# need to check that all headers in assembly and protein fastas are found in gff and vice versa 
+	my (%assemblyHeaders, %proteinHeaders, %gffFeatureHeaders, %gffContigHeaders);
+
+	##################################
+	#### DO STUFF WITH ASSEMBLIES ####
+	##################################
+
+	if (defined $opts{'assembly'}) {
 
 		my $datestring = localtime();
-		print "[$datestring] reformatting fasta headers..\n";
+		print "[$datestring] reformatting assembly sequence headers..\n";
 
-		foreach my $fastaFilePath (@{$opts{'fasta'}}) {
-			my ($fastaFiles) = dim_1_hash($fastaFilePath, "\t", "0:1");
-			foreach my $genomeID (keys %{$fastaFiles}) {
-				Format_fasta($genomeID, $fastaFiles->{$genomeID}, $opts{'separator'});
+		my @fastadb;
+		my ($fastaFiles) = dim_1_hash(opts{'assembly'}, "\t", "0:1");
+		foreach my $genomeID (keys %{$fastaFiles}) {
+			if (defined $opts{'check'}) {
+				Format_check_fasta($fastaFiles->{$genomeID}, $opts{'separator'});
+				push @fastadb, $fastaFiles->{$genomeID};
+				my ($seqs) = Fasta_hash_nospace($fastaFiles->{$genomeID});
+				foreach my $header (keys %{$seqs}) {	
+					$assemblyHeaders{$header} = 1;
+				}		
+			} else {
+				my ($newFasta) = Format_fasta($genomeID, $fastaFiles->{$genomeID}, $opts{'separator'}, $opts{'truncate'});
+				push @fastadb, $newFasta;
+				my ($seqs) = Fasta_hash_nospace($newFasta);
+				foreach my $header (keys %{$seqs}) {	
+					$assemblyHeaders{$header} = 1;
+				}		
 			}
 		}
+
+		# its sometimes useful to automate the creation of a blast database
+		if (defined $opts{'assemblydb'}) {
+			$datestring = localtime();
+			print "[$datestring] creating blastn database of assemblies here: $opts{'assemblydb'}\n";			
+			my $firstFile = 0;
+			foreach my $fastaFile (@fastadb) {
+				if (-f $fastaFile) {
+					if ($firstFile == 0) {
+						$firstFile = 1;
+						system("cat $fastaFile > $opts{'assemblydb'}.fna");
+					} else {
+						system("cat $fastaFile >> $opts{'assemblydb'}.fna");
+					}
+				} else {
+					warn("warning: $fastaFile does not exist so can't add it to blastn database\n");
+				}
+			}
+			my ($failCheck) = system("makeblastdb -dbtype nucl -parse_seqids -in $opts{'assemblydb'}.fna -out $opts{'assemblydb'}");
+			if ($failCheck != 0) { warn("\n\n[$datestring] warning: could not execute makeblastdb on commandline, skipping creating of blastn database of assemblies..\n$!\n");}
+			system("rm $opts{'assemblydb'}.fna");
+		}
 	} 
-	
-	#######################
-	#### REFORMAT GFFS ####
-	#######################
+
+	#################################
+	#### DO STUFF WITH PROTEOMES ####
+	#################################
+
+	if (defined $opts{'protein'}) {
+
+		my $datestring = localtime();
+		print "[$datestring] reformatting protein sequence headers..\n";
+
+		my @fastadb;
+		my ($fastaFiles) = dim_1_hash(opts{'protein'}, "\t", "0:1");
+		foreach my $genomeID (keys %{$fastaFiles}) {
+			if (defined $opts{'check'}) {
+				Format_check_fasta($fastaFiles->{$genomeID}, $opts{'separator'});
+				push @fastadb, $fastaFiles->{$genomeID};
+				my ($seqs) = Fasta_hash_nospace($fastaFiles->{$genomeID});
+				foreach my $header (keys %{$seqs}) {	
+					$proteinHeaders{$header} = 1;
+				}		
+		} else {
+				my ($newFasta) = Format_fasta($genomeID, $fastaFiles->{$genomeID}, $opts{'separator'}, $opts{'truncate'});
+				push @fastadb, $newFasta;
+				my ($seqs) = Fasta_hash_nospace($newFasta);
+				foreach my $header (keys %{$seqs}) {	
+					$proteinHeaders{$header} = 1;
+				}		
+			}
+		}
+
+		# its sometimes useful to automate the creation of a blast database
+		if (defined $opts{'proteindb'}) {
+			$datestring = localtime();
+			print "[$datestring] creating blastp database of proteins here: $opts{'proteindb'}\n";			
+			my $firstFile = 0;
+			foreach my $fastaFile (@fastadb) {
+				if (-f $fastaFile) {
+					if ($firstFile == 0) {
+						$firstFile = 1;
+						system("cat $fastaFile > $opts{'proteindb'}.faa");
+					} else {
+						system("cat $fastaFile >> $opts{'proteindb'}.faa");
+					}
+				} else {
+					warn("warning: $fastaFile does not exist so can't add it to blastn database\n");
+				}
+			}
+			my ($failCheck) = system("makeblastdb -dbtype prot -parse_seqids -in $opts{'proteindb'}.faa -out $opts{'proteindb'}");
+			if ($failCheck != 0) { warn("\n\n[$datestring] warning: could not execute makeblastdb on commandline, skipping creating of blastp database of proteins..\n$!\n");}
+			system("rm $opts{'proteindb'}.faa");
+		}
+	} 
+
+	############################
+	#### DO STUFF WITH GFFS ####
+	############################
 
 	if (defined $opts{'gff'}) {
 
 		my $datestring = localtime();
 		print "[$datestring] reformatting gff featureIDs..\n";
 
+		my @gffdb;
 		my ($gffFiles) = dim_1_hash($opts{'gff'}, "\t", "0:1");
 		foreach my $genomeID (keys %{$gffFiles}) {
-			Format_gff($genomeID, $gffFiles->{$genomeID}, $opts{'separator'}, $opts{'nameField'}, $opts{'targetFeat'});
+			if (defined $opts{'check'}) {
+				Format_check_gff($gffFiles->{$genomeID},$opts{'separator'}, $opts{'nameField'}, $opts{'targetFeat'});
+				push @gffdb, $gffFiles->{$genomeID};
+				my ($gffInfo) = Gff_gene_hash($gffFiles->{$genomeID}, $opts{'nameField'}, $opts{'targetFeat'});
+				foreach my $contigID (keys %{$gffInfo}) {
+					$gffContigHeaders{$contigID} = 1;
+					foreach my $featureID (keys %{$gffInfo}) {
+						$gffFeatureHeaders{$featureID} = 1;
+					}
+				}
+			} else {
+				my ($newGff) = Format_gff($genomeID, $gffFiles->{$genomeID}, $opts{'separator'}, $opts{'nameField'}, $opts{'targetFeat'});
+				push @gffdb, $newGff;
+				my ($gffInfo) = Gff_gene_hash($newGff, $opts{'nameField'}, $opts{'targetFeat'});
+				foreach my $contigID (keys %{$gffInfo}) {
+					$gffContigHeaders{$contigID} = 1;
+					foreach my $featureID (keys %{$gffInfo}) {
+						$gffFeatureHeaders{$featureID} = 1;
+					}
+				}
+			}
+		}
+
+		# its sometimes useful to automate the printing of a concatenated gff file
+		if (defined $opts{'gffdb'}) {
+			$datestring = localtime();
+			print "[$datestring] printing concatenated gff to $opts{'gffdb'}\n";			
+			my $firstFile = 0;
+			foreach my $gffFile (@gffdb) {
+				if (-f $gffFile) {
+					if ($firstFile == 0) {
+						$firstFile = 1;
+						system("cat $gffFile > $opts{'gffdb'}");
+					} else {
+						system("cat $gffFile >> $opts{'gffdb'}");
+					}
+				} else {
+					warn("warning: $gffFile does not exist so can't add it to concatenated GFF\n");
+				}
+			}
+		}
+	}
+
+	######################
+	####SANITY CHECKS ####
+	######################
+
+	# after reformatting, need to check that all headers in assembly and protein fastas are found in gff and vice versa 
+
+	# compare assembly headers in fasta to contig headers in gff and vice versa
+	if (scalar keys %assemblyHeaders > 0 && scalar keys %gffContigHeaders > 0) {
+		my $datestring = localtime();
+		print "[$datestring] comparing contigIDs in assembly fastas to contigIDs in gffs and vice versa to ensure all are reciprocally present\n";
+		my ($fastaUnique, $gffUnique) = compare_hashes(\%assemblyHeaders, \%gffContigHeaders);
+		if (keys %{$fastaUnique} > 0) {
+			foreach my $header (keys %{$fastaUnique}) {
+				warn("warning: the sequenceID $header in a provided assembly fasta has no associated entries in any of the provided gff files\n");
+			}
+		}
+		if (keys %{$gffUnique} > 0) {
+			foreach my $header (keys %{$gffUnique}) {
+				warn("warning: the sequenceID $header in a provided gff file has no associated entries in any of the provided assembly fastas\n");
+			}
+		}
+	}
+
+	# compare protein headers in fasta to feature headers in gff and vice versa
+	if (scalar keys %proteinHeaders > 0 && scalar keys %gffFeatureHeaders > 0) {
+		my $datestring = localtime();
+		print "[$datestring] comparing sequenceIDs in protein fastas to sequenceIDs in gffs and vice versa to ensure all are reciprocally present\n";
+		my ($fastaUnique, $gffUnique) = compare_hashes(\%proteinHeaders, \%gffFeatureHeaders);
+		if (keys %{$fastaUnique} > 0) {
+			foreach my $header (keys %{$fastaUnique}) {
+				warn("warning: the sequenceID $header in a provided protein fasta has no associated entries in any of the provided gff files\n");
+			}
+		}
+		if (keys %{$gffUnique} > 0) {
+			foreach my $header (keys %{$gffUnique}) {
+				warn("warning: the sequenceID $header in a provided gff file has no associated entries in any of the provided protein fastas\n");
+			}
 		}
 	}
 
@@ -91,24 +276,47 @@ main: {
 	print "[$datestring] done\n";
 }
 
+sub compare_hashes {
+    my ($hash1, $hash2) = @_;
+
+    # Hashes to store unique keys
+    my %unique_in_hash1 = %$hash1;
+    my %unique_in_hash2 = %$hash2;
+
+    # Check each key in hash1
+    foreach my $key (keys %$hash1) {
+        delete $unique_in_hash2{$key} if exists $hash2->{$key};
+    }
+
+    # Check each key in hash2
+    foreach my $key (keys %$hash2) {
+        delete $unique_in_hash1{$key} if exists $hash1->{$key};
+    }
+
+    return (\%unique_in_hash1, \%unique_in_hash2);
+}
+
 sub Format_fasta {
-	my ($genomeID, $fastaFile, $SEP) = @_;
+	my ($genomeID, $fastaFile, $SEP, $TRUNCATE) = @_;
 	my ($fastaFileName, $fastaOUTDIR, $fastaSuffix) = fileparse($fastaFile, (".aa.fa", ".faa", ".fas", ".filtered.fa", ".fa", ".fasta", ".fna"));
-	my ($OUT) = Open_FH("$fastaOUTDIR/$fastaFileName.starfish_format$fastaSuffix");
+	my $newFasta = "$fastaOUTDIR/$fastaFileName.starfish_format$fastaSuffix";
+	my ($OUT) = Open_FH($newFasta);
 	my ($seqs) = Fasta_hash_nospace($fastaFile);
 	foreach my $header (keys %{$seqs}) {
-		my ($newName) = Format_name($header, $genomeID, $SEP);
+		my ($newName) = Format_name($header, $genomeID, $SEP, $TRUNCATE);
 		print $OUT ">$newName\n$seqs->{$header}\n";
 	}
 	close($OUT);
 	# sanity check to confirm that fasta is indeed properly formatted
-	Format_check_fasta("$fastaOUTDIR/$fastaFileName.starfish_format$fastaSuffix", $SEP);
+	Format_check_fasta($newFasta, $SEP);
+	return($newFasta);
 }
 
 sub Format_gff {
-	my ($genomeID, $gffFile, $SEP, $NAMEFIELD, $TARGETFEAT) = @_;
+	my ($genomeID, $gffFile, $SEP, $NAMEFIELD, $TARGETFEAT, $TRUNCATE) = @_;
 	my ($gffFileName, $gffOUTDIR, $gffSuffix) = fileparse($gffFile, (".gff", ".gff3"));
-	my ($OUT) = Open_FH("$gffOUTDIR/$gffFileName.starfish_format$gffSuffix");
+	my $newGff = "$gffOUTDIR/$gffFileName.starfish_format$gffSuffix";
+	my ($OUT) = Open_FH($newGff);
 	open (my $IN, '<', $gffFile) or usage("\nError: can't open $gffFile for reading\n");
 	while (my $line = <$IN>) {
 		next if ($line =~ m/^#/);
@@ -128,10 +336,10 @@ sub Format_gff {
 		$info =~ s/\t/_/g;
 		if (defined $featureType) {
 			next if ($featureType ne $TARGETFEAT); # only parse target features
-			my ($newContigID) = Format_name($contigID, $genomeID, $SEP);
+			my ($newContigID) = Format_name($contigID, $genomeID, $SEP, $TRUNCATE);
 			if ($info =~ m/$NAMEFIELD([^;]+)/) { # if we can't parse target feature name according to the user-provide NAMEFIELD, then skip the line
 				my $geneName = $1;
-				my ($newGeneName) = Format_name($geneName, $genomeID, $SEP);
+				my ($newGeneName) = Format_name($geneName, $genomeID, $SEP, $TRUNCATE);
 				next if ($newGeneName eq 'NA');
 				$info =~ s/$geneName/$newGeneName/g;
 				($begin, $end) = ($end, $begin) if ($begin > $end); # many tools require begin coordinate to be < end coordinate, as expected
@@ -141,7 +349,7 @@ sub Format_gff {
 				$info =~ m/locus_tag=[^_]+_([^;]+)/;
 				my $locustag = $1;
 				my $geneName = "${biotype}${locustag}";
-				my ($newGeneName) = Format_name($geneName, $genomeID, $SEP);
+				my ($newGeneName) = Format_name($geneName, $genomeID, $SEP, $TRUNCATE);
 				next if ($newGeneName eq 'NA');
 				($begin, $end) = ($end, $begin) if ($begin > $end); # many tools require begin coordinate to be < end coordinate, as expected
 				print $OUT "$newContigID\t$annotator\t$featureType\t$begin\t$end\t$NULL1\t$strand\t$NULL2\t$info;$NAMEFIELD=$newGeneName\n";
@@ -156,7 +364,8 @@ sub Format_gff {
 	}
 	close($OUT);
 	# sanity check to confirm that gff is indeed properly formatted
-	Format_check_gff("$gffOUTDIR/$gffFileName.starfish_format$gffSuffix", $SEP, $NAMEFIELD, $TARGETFEAT);
+	Format_check_gff($newGff, $SEP, $NAMEFIELD, $TARGETFEAT);
+	return($newGff);
 }
 
 sub Opts_check {
@@ -178,10 +387,23 @@ sub Opts_check {
 	if (defined $opts->{'gff'}) {
 		usage("\nError: the file provided to --gff does not exist\n") if (! -f $opts->{'gff'});
 	}
-	if (defined $opts->{'fasta'}) {
-		foreach my $fastaFilePath (@{$opts->{'fasta'}}) {
-			usage("\nError: the file $fastaFilePath provided to --fasta does not exist\n") if (! -f $fastaFilePath);
-		}
+	if (defined $opts->{'assembly'}) {
+		usage("\nError: the file provided to --assembly does not exist\n") if (! -f $opts->{'assembly'});
+	}
+	if (defined $opts->{'protein'}) {
+		usage("\nError: the file provided to --protein does not exist\n") if (! -f $opts->{'protein'});
+	}
+	if (defined $opts->{'gffdb'}) {
+		my ($filename, $OUTDIR) = fileparse($opts->{'gffdb'});
+		usage("\nError: the directory associated with the file provided to --gffdb does not exist\n") if (! -d $OUTDIR);
+	}
+	if (defined $opts->{'assemblydb'}) {
+		my ($filename, $OUTDIR) = fileparse($opts->{'assemblydb'});
+		usage("\nError: the directory associated with the prefix provided to --assemblydb does not exist\n") if (! -d $OUTDIR);
+	}
+	if (defined $opts->{'proteindb'}) {
+		my ($filename, $OUTDIR) = fileparse($opts->{'proteindb'});
+		usage("\nError: the directory associated with the prefix provided to --proteindb does not exist\n") if (! -d $OUTDIR);
 	}
 	if (not defined $opts->{'nameField'}) {
 		$opts->{'nameField'} = 'Name=';

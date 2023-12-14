@@ -24,7 +24,7 @@ Required:
 -t, --type          STR    subject sequence type, either 'element' or 'empty'.
                            (queries are always elements)
 -A, --aligner       STR    alignment software to use, either 'mafft' or 'nucmer'.
--a, --assembly      FILE   2 column tsv: genome code, path to assembly FASTA.
+-a, --assembly      FILE   2 column tsv: genomeID, path to assembly FASTA.
 -b, --bed           FILE   BED file with feature coordinates of mobile elements.
                            (output by starfish summarize)
 -o, --outdir        DIR    output directory.

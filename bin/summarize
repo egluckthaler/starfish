@@ -18,7 +18,7 @@ usage: starfish summarize [args]
 pick element boundaries, identify overlaps, and name sites.
 
 Required:
--a, --assembly    FILE   2 column tsv: assembly name, path to assembly FASTA.
+-a, --assembly    FILE   2 column tsv: genomeID, path to assembly FASTA.
 -b, --bed         FILE   BED file with feature coordinates of mobile elements.
 -x, --prefix      STR    prefix for naming all output files.
 -o, --outdir      DIR    output directory.

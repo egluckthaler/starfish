@@ -26,10 +26,10 @@ Required:
 -o, --outdir        DIR    output directory.
 
 Required, if --type nucl:
--a, --assembly      FILE   2 column tsv: genome code, path to assembly FASTA.
+-a, --assembly      FILE   2 column tsv: genomeID, path to assembly FASTA.
 
 Required, if --type prot:
--p, --protein       FILE   2 column tsv: genome code, path to protein FASTA.
+-p, --protein       FILE   2 column tsv: genomeID, path to protein FASTA.
 
 Required, with defaults:
 --kmer              STR    k-mer size for sourmash.

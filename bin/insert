@@ -26,7 +26,7 @@ usage: starfish insert [args]
 predict element boundaries and insertion sites. 
  
 Required:
--a, --assembly      FILE   2 column tsv: genome code, path to assembly FASTA.
+-a, --assembly      FILE   2 column tsv: genomeID, path to assembly FASTA.
 -d, --database      PATH   BLAST database containing all assemblies in --assembly.
 -b, --bed           FILE   BED file with coordinates of candidate captains.
                            (output by starfish sketch)

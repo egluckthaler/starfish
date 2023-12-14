@@ -474,19 +474,21 @@ sub Format_check_fasta {
 	if (ref $fastaFile eq ref {}) { # check if provided variable is a hash
 		foreach my $header (keys %{$fastaFile}) {
 			my $datestring = localtime();
-			die("[$datestring] error: sequenceID $header in the provided Fasta hash contains a '|' character, but should not for parsing purposes. Please remove all '|' from all sequence IDs\n") if ($header =~ m/\|/);
+			warn("[$datestring] warning: $header in the provided fasta is longer than 50 characters, which could cause problems downstream\n") if (length($header) > 50);
+			warn("[$datestring] warning: sequenceID $header in the provided fasta contains a '|' character, but should not for parsing purposes. Please remove all '|' from all sequence IDs\n") if ($header =~ m/\|/);
 			my @components = split/$SEP/, $header;
-			die("[$datestring] error: $header in the provided Fasta hash is being parsed into >2 components using separator \'$SEP\'. Make sure ALL sequence headers are formatted like <genomeID><separator><featureID>\n") if (scalar @components > 2);
-			die("[$datestring] error: $header in the provided Fasta hash is being parsed into <2 components using separator \'$SEP\'. Make sure ALL sequence headers are formatted like <genomeID><separator><featureID>\n") if (scalar @components < 2);
+			warn("[$datestring] warning: $header in the provided fasta is being parsed into >2 components using separator \'$SEP\'. Make sure ALL sequence headers are formatted like <genomeID><separator><featureID>\n") if (scalar @components > 2);
+			warn("[$datestring] warning: $header in the provided fasta is being parsed into <2 components using separator \'$SEP\'. Make sure ALL sequence headers are formatted like <genomeID><separator><featureID>\n") if (scalar @components < 2);
 		}
 	} else {
 		my ($seqs) = Fasta_hash_nospace($fastaFile);
 		foreach my $header (keys %{$seqs}) {
 			my $datestring = localtime();
-			die("[$datestring] error: sequenceID $header in $fastaFile contains a '|' character, but should not for parsing purposes. Please remove all '|' from all sequence IDs\n") if ($header =~ m/\|/);
+			warn("[$datestring] warning: $header in $fastaFile is longer than 50 characters, which could cause problems downstream\n") if (length($header) > 50);
+			warn("[$datestring] warning: sequenceID $header in $fastaFile contains a '|' character, but should not for parsing purposes. Please remove all '|' from all sequence IDs\n") if ($header =~ m/\|/);
 			my @components = split/$SEP/, $header;
-			die("[$datestring] error: $header in $fastaFile is being parsed into >2 components using separator \'$SEP\'. Make sure ALL sequence headers are formatted like <genomeID><separator><featureID>\n") if (scalar @components > 2);
-			die("[$datestring] error: $header in $fastaFile is being parsed into <2 components using separator \'$SEP\'. Make sure ALL sequence headers are formatted like <genomeID><separator><featureID>\n") if (scalar @components < 2);
+			warn("[$datestring] warning: $header in $fastaFile is being parsed into >2 components using separator \'$SEP\'. Make sure ALL sequence headers are formatted like <genomeID><separator><featureID>\n") if (scalar @components > 2);
+			warn("[$datestring] warning: $header in $fastaFile is being parsed into <2 components using separator \'$SEP\'. Make sure ALL sequence headers are formatted like <genomeID><separator><featureID>\n") if (scalar @components < 2);
 		}
 	}
 }
@@ -512,16 +514,16 @@ sub Format_check_gff {
 		my $header = $1;
 		if (defined $header) {
 			my @components = split/$SEP/, $header;
-			die("[$datestring] error: $header on line $line in $gffFile is being parsed into >2 components using separator \'$SEP\'. Make sure ALL gene feature names are formatted like <genomeID><separator><featureID>\n") if (scalar @components > 2);
-			die("[$datestring] error: $header on line $line in $gffFile is being parsed into <2 components using separator \'$SEP\'. Make sure ALL gene feature names are formatted like <genomeID><separator><featureID>\n") if (scalar @components < 2);
+			warn("[$datestring] error: $header on line $line in $gffFile is being parsed into >2 components using separator \'$SEP\'. Make sure ALL gene feature names are formatted like <genomeID><separator><featureID>\n") if (scalar @components > 2);
+			warn("[$datestring] error: $header on line $line in $gffFile is being parsed into <2 components using separator \'$SEP\'. Make sure ALL gene feature names are formatted like <genomeID><separator><featureID>\n") if (scalar @components < 2);
 		} else {
-			die("[$datestring] error: $line in $gffFile does not have a parse-able featureID using namefield \'$NAMEFIELD\'. Make sure ALL gene feature names are are stored in the attributes column like <namefield><geneName>\n");
+			warn("[$datestring] error: $line in $gffFile does not have a parse-able featureID using namefield \'$NAMEFIELD\'. Make sure ALL gene feature names are are stored in the attributes column like <namefield><geneName>\n");
 		}
 	}
 }
 
 sub Format_name {
-	my ($name, $genomeID, $SEP) = @_;
+	my ($name, $genomeID, $SEP, $TRUNCATE) = @_;
 	my $newName;
 	my $SEPprint = $SEP;
 	$SEPprint =~ s/\\//g;
@@ -551,8 +553,19 @@ sub Format_name {
 	}
 	
 	# remove any and all ':', ';' and '|' from name
-	$newName =~ s/:|;|\|//g;
-	return($newName);
+	if ($newName =~ /:|;|\|/) {
+		warn("warning: the sequenceID $newName has a :, ; or | in it, will remove it to prevent issues downstream\n");
+		$newName =~ s/:|;|\|//g;
+	}
+	
+
+	# truncate name to first 50 chars, if requested
+	my $finalName = $newName;
+	if (length($newName) > 50 && defined $TRUNCATE) {
+		$finalName = substr($newName, 0, 50);
+	}
+
+	return($finalName);
 }
 
 sub Parse_duf3435_from_regions {

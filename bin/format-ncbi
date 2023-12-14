@@ -15,7 +15,8 @@ sub usage {
 	my $usage = qq/
 usage: starfish format-ncbi [args]
 
-format ncbi assemblies and assign genomeIDs.
+format ncbi assemblies and assign genomeIDs. it's recommended to run the 
+more comprehensive 'starfish format' after this step.
  
 Required:
 -r, --report      FILE   an ncbi genome report file.

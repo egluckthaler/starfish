@@ -19,7 +19,7 @@ identify genomic neighborhoods containing genes of interest.
 
 Required:
 -q, --queries     FILE   2 column tsv: geneID of interest, tag.
--g, --gff         FILE   2 column tsv: genome code, path to GFF.
+-g, --gff         FILE   2 column tsv: genomeID, path to GFF.
 -m, --merge       INT    max distance to merge query genes, in bp.
 -i, --idtag       STR    prefix for naming neighborhoods.
 -x, --prefix      STR    prefix for naming output files.
