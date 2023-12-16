@@ -22,7 +22,7 @@ cut -f2 ome2assembly.txt | xargs cat > blastdb/macpha6.assemblies.fna
 makeblastdb -in blastdb/macpha6.assemblies.fna -out blastdb/macpha6.assemblies -parse_seqids -dbtype nucl
 
 # calculate %GC content across all genomes (useful for visualizing elements later):
-../scripts/seq-gc.sh -Nbw 1000 blastdb/macpha6.assemblies.fna > macpha6.assemblies.gcContent_w1000.bed
+../aux/seq-gc.sh -Nbw 1000 blastdb/macpha6.assemblies.fna > macpha6.assemblies.gcContent_w1000.bed
 rm blastdb/macpha6.assemblies.fna
 
 # parse the provided eggnog mapper annotations (NB the format of the output file has changed in more recent emapper versions):
@@ -32,7 +32,7 @@ cut -f1,12  ann/*emapper.annotations | grep -v  '#' | grep -v -P '\t-' | perl -p
 cut -f1,10 ann/*emapper.annotations | grep -v '#' | perl -pe 's/^([^\s]+?)\t([^\|]+).+$/\1\t\2/' > ann/macph6.gene2og.txt
 
 # convert to .mcl format:
-../scripts/geneOG2mclFormat.pl -i ann/macph6.gene2og.txt -o ann/
+../aux/geneOG2mclFormat.pl -i ann/macph6.gene2og.txt -o ann/
 
 ## Gene finder module
 
@@ -42,7 +42,7 @@ cut -f1,10 ann/*emapper.annotations | grep -v '#' | perl -pe 's/^([^\s]+?)\t([^\
 mkdir geneFinder
 
 # *de novo* annotate tyrs with the provided YR HMM and amino acid queries (~10min):
-starfish annotate -T 2 -x macpha6_tyr -a ome2assembly.txt -g ome2gff.txt -p ../database/YRsuperfams.p1-512.hmm -P ../database/YRsuperfamRefs.faa -i tyr -o geneFinder/
+starfish annotate -T 2 -x macpha6_tyr -a ome2assembly.txt -g ome2gff.txt -p ../db/YRsuperfams.p1-512.hmm -P ../db/YRsuperfamRefs.faa -i tyr -o geneFinder/
 
 # you should observe the following printed output:
 # found 1 new tyr genes and 9 tyr genes that overlap with 11 existing genes
@@ -117,7 +117,7 @@ mkdir regionFinder
 
 # group all tyrs into families using ```mmseqs2 easy-clust``` with a very permissive 50% percent ID/ 25% coverage threshold (families with only a single member will automatically be assigned the prefix 'sng'):
 mmseqs easy-cluster geneFinder/macpha6_tyr.filt_intersect.fas regionFinder/macpha6_tyr regionFinder/ --threads 2 --min-seq-id 0.5 -c 0.25 --alignment-mode 3 --cov-mode 0 --cluster-reassign
-../scripts/mmseqs2mclFormat.pl -i regionFinder/macpha6_tyr_cluster.tsv -g fam -o regionFinder/
+../aux/mmseqs2mclFormat.pl -i regionFinder/macpha6_tyr_cluster.tsv -g fam -o regionFinder/
 
 # use ```sourmash``` and ```mcl``` to group all elements into haplotypes based on pairwise k-mer similarities across entire elements:
 starfish sim -m element -t nucl -b elementFinder/macpha6.elements.bed -x macpha6 -o regionFinder/ -a ome2assembly.txt
@@ -125,16 +125,16 @@ starfish group -m mcl -s regionFinder/macpha6.element.nucl.sim -i hap -o regionF
 
 # replace captainIDs with elementIDs in the captain groups file:
 grep -P '\tcap\t' elementFinder/macpha6.elements.bed | cut -f4,7 > regionFinder/macpha6.cap2ship.txt
-../scripts/searchReplace.pl -i regionFinder/macpha6_tyr_cluster.mcl -r regionFinder/macpha6.cap2ship.txt > regionFinder/macpha6.element_cluster.mcl
+../aux/searchReplace.pl -i regionFinder/macpha6_tyr_cluster.mcl -r regionFinder/macpha6.cap2ship.txt > regionFinder/macpha6.element_cluster.mcl
 
 # merge captain family with element haplotype info:
-../scripts/mergeGroupfiles.pl -t regionFinder/macpha6.element_cluster.mcl -q regionFinder/macpha6.element.nucl.I1.5.mcl > regionFinder/macpha6.element.fam-hap.mcl
+../aux/mergeGroupfiles.pl -t regionFinder/macpha6.element_cluster.mcl -q regionFinder/macpha6.element.nucl.I1.5.mcl > regionFinder/macpha6.element.fam-hap.mcl
 
 # create a file with tyrs that are not found in any elements (will let us assign them to fragmented haplotypes in the ```dereplicate``` analysis):
 grep -f <(comm -23 <(cut -f1 geneFinder/macpha6_tyr.filt_intersect.ids | sort) <(grep -P '\tcap\t|\ttyr\t' elementFinder/macpha6.elements.bed | cut -f4| sort)) geneFinder/macpha6.tyr.bed > regionFinder/unaffiliated_tyrs.bed
 
 # you can increase confidence in region homology by only looking at gene ortholog groups with low copy numbers missing from few genomes:
-../scripts/filterOG.pl -O ann/macph6.gene2og.mcl -a 1 -c 5 -o ann/
+../aux/filterOG.pl -O ann/macph6.gene2og.mcl -a 1 -c 5 -o ann/
 
 # It is more useful to play around with copy number thresholds than with genome absence thresholds because ```dereplicate``` will automatically filter OGs to retain those that have more taxonomic information i.e., are present in a greater number of individuals.
 
