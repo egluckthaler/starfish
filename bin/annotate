@@ -226,7 +226,7 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 			
 			# Print out replaced info, if any overlaps were found
 			if (scalar keys %{$idConversions} > 0 ) {
-				($newCount, $oldOverlappingCount, $newOverlappingCount) = Print_overlapping_names("$opts{outdir}/$opts{prefix}.filt.fas", "$opts{outdir}/$opts{prefix}.filt.gff", $idConversions, $opts{'separator'}, $opts{'nameField'}, $opts{'idtag'});
+				($newCount, $oldOverlappingCount, $newOverlappingCount) = Print_overlapping_names("$opts{outdir}/$opts{prefix}.filt.fas", "$opts{outdir}/$opts{prefix}.filt.gff", $idConversions, $opts{'separator'}, $opts{'nameField'}, $opts{'idtag'}, $opts{'targetFeat'});
 			} else {
 				$datestring = localtime();
 				print "[$datestring] no metaeuk genes intersect with gene features in $opts{'gff'}, so there are no gene names to lift over\n";
@@ -248,7 +248,7 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 }
 
 sub Print_overlapping_names {
-	my ($filteredFas, $filteredGff, $idConversions, $SEP, $NAMEFIELD, $IDTAG) = @_;
+	my ($filteredFas, $filteredGff, $idConversions, $SEP, $NAMEFIELD, $IDTAG, $TARGETFEAT) = @_;
 	my ($PREFIX, $OUTDIR) = fileparse($filteredFas, ".filt.fas");
 	my ($gffOUT) = Open_FH("$OUTDIR/$PREFIX.filt_intersect.gff");
 	my ($fasOUT) = Open_FH("$OUTDIR/$PREFIX.filt_intersect.fas");
@@ -280,7 +280,7 @@ sub Print_overlapping_names {
 		next if ($line =~ m/^#/);
 		chomp $line;
 		my ($contigID, $annotator, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $info) = split("\t", $line);
-		next if ($featureType ne $IDTAG); # only parse IDTAG features
+		next if ($featureType ne $TARGETFEAT); # only parse IDTAG features
 		my ($otherInfo, $metaInfo) = split/;/, $info;
 		$metaInfo =~ m/$NAMEFIELD(.+)$/;
 		my $metaSeqID = $1;

@@ -168,7 +168,7 @@ main: {
 			# need a temporary contig2gene/starship2gene to be able to parse genes inside of starships with --restrict, a little annoying
 			my %starship2gene;
 			foreach my $ome (keys %{$ome2gff}) {
-				my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'});
+				my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'}, $opts{'targetFeat'});
 				foreach my $contig (keys %{$gffInfo}) {
 					if (exists $contig2element->{$contig}) { # we only care about starship-associated contigs for now
 						foreach my $pos (keys %{$gffInfo->{$contig}}) {
@@ -202,7 +202,7 @@ main: {
 		# parse all genes in gff and ignore any gene that overlaps with a restricted coordinate, or that doesn't have an OG with signal
 		my (%contig2gene, %gene2pos);
 		foreach my $ome (keys %{$ome2gff}) {
-			my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'});
+			my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'}, $opts{'targetFeat'});
 			foreach my $contig (keys %{$gffInfo}) {
 				foreach my $pos (keys %{$gffInfo->{$contig}}) {
 					foreach my $seqID (keys %{$gffInfo->{$contig}->{$pos}}) {
