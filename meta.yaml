@@ -7,10 +7,6 @@ source:
   git_rev: main
 
 build: 
-  channels:
-    - conda-forge
-    - bioconda
-    - defaults
   scripts:
     - bin/starfish
     - CNEFinder/cnef
