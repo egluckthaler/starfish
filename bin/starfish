@@ -4,12 +4,16 @@ use strict;
 use Data::Dumper;
 use File::Basename;
 use FileHandle;
+use Cwd 'abs_path';
 $|=1;
 
 sub usage {
 	my $message = shift;
+	my ($starfishEXE, $starfishDIR) = fileparse($0);
+	$starfishDIR = abs_path("$starfishDIR..");
+
 	my $usage = qq/
-starfish v1.0: a computational workflow for large mobile element discovery
+starfish v1.0.0: a workflow for large mobile element discovery
 
 usage: starfish <command> [args]
 
@@ -49,7 +53,9 @@ Auxiliary commands:
 
 To learn more about a command, type starfish <command> -h
 
-See \/scripts for useful standalone tools
+$starfishDIR\/aux contains additional standalone scripts
+$starfishDIR\/db contains fastas and hmms for genes of interest, including YRs
+$starfishDIR\/examples contains data for the step-by-step tutorial
 
 /;
 	if (not defined $message) {
@@ -67,6 +73,7 @@ main: {
 	my $ARGS = join(" ", @ARGV);
 	Opts_check($COMMAND);
 	my ($starfishEXE, $starfishDIR) = fileparse($0);
+	$starfishDIR = abs_path("$starfishDIR../");
 	my $datestring = localtime();
 	
 	# starfish lib
