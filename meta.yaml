@@ -11,6 +11,10 @@ build:
     - conda-forge
     - bioconda
     - defaults
+  noarch: python
+  scripts:
+    - bin/starfish
+    - CNEFinder/cnef
 
 requirements:
   build:
