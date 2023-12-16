@@ -16,3 +16,4 @@ dependencies:
   - mafft=7.508
   - mmseqs2=14.7e284
   - samtools=1.6
+  - eggnog-mapper=2.1.12
