@@ -13,9 +13,10 @@ build:
 
 requirements:
   build:
-    - python >=3.6
+    - python >=3.8
   run:
-    - python >=3.6  # Add your runtime dependencies here
+    - python >=3.8  # Add your runtime dependencies here
+    - numpy>=1.26
     - mummer4=4.0.0
     - bedtools=2.30.0
     - sourmash=4.6.1
