@@ -4,14 +4,13 @@ package:
 
 source:
   git_url: https://github.com/egluckthaler/starfish.git
-  git_rev: master
+  git_rev: main
 
 build: 
   channels:
     - conda-forge
     - bioconda
     - defaults
-  noarch: python
   scripts:
     - bin/starfish
     - CNEFinder/cnef
@@ -41,5 +40,5 @@ test:
 
 about:
   home: "https://github.com/egluckthaler/starfish"
-  license: "AGPL-3.0"  # Your project's license
+  license: "AGPL-3.0-or-later"  # Your project's license
   summary: "a modular toolkit for giant mobile element annotation"
