@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# instructions from step-by-step tutorial: https://github.com/egluckthaler/starfish/wiki/Step-by-step-tutorial
+
 ## Prepare workspace
 
 # activate the ```starfish``` conda environment:
