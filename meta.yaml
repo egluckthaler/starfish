@@ -40,5 +40,5 @@ test:
 
 about:
   home: "https://github.com/egluckthaler/starfish"
-  license: "AGPL-3.0-or-later"  # Your project's license
+  license: "AGPL-3.0-only"  # Your project's license
   summary: "a modular toolkit for giant mobile element annotation"
