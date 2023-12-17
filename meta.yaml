@@ -10,7 +10,7 @@ build:
   number: 0 # Increment with each new build
   scripts:
     - bin/starfish
-    - CNEFinder/cnef
+    - bin/cnef
 
 requirements:
   build:
