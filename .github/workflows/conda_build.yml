@@ -28,12 +28,13 @@ jobs:
       run: |
         conda config --add channels bioconda
         conda config --add channels conda-forge
-        conda install conda-build anaconda-client
+        conda install conda-build
         conda build .
       # This step installs conda-build and then uses it to build your Conda package.
     
     - name: Upload starfish Package
       run: |
+        conda install -c anaconda anaconda-client
         PACKAGE_FILES=($(find /usr/share/miniconda/conda-bld/linux-64/ -name "starfish*.tar.bz2"))
         NUM_FILES=${#PACKAGE_FILES[@]}
     
@@ -46,4 +47,4 @@ jobs:
         fi
     
         echo "Uploading ${PACKAGE_FILES[0]}..."
-        anaconda -t ${{ secrets.ANACONDA_API_TOKEN }} upload "${PACKAGE_FILES[0]}"
+        conda run anaconda -t ${{ secrets.ANACONDA_API_TOKEN }} upload "${PACKAGE_FILES[0]}"
