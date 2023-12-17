@@ -6,7 +6,10 @@ source:
   git_url: https://github.com/egluckthaler/starfish.git
   git_rev: main
 
-build: 
+build:
+  number: 0 # Increment with each new build
+  script_env:
+    - SRC_DIR
   scripts:
     - bin/starfish
     - CNEFinder/cnef
