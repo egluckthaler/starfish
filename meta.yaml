@@ -31,10 +31,6 @@ requirements:
     - samtools=1.6
     - eggnog-mapper=2.1.12
 
-test:
-  commands:
-    - "starfish insert -h"  # Replace with a command to test your package
-
 about:
   home: "https://github.com/egluckthaler/starfish"
   license: "AGPL-3.0-or-later"  # Your project's license
