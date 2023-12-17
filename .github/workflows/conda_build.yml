@@ -1,0 +1,42 @@
+name: starfish build
+
+# This workflow is triggered on pushes to the repository.
+on:
+  push:
+    branches:
+      - main  # Trigger the workflow on push to the main branch
+
+jobs:
+  build:
+    # This job runs on the latest Ubuntu runner hosted by GitHub Actions
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v2
+      # This step checks out a copy of your repository.
+
+    - name: Setup Miniconda
+      uses: conda-incubator/setup-miniconda@v2
+      with:
+        activate-environment: starfish_build_env
+        python-version: 3.8  # Specify the version of Python you need
+        auto-activate-base: true
+      # This step sets up Miniconda with a specific Python version.
+
+    - name: Conda Build
+      run: |
+        conda config --add channels bioconda
+        conda config --add channels conda-forge
+        conda install conda-build
+        conda build .
+      # This step installs conda-build and then uses it to build your Conda package.
+    
+    - name: Upload starfish Package
+      run: |
+        PACKAGE_PATH=$(find $CONDA_BLD_PATH -name "starfish*.tar.bz2")
+        if [[ -z "$PACKAGE_PATH" ]]; then
+          echo "starfish package file not found."
+          exit 1
+        fi
+        anaconda -t ${{ secrets.ANACONDA_API_TOKEN }} upload $PACKAGE_PATH
