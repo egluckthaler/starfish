@@ -1,6 +1,11 @@
 # Navigate to the source directory
 cd $SRC_DIR
 
+# compile CNEFinder
+cd CNEFinder/
+./pre-install.sh
+make -f Makefile
+
 # copy git directory structure to conda package location
 mkdir -p $PREFIX/main $PREFIX/aux $PREFIX/bin $PREFIX/db $PREFIX/lib $PREFIX/CNEFinder
 cp -r aux/* $PREFIX/aux/
@@ -9,8 +14,3 @@ cp -r bin/* $PREFIX/bin/
 cp -r db/* $PREFIX/db/
 cp -r lib/* $PREFIX/lib/
 cp -r CNEFinder/* $PREFIX/CNEFinder/
-
-# compile CNEFinder
-cd CNEFinder/
-./pre-install.sh
-make -f Makefile
