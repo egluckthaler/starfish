@@ -14,6 +14,7 @@ sub usage {
 
 	my $usage = qq/
 starfish v1.0.0: a workflow for large mobile element discovery
+https:\/\/github.com\/egluckthaler\/starfish
 
 usage: starfish <command> [args]
 
@@ -31,14 +32,12 @@ Region finder module:
    dereplicate        situate element, site, and fragmented haplotypes in
                       genomic regions using flanking orthologs.
     
-Visualization commands:
+Additional commands:
    pair-viz           execute element- element\/site\/region alignments,
                       with optional circos visualization.
    locus-viz          execute element\/region alignments with nucmer and
                       generate synteny schematics with gggenomes.
    genome-viz         visualize elements and sites in a genome with circos.
-
-Auxiliary commands:
    sim                calculate k-mer similarity between captains or elements.
    group              group captains or elements into families based on k-mers.
    extend             extend downstream element boundary using BLASTn alignments.
@@ -53,9 +52,8 @@ Auxiliary commands:
 
 To learn more about a command, type starfish <command> -h
 
-$starfishDIR\/aux contains additional standalone scripts
-$starfishDIR\/db contains fastas and hmms for genes of interest, including YRs
-$starfishDIR\/examples contains data for the step-by-step tutorial
+$starfishDIR\/aux contains useful standalone scripts
+$starfishDIR\/db contains fastas and hmms of genes of interest, including YRs
 
 /;
 	if (not defined $message) {
