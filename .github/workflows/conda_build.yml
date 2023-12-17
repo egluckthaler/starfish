@@ -47,4 +47,4 @@ jobs:
         fi
     
         echo "Uploading ${PACKAGE_FILES[0]}..."
-        conda run anaconda -t ${{ secrets.ANACONDA_API_TOKEN }} upload "${PACKAGE_FILES[0]}"
+        conda run anaconda -t ${{ secrets.ANACONDA_API_TOKEN }} upload --force "${PACKAGE_FILES[0]}"
