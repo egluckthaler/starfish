@@ -8,8 +8,6 @@ source:
 
 build:
   number: 0 # Increment with each new build
-  script_env:
-    - SRC_DIR
   scripts:
     - bin/starfish
     - CNEFinder/cnef
