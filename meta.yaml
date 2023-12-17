@@ -15,7 +15,7 @@ requirements:
   build:
     - python >=3.8
     - numpy >=1.26
- run:
+  run:
     - python >=3.8  # Add your runtime dependencies here
     - numpy >=1.26
     - mummer4=4.0.0
