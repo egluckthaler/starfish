@@ -80,81 +80,81 @@ main: {
 	my $starfishLIB = "$starfishDIR/lib/";
 	
 	if ($COMMAND eq 'flank') {
-		usage("\n[$datestring] error: the \'flank\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/flank");
+		usage("\n[$datestring] error: the \'flank\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/flank");
 		print "[$datestring] executing command: starfish flank $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/flank $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/flank $ARGS");
 	} elsif ($COMMAND eq 'extend') {
-		usage("\n[$datestring] error: the \'extend\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/extend");
+		usage("\n[$datestring] error: the \'extend\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/extend");
 		print "[$datestring] executing command: starfish extend $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/extend $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/extend $ARGS");
 	} elsif ($COMMAND eq 'coverage') {
-		usage("\n[$datestring] error: the \'coverage\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/coverage");
+		usage("\n[$datestring] error: the \'coverage\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/coverage");
 		print "[$datestring] executing command: starfish coverage $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/coverage $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/coverage $ARGS");
 	} elsif ($COMMAND eq 'insert') {
-		usage("\n[$datestring] error: the \'insert\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/insert");
+		usage("\n[$datestring] error: the \'insert\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/insert");
 		print "[$datestring] executing command: starfish insert $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/insert $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/insert $ARGS");
 	} elsif ($COMMAND eq 'summarize') {
-		usage("\n[$datestring] error: the \'summarize\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/summarize");
+		usage("\n[$datestring] error: the \'summarize\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/summarize");
 		print "[$datestring] executing command: starfish summarize $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/summarize $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/summarize $ARGS");
 	} elsif ($COMMAND eq 'sim') {
-		usage("\n[$datestring] error: the \'sim\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/sim");
+		usage("\n[$datestring] error: the \'sim\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/sim");
 		print "[$datestring] executing command: starfish sim $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/sim $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/sim $ARGS");
 	} elsif ($COMMAND eq 'group') {
-		usage("\n[$datestring] error: the \'group\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/group");
+		usage("\n[$datestring] error: the \'group\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/group");
 		print "[$datestring] executing command: starfish group $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/group $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/group $ARGS");
 	} elsif ($COMMAND eq 'dereplicate') {
-		usage("\n[$datestring] error: the \'dereplicate\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/dereplicate");
+		usage("\n[$datestring] error: the \'dereplicate\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/dereplicate");
 		print "[$datestring] executing command: starfish dereplicate $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/dereplicate $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/dereplicate $ARGS");
 	} elsif ($COMMAND eq 'cargo') {
-		usage("\n[$datestring] error: the \'cargo\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/cargo");
+		usage("\n[$datestring] error: the \'cargo\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/cargo");
 		print "[$datestring] executing command: starfish cargo $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/cargo $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/cargo $ARGS");
 	} elsif ($COMMAND eq 'pair-viz') {
-		usage("\n[$datestring] error: the \'pair-viz\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/pair-viz");
+		usage("\n[$datestring] error: the \'pair-viz\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/pair-viz");
 		print "[$datestring] executing command: starfish pair-viz $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/pair-viz $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/pair-viz $ARGS");
 	} elsif ($COMMAND eq 'locus-viz') {
-		usage("\n[$datestring] error: the \'locus-viz\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/locus-viz");
+		usage("\n[$datestring] error: the \'locus-viz\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/locus-viz");
 		print "[$datestring] executing command: starfish locus-viz $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/locus-viz $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/locus-viz $ARGS");
 	} elsif ($COMMAND eq 'genome-viz') {
-		usage("\n[$datestring] error: the \'genome-viz\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/genome-viz");
+		usage("\n[$datestring] error: the \'genome-viz\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/genome-viz");
 		print "[$datestring] executing command: starfish genome-viz $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/genome-viz $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/genome-viz $ARGS");
 	} elsif ($COMMAND eq 'format') {
-		usage("\n[$datestring] error: the \'format\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/format");
+		usage("\n[$datestring] error: the \'format\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/format");
 		print "[$datestring] executing command: starfish format $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/format $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/format $ARGS");
 	} elsif ($COMMAND eq 'format-ncbi') {
-		usage("\n[$datestring] error: the \'format-ncbi\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/format-ncbi");
+		usage("\n[$datestring] error: the \'format-ncbi\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/format-ncbi");
 		print "[$datestring] executing command: starfish format-ncbi $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/format-ncbi $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/format-ncbi $ARGS");
 	} elsif ($COMMAND eq 'annotate') {
-		usage("\n[$datestring] error: the \'annotate\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/annotate");
+		usage("\n[$datestring] error: the \'annotate\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/annotate");
 		print "[$datestring] executing command: starfish annotate $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/annotate $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/annotate $ARGS");
 	} elsif ($COMMAND eq 'consolidate') {
-		usage("\n[$datestring] error: the \'consolidate\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/consolidate");
+		usage("\n[$datestring] error: the \'consolidate\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/consolidate");
 		print "[$datestring] executing command: starfish consolidate $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/consolidate $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/consolidate $ARGS");
 	} elsif ($COMMAND eq 'sketch') {
-		usage("\n[$datestring] error: the \'sketch\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/sketch");
+		usage("\n[$datestring] error: the \'sketch\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/sketch");
 		print "[$datestring] executing command: starfish sketch $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/sketch $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/sketch $ARGS");
 	} elsif ($COMMAND eq 'augment') {
-		usage("\n[$datestring] error: the \'augment\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/augment");
+		usage("\n[$datestring] error: the \'augment\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/augment");
 		print "[$datestring] executing command: starfish augment $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/augment $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/augment $ARGS");
 	}  elsif ($COMMAND eq 'dereplicate-hood') {
-		usage("\n[$datestring] error: the \'dereplicate-hood\' script should be located in $starfishDIR/commands/, but it\'s not..\n") if (! -f "$starfishDIR/commands/dereplicate-hood");
+		usage("\n[$datestring] error: the \'dereplicate-hood\' script should be located in $starfishDIR/main/, but it\'s not..\n") if (! -f "$starfishDIR/main/dereplicate-hood");
 		print "[$datestring] executing command: starfish dereplicate-hood $ARGS\n";
-		system("perl -I $starfishLIB $starfishDIR/commands/dereplicate-hood $ARGS");
+		system("perl -I $starfishLIB $starfishDIR/main/dereplicate-hood $ARGS");
 	} 
 }
 
