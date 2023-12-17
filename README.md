@@ -8,7 +8,10 @@
   align = "right"
   style="margin: 0 auto; width: 182px; height: 200px">
 
-[![DOI](https://zenodo.org/badge/581059656.svg)](https://zenodo.org/badge/latestdoi/581059656)
+[![DOI](https://zenodo.org/badge/581059656.svg)](https://zenodo.org/badge/latestdoi/581059656) [![Anaconda_version](https://anaconda.org/egluckthaler/starfish/badges/version.svg
+)](https://anaconda.org/egluckthaler/starfish) [![Anaconda_downloads](https://anaconda.org/egluckthaler/starfish/badges/downloads.svg)](https://anaconda.org/egluckthaler/starfish) [![Anaconda_platforms](https://anaconda.org/egluckthaler/starfish/badges/platforms.svg
+)](https://anaconda.org/egluckthaler/starfish) [![Anaconda-Server Badge](https://anaconda.org/egluckthaler/starfish/badges/latest_release_date.svg)](https://anaconda.org/egluckthaler/starfish)
+
 
 ```starfish``` is a modular toolkit for giant mobile element annotation. Built primarily for annotating [*Starship* elements](https://academic.oup.com/mbe/article/39/5/msac109/6588634) in fungal genomes, it can be easily adapted to find any large mobile element (≥6kb) that shares the same basic architecture as a fungal *Starship* or a bacterial integrative and conjugative element: a "captain" gene with zero or more "cargo" genes downstream of its 3' end. It is particularly well suited for annotating low-copy number elements in a content independent manner.
 
