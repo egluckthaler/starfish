@@ -30,13 +30,23 @@ jobs:
         conda config --add channels conda-forge
         conda install conda-build
         conda build .
+        ls -lR $CONDA_BLD_PATH
       # This step installs conda-build and then uses it to build your Conda package.
     
     - name: Upload starfish Package
       run: |
-        PACKAGE_PATH=$(find $CONDA_BLD_PATH -name "starfish*.tar.bz2")
-        if [[ -z "$PACKAGE_PATH" ]]; then
-          echo "starfish package file not found."
+        echo "CONDA_BLD_PATH: $CONDA_BLD_PATH"
+        ls -l $CONDA_BLD_PATH
+        PACKAGE_FILES=($(find $CONDA_BLD_PATH -name "starfish*.tar.bz2"))
+        NUM_FILES=${#PACKAGE_FILES[@]}
+    
+        if [ "$NUM_FILES" -eq 0 ]; then
+          echo "Error: No starfish package files found."
+          exit 1
+        elif [ "$NUM_FILES" -gt 1 ]; then
+          echo "Error: Multiple starfish package files found."
           exit 1
         fi
-        anaconda -t ${{ secrets.ANACONDA_API_TOKEN }} upload $PACKAGE_PATH
+    
+        echo "Uploading ${PACKAGE_FILES[0]}..."
+        anaconda -t ${{ secrets.ANACONDA_API_TOKEN }} upload "${PACKAGE_FILES[0]}"
