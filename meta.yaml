@@ -9,11 +9,14 @@ source:
 build: 
   scripts:
     - bin/starfish
+    - CNEFinder/cnef
 
 requirements:
   build:
     - python=3.8.*
-  run:
+    - {{ compiler('cxx') }}  # or {{ compiler('cxx') }} for C++
+    - make 
+    run:
     - python=3.8.*  # Add your runtime dependencies here
     - mummer4=4.0.0
     - bedtools=2.30.0

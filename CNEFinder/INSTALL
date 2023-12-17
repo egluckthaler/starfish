@@ -1,0 +1,24 @@
+Pre-installation Instructions
+=============================
+
+   This installation requires the pre-installation of a C++ compiler, 
+the cmake build system, and the libraries: boost.
+
+For Linux, you can install these libraries via
+
+ $ ./pre-install.sh 
+
+Basic Instructions
+==================
+
+   The shell command `make -f Makefile' should compile this program
+   for Linux Operating Systems.
+ 
+   The shell command `make -f Makefile_M' should compile this program
+   for Mac Operating Systems.
+	 
+   
+After compilation the binary `cnef' will be created in the working 
+directory, e.g. you may call it from this directory via
+
+ S ./cnef
