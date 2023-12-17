@@ -30,14 +30,11 @@ jobs:
         conda config --add channels conda-forge
         conda install conda-build
         conda build .
-        ls -lR $CONDA_BLD_PATH
       # This step installs conda-build and then uses it to build your Conda package.
     
     - name: Upload starfish Package
       run: |
-        echo "CONDA_BLD_PATH: $CONDA_BLD_PATH"
-        ls -l $CONDA_BLD_PATH
-        PACKAGE_FILES=($(find $CONDA_BLD_PATH -name "starfish*.tar.bz2"))
+        PACKAGE_FILES=($(find /usr/share/miniconda/conda-bld/linux-64/ -name "starfish*.tar.bz2"))
         NUM_FILES=${#PACKAGE_FILES[@]}
     
         if [ "$NUM_FILES" -eq 0 ]; then
