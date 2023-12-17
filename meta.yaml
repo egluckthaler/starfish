@@ -36,6 +36,11 @@ test:
   commands:
     - "starfish insert -h"
 
+files:
+  - conf/mypackage.conf
+  - data/datafile1.txt
+  - scripts/myscript.sh
+  
 about:
   home: "https://github.com/egluckthaler/starfish"
   license: "AGPL-3.0-or-later"  # Your project's license
