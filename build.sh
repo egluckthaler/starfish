@@ -1,3 +1,6 @@
+# Install g++ compiler
+conda install -c conda-forge gcc_linux-64 --force-reinstall
+
 # Set environment variables to use the Conda environment's compilers
 export CC=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-gcc
 export CXX=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++
