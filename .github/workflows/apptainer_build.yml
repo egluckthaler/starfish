@@ -8,38 +8,23 @@ on:
 jobs:
   apptainer-build-and-push:
     runs-on: ubuntu-latest
+    permissions:
+        contents: read
+        packages: write
+    container:
+        image: quay.io/singularity/singularity:v3.8.1
+        options: --privileged
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v2
 
+
     # Step to set up Apptainer and build the .sif image
     - name: Build Apptainer Image
       run: |
-        # Replace with commands to build your Apptainer image
-        sudo apt-get update
-        sudo apt-get install -y build-essential libseccomp-dev pkg-config squashfs-tools cryptsetup
-    
-        # Download and compile Apptainer from source
-        wget https://github.com/apptainer/apptainer/releases/download/v1.2.5/apptainer-1.2.5.tar.gz
-        tar -xzf apptainer-1.2.5.tar.gz
-        cd apptainer-1.2.5
-        ./mconfig && \
-            make -C ./builddir && \
-            sudo make -C ./builddir install
-        
-        # Go back to the root of the repository and build .sif
-        cd ..
-        apptainer build starfish.sif apptainer/starfish.def
+        singularity build starfish.sif apptainer/starfish.def
 
-    # Step to log in to GitHub Packages
-    - name: Login to GitHub Container Registry
-      run: echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-
-    # Step to push the image to GitHub Packages
-    - name: Push to GitHub Packages
+    - name: Login and Deploy Container
       run: |
-        # Set the image tag
-        IMAGE_TAG=ghcr.io/${{ github.repository_owner }}/starfish:${{ github.sha }}
-
-        # Push the image
-        docker push $IMAGE_TAG
+           echo ${{ secrets.GITHUB_TOKEN }} | singularity remote login -u ${{ secrets.GHCR_USERNAME }} --password-stdin oras://ghcr.io
+           singularity push container.sif oras://ghcr.io/${GITHUB_REPOSITORY}:${tag}
