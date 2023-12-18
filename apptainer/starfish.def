@@ -1,10 +1,10 @@
 Bootstrap: docker
-From: centos:7
+From: centos:8
 
 %post
     # Update and install necessary packages
     yum -y update
-    yum -y install wget bzip2 ca-certificates
+    yum -y install wget which bzip2 ca-certificates
 
     # Install Miniconda
     wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh

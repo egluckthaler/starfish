@@ -23,8 +23,7 @@ jobs:
     - name: Build Apptainer Image
       run: |
         singularity build starfish.sif apptainer/starfish.def
-
-
+        
     - name: Login and Deploy Container
       run: |
            echo ${{ secrets.GITHUB_TOKEN }} | singularity remote login -u ${{ secrets.GHCR_USERNAME }} --password-stdin oras://ghcr.io

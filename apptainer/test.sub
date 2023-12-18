@@ -1,0 +1,18 @@
+# Apptainer test file for HTCondor
+
+# Download latest image before executing script
+# apptainer pull starfish.sif oras://ghcr.io/egluckthaler/starfish:latest
+
+container_image = starfish.sif
+universe = container
+log = test.log
+
+# Job must be submitted from directory containing the input files
+transfer_input_files = ../examples,../test.sh
+
+requirements = (OpSysMajorVer =?= 8)
+request_cpus = 1
+request_memory = 4GB
+request_disk = 4GB
+
+queue

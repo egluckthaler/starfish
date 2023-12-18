@@ -1,4 +1,4 @@
-# Apptainer build file
+# Apptainer build file for HTCondor
 
 universe = vanilla
 log = interactive.log
