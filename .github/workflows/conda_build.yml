@@ -30,6 +30,7 @@ jobs:
         conda config --add channels conda-forge
         conda install -c conda-forge gcc_linux-64
         conda install conda-build conda-verify
+        export CONDA_PREFIX=$(conda info --base)
         conda build .
       # This step installs conda-build and then uses it to build your Conda package.
     
