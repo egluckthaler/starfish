@@ -1,5 +1,7 @@
 MF=     Makefile
  
+CC=     x86_64-conda-linux-gnu-g++
+ 
 CFLAGS= -g -fopenmp -D_USE_OMP -msse4.2 -O3 -fomit-frame-pointer -funroll-loops  
  
 LFLAGS= -std=c++11 -I ./
