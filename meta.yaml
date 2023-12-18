@@ -15,7 +15,7 @@ build:
 requirements:
   build:
     - python=3.8.*
-    - {{ compiler('gcc') }}
+    - gcc_linux-64
     - make
   run:
     - python=3.8.*  # Add your runtime dependencies here
