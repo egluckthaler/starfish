@@ -1,0 +1,31 @@
+Bootstrap: docker
+From: centos:7
+
+%post
+    # Update and install necessary packages
+    yum -y update
+    yum -y install wget bzip2 ca-certificates
+
+    # Install Miniconda
+    wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+    bash Miniconda3-latest-Linux-x86_64.sh -b -p /opt/conda
+    rm Miniconda3-latest-Linux-x86_64.sh
+    export PATH="/opt/conda/bin:$PATH"
+
+    # set the conda config channels
+    conda config --add channels bioconda
+    conda config --add channels conda-forge
+    conda config --add channels egluckthaler
+    conda config --set channel_priority strict
+
+    # Install your Conda package
+    conda create -n starfish python=3.8
+    source activate starfish
+    conda install -c egluckthaler starfish || { echo "starfish package not found in egluckthaler channel"; exit 1; }
+
+%environment
+    export PATH="/opt/conda/envs/starfish/bin:/opt/conda/bin:$PATH"
+    source activate starfish
+
+%labels
+   Author Emile Gluck-Thaler

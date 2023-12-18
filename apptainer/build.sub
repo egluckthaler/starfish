@@ -1,0 +1,15 @@
+# Apptainer build file
+
+universe = vanilla
+log = interactive.log
+
+# Job must be submitted from directory containing the input files
+transfer_input_files = starfish.def
+
++IsBuildJob = true
+requirements = (OpSysMajorVer =?= 8)
+request_cpus = 1
+request_memory = 4GB
+request_disk = 4GB
+
+queue
