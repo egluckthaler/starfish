@@ -17,7 +17,15 @@ jobs:
       run: |
         # Replace with commands to build your Apptainer image
         sudo apt-get update
-        sudo apt-get install -y apptainer
+        sudo apt-get install -y build-essential libseccomp-dev pkg-config squashfs-tools cryptsetup
+    
+        # Download and compile Apptainer from source
+        wget https://github.com/apptainer/apptainer/releases/download/v1.2.5/apptainer-1.2.5.tar.gz
+        tar -xzf apptainer-1.2.5.tar.gz
+        cd apptainer-1.2.5
+        ./mconfig && \
+            make -C ./builddir && \
+            sudo make -C ./builddir install
         apptainer build starfish.sif apptainer/starfish.def
 
     # Step to log in to GitHub Packages
