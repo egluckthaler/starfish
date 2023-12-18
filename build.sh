@@ -1,7 +1,7 @@
 # compile CNEFinder
 cd $SRC_DIR/CNEFinder/
 ./pre-install.sh
-make -f Makefile
+make -f Makefile CC=$PREFIX/bin/x86_64-conda-linux-gnu-gcc CXX=$PREFIX/bin/x86_64-conda-linux-gnu-g++
 mv cnef ../bin/
 
 # copy git directory structure to conda package location
