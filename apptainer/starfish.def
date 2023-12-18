@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: centos:8
+From: quay.io/centos/centos:stream9
 
 %post
     # Update and install necessary packages
