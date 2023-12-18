@@ -4,7 +4,7 @@ channels:
   - bioconda
   - defaults
 dependencies:
-  - gcc_linux-64
+  - gxx_linux-64
   - mummer4=4.0.0
   - bedtools=2.30.0
   - sourmash=4.6.1
