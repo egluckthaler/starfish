@@ -1,6 +1,10 @@
 # Install g++ compiler
 conda install -c conda-forge gxx_linux-64
 
+# Set environment variables to use the Conda environment's compilers
+export CC=$CONDA_PREFIX/bin/gcc
+export CXX=$CONDA_PREFIX/bin/g++
+
 # compile CNEFinder
 cd $SRC_DIR/CNEFinder/
 ./pre-install.sh
