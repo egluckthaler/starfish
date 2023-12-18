@@ -1,4 +1,4 @@
-name: Build and Push Apptainer Image
+name: starfish apptainer build and push
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
       - main  # or any other branch you want to trigger the workflow
 
 jobs:
-  build-and-push:
+  apptainer-build-and-push:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout Repository
@@ -26,6 +26,9 @@ jobs:
         ./mconfig && \
             make -C ./builddir && \
             sudo make -C ./builddir install
+        
+        # Go back to the root of the repository and build .sif
+        cd ..
         apptainer build starfish.sif apptainer/starfish.def
 
     # Step to log in to GitHub Packages

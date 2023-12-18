@@ -1,4 +1,4 @@
-name: starfish build
+name: starfish conda build and upload
 
 # This workflow is triggered on pushes to the repository.
 on:
@@ -7,7 +7,7 @@ on:
       - main  # Trigger the workflow on push to the main branch
 
 jobs:
-  build:
+  conda-build-and-upload:
     # This job runs on the latest Ubuntu runner hosted by GitHub Actions
     runs-on: ubuntu-latest
 
