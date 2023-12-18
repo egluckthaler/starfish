@@ -28,7 +28,9 @@ jobs:
       run: |
         conda config --add channels bioconda
         conda config --add channels conda-forge
-        conda install -c conda-forge conda-build conda-verify gcc_linux-64
+        conda activate starfish_build_env
+        conda install -c conda-forge gcc_linux-64
+        conda install conda-build conda-verify
         conda build .
       # This step installs conda-build and then uses it to build your Conda package.
     
