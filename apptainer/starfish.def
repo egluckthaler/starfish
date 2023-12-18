@@ -19,10 +19,13 @@ From: centos:7
     conda config --set channel_priority strict
 
     # Install your Conda package
+    conda create -n starfish python=3.8
+    source activate starfish
     conda install -c egluckthaler starfish || { echo "starfish package not found in egluckthaler channel"; exit 1; }
 
 %environment
     export PATH="/opt/conda/envs/starfish/bin:/opt/conda/bin:$PATH"
+    source activate starfish
 
 %labels
    Author Emile Gluck-Thaler
