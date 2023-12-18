@@ -1,3 +1,6 @@
+# Install g++ compiler
+conda install -c conda-forge gxx_linux-64
+
 # compile CNEFinder
 cd $SRC_DIR/CNEFinder/
 ./pre-install.sh

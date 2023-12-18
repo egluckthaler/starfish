@@ -15,10 +15,11 @@ build:
 requirements:
   build:
     - python=3.8.*
-    - {{ compiler('cxx') }}  # or {{ compiler('cxx') }} for C++
+    - {{ compiler('gxx') }}
     - make
   run:
     - python=3.8.*  # Add your runtime dependencies here
+    - gxx_linux-64
     - mummer4=4.0.0
     - bedtools=2.30.0
     - sourmash>=4.6
