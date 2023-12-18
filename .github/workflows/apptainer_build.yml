@@ -1,0 +1,34 @@
+name: Build and Push Apptainer Image
+
+on:
+  push:
+    branches:
+      - main  # or any other branch you want to trigger the workflow
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v2
+
+    # Step to set up Apptainer and build the .sif image
+    - name: Build Apptainer Image
+      run: |
+        # Replace with commands to build your Apptainer image
+        sudo apt-get update
+        sudo apt-get install -y apptainer
+        apptainer build starfish.sif apptainer/starfish.def
+
+    # Step to log in to GitHub Packages
+    - name: Login to GitHub Container Registry
+      run: echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+    # Step to push the image to GitHub Packages
+    - name: Push to GitHub Packages
+      run: |
+        # Set the image tag
+        IMAGE_TAG=ghcr.io/${{ github.repository_owner }}/starfish:${{ github.sha }}
+
+        # Push the image
+        docker push $IMAGE_TAG
