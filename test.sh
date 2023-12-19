@@ -34,7 +34,8 @@ if [ ! -f "ann/macph6.gene2og.mcl" ] && [ ! -s "ann/macph6.gene2og.mcl" ]; then
     makeblastdb -in blastdb/macpha6.assemblies.fna -out blastdb/macpha6.assemblies -parse_seqids -dbtype nucl || { echo "Failed to create BLAST database"; exit 1; }
 
     # calculate %GC content across all genomes (useful for visualizing elements later)
-    $STARFISH_DIR/../aux/seq-gc.sh -Nbw 1000 blastdb/macpha6.assemblies.fna > macpha6.assemblies.gcContent_w1000.bed || { echo "Failed to calculate GC content"; exit 1; }
+    # $STARFISH_DIR/../aux/seq-gc.sh -Nbw 1000 blastdb/macpha6.assemblies.fna > macpha6.assemblies.gcContent_w1000.bed || { echo "Failed to calculate GC content"; exit 1; }
+    
     rm blastdb/macpha6.assemblies.fna || { echo "Failed to remove temporary assembly fasta"; exit 1; }
 
     # parse the provided eggnog mapper annotations (NB the format of the output file has changed in more recent emapper versions)
@@ -170,7 +171,7 @@ if [ ! -d "locusViz" ]; then
 
     # as before, it is strongly recommended to look at haplotype alignments within each region to manually filter out false positives. Use gggenomes to visualize nucmer alignments (takes ~5min):
     mkdir -p locusViz || { echo "Failed to create new directory locusViz"; exit 1; }
-    starfish locus-viz -T 2 -m region -a ome2assembly.txt -b elementFinder/macpha6.elements.bed -x macpha6 -o locusViz/ -A nucmer -r regionFinder/macpha6.fog3.d600000.m1.regions.txt -d regionFinder/macpha6.fog3.d600000.m1.dereplicated.txt -j regionFinder/macpha6.fog3.d600000.m1.haplotype_jaccard.sim  -g ome2consolidatedGFF.txt --tags geneFinder/macpha6_tyr.filt_intersect.ids --gc macpha6.assemblies.gcContent_w1000.bed || { echo "Failed to execute starfish locus-viz"; exit 1; }
+    starfish locus-viz -T 2 -m region -a ome2assembly.txt -b elementFinder/macpha6.elements.bed -x macpha6 -o locusViz/ -A nucmer -r regionFinder/macpha6.fog3.d600000.m1.regions.txt -d regionFinder/macpha6.fog3.d600000.m1.dereplicated.txt -j regionFinder/macpha6.fog3.d600000.m1.haplotype_jaccard.sim  -g ome2consolidatedGFF.txt --tags geneFinder/macpha6_tyr.filt_intersect.ids || { echo "Failed to execute starfish locus-viz"; exit 1; }
 else
     echo "directory locusViz exists, skipping Element Finder Module test"
 fi
