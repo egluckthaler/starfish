@@ -34,7 +34,7 @@ if [ ! -f "ann/macph6.gene2og.mcl" ] && [ ! -s "ann/macph6.gene2og.mcl" ]; then
     makeblastdb -in blastdb/macpha6.assemblies.fna -out blastdb/macpha6.assemblies -parse_seqids -dbtype nucl || { echo "Failed to create BLAST database"; exit 1; }
 
     # calculate %GC content across all genomes (useful for visualizing elements later)
-    $STARFISH_DIR/../aux/seq-gc.sh -Nbw 1000 blastdb/macpha6.assemblies.fna > macpha6.assemblies.gcContent_w1000.bed || { echo "Failed to calculate GC content"; exit 1; }
+    # $STARFISH_DIR/../aux/seq-gc.sh -Nbw 1000 blastdb/macpha6.assemblies.fna > macpha6.assemblies.gcContent_w1000.bed || { echo "Failed to calculate GC content"; exit 1; }
     rm blastdb/macpha6.assemblies.fna || { echo "Failed to remove temporary assembly fasta"; exit 1; }
 
     # parse the provided eggnog mapper annotations (NB the format of the output file has changed in more recent emapper versions)
@@ -62,7 +62,7 @@ if [ ! -f "geneFinder/macpha6.tyr.bed" ] && [ ! -s "geneFinder/macpha6.tyr.bed" 
     mkdir -p geneFinder || { echo "Failed to create geneFinder directory"; exit 1; }
 
     # De novo annotate tyrs with the provided YR HMM and amino acid queries (~10min)
-    starfish annotate -T 2 -x macpha6_tyr -a ome2assembly.txt -g ome2gff.txt -p $STARFISH_DIR/../db/YRsuperfams.p1-512.hmm -P $STARFISH_DIR/../db/YRsuperfamRefs.faa -i tyr -o geneFinder/ || { echo "Failed to annotate tyrs"; exit 1; }
+    starfish annotate -T 2 -x macpha6_tyr -a ome2assembly.txt -g ome2gff.txt -p ../db/YRsuperfams.p1-512.hmm -P ../db/YRsuperfamRefs.faa -i tyr -o geneFinder/ || { echo "Failed to annotate tyrs"; exit 1; }
 
     # Consolidate the newly predicted gene coordinates with the existing gff3
     starfish consolidate -o ./ -g macpha6.gff3 -G geneFinder/macpha6_tyr.filt_intersect.gff || { echo "Failed to consolidate gene coordinates"; exit 1; }
