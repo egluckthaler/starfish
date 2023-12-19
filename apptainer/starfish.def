@@ -4,7 +4,7 @@ From: quay.io/centos/centos:stream9
 %post
     # Update and install necessary packages
     yum -y update
-    yum -y install wget which bzip2 ca-certificates getopt gawk eval libxcrypt-compat
+    yum -y install wget which bzip2 ca-certificates getopt gawk libxcrypt-compat
 
     # Install Miniconda
     wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
