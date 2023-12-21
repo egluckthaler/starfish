@@ -59,9 +59,9 @@ main: {
 		'nameField|namefield|n=s',
 		'targetFeat=s',
 		'truncate',
-		'gffdb',
-		'assemblydb',
-		'proteindb',
+		'gffdb=s',
+		'assemblydb=s',
+		'proteindb=s',
 		'check',
 		'h|help');
 	Opts_check(\%opts);
