@@ -269,7 +269,8 @@ sub Print_overlapping_names {
 	foreach my $header (keys %{$seqs}) {
 		if (exists $idConversions->{$header}) {
 			my ($genomeID) = split/$SEP/, $header;
-			my $firstFeature = (sort { $a <=> $b } keys %{$idConversions->{$header}})[0];
+			my @features = nsort keys %{$idConversions->{$header}};
+			my $firstFeature = shift @features;
 			my $newHeader = "${genomeID}$SEPprint${firstFeature}";
 			if (not exists $newFeatureIDs{$newHeader}) {
 				$newFeatureIDs{$newHeader} = 1;
@@ -288,7 +289,8 @@ sub Print_overlapping_names {
 			#my $newHeader = "${genomeID}$SEPprint".join(":", nsort keys %{$idConversions->{$header}}); #this is where to change the character that joins up featureIDs of overlapping genes
 			
 			# instead, keep only the first feature (if multiple)
-			my $firstFeature = (sort { $a <=> $b } keys %{$idConversions->{$header}})[0];
+			my @features = nsort keys %{$idConversions->{$header}};
+			my $firstFeature = shift @features;
 			my $newHeader = "${genomeID}$SEPprint${firstFeature}";
 			
 			# check that this new header (i.e., the original geneID in the user supplied annotation file) is unique
@@ -327,7 +329,8 @@ sub Print_overlapping_names {
 			#my $newHeader = "${genomeID}$SEPprint".join(":", nsort keys %{$idConversions->{$metaSeqID}}); #this is where to change the character that joins up featureIDs of overlapping genes
 
 			# instead, keep only the first feature (if multiple)
-			my $firstFeature = (sort { $a <=> $b } keys %{$idConversions->{$metaSeqID}})[0];
+			my @features = nsort keys %{$idConversions->{$metaSeqID}};
+			my $firstFeature = shift @features;
 			my $newHeader = "${genomeID}$SEPprint${firstFeature}";
 
 			# check that this new header is unique
