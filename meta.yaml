@@ -29,7 +29,7 @@ requirements:
     - minimap2=2.24
     - hmmer=3.3.2
     - metaeuk=6.a5d39d9
-    - mafft=7.508
+    - mafft
     - mmseqs2=14.7e284
     - samtools=1.6
     - eggnog-mapper=2.1.12
