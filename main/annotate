@@ -254,6 +254,7 @@ sub Print_overlapping_names {
 	my ($gffOUT) = Open_FH("$OUTDIR/$PREFIX.filt_intersect.gff");
 	my ($fasOUT) = Open_FH("$OUTDIR/$PREFIX.filt_intersect.fas");
 	my ($idOUT) = Open_FH("$OUTDIR/$PREFIX.filt_intersect.ids");
+	my ($conversionOUT) = Open_FH("$OUTDIR/$PREFIX.filt_intersect.new2overlap.ids");
 	my ($newCount, $oldOverlappingCount, $newOverlappingCount) = (0,0,0);
 	my $SEPprint = $SEP;
 	$SEPprint =~ s/\\//g;
@@ -291,12 +292,13 @@ sub Print_overlapping_names {
 			my $firstFeature = (sort { $a <=> $b } keys %{$idConversions->{$header}})[0];
 			my $newHeader = "${genomeID}$SEPprint${firstFeature}";
 			
-			# check that this new header is unique
+			# check that this new header (i.e., the original geneID in the user supplied annotation file) is unique
 			if (not exists $duplicateFeatureIDs{$newHeader}) {
 				print $fasOUT ">$newHeader\n$seqs->{$header}\n";
 				$oldOverlappingCount+= scalar keys %{$idConversions->{$header}};
 				$newOverlappingCount++;
 				print $idOUT "$newHeader\t$IDTAG\n"; # print out a geneID to idtag mapping file
+				print $conversionOUT "$header\t${newHeader}\n";
 			} else { # otherwise, keep the metaeukID
 				print $fasOUT ">$header\n$seqs->{$header}\n";
 				$newCount++;
@@ -315,7 +317,7 @@ sub Print_overlapping_names {
 		next if ($line =~ m/^#/);
 		chomp $line;
 		my ($contigID, $annotator, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $info) = split("\t", $line);
-		next if ($featureType ne $TARGETFEAT); # only parse IDTAG features
+		next if ($featureType ne $TARGETFEAT); # only parse featureType features
 		my ($otherInfo, $metaInfo) = split/;/, $info;
 		$metaInfo =~ m/$NAMEFIELD(.+)$/;
 		my $metaSeqID = $1;
@@ -376,6 +378,7 @@ sub Print_filtered_hmm_hits {
 	my ($gffOUT) = Open_FH("$OUTDIR/$PREFIX.filt.gff");
 	my ($fasOUT) = Open_FH("$OUTDIR/$PREFIX.filt.fas");
 	my ($idOUT) = Open_FH("$OUTDIR/$PREFIX.filt.ids");
+	my ($conversionOUT) = Open_FH("$OUTDIR/$PREFIX.filt.old2new.ids");
 	my $SEPprint = $SEP;
 	$SEPprint =~ s/\\//g;
 	
@@ -400,7 +403,9 @@ sub Print_filtered_hmm_hits {
 		# DK051-Scaffold13	MetaEuk	CDS	20313	20639	90	-	.	Target_ID=consp.1_660283;TCS_ID=consp.1_660283|DK051-Scaffold13|-|94211_CDS;Parent=consp.1_660283|DK051-Scaffold13|-|94211_exon
 
 		my ($contigID, $source, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $info) = split("\t", $line);
+		
 		next if ($featureType ne 'gene'); # only parse gene features from the metaeuk file so you can correctly parse the sequence ID
+		
 		my ($otherInfo, $metaeukID) = split/;/, $info;
 		$metaeukID =~ s/TCS_ID=//;
 		$metaeukID =~ s/\|\d+$//;
@@ -418,6 +423,7 @@ sub Print_filtered_hmm_hits {
 			print $gffOUT join("\t", $contigID, $source, $TARGETFEAT, $begin, $end, $NULL1, $strand, $NULL2, $otherInfo).";$NAMEFIELD${newSeqID}\n";
 			print $fasOUT ">$newSeqID\n$renamedSeqs{$metaeukID}\n";
 			print $idOUT "$newSeqID\t$TAG\n";
+			print $conversionOUT "$metaeukID\t$newSeqID\n";
 		}
 	}
 	return($newGeneCounter);
