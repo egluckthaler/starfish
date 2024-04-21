@@ -259,6 +259,9 @@ sub Print_overlapping_names {
 	my $SEPprint = $SEP;
 	$SEPprint =~ s/\\//g;
 	
+	# load up sequences
+	my ($seqs) = Fasta_hash_nospace($filteredFas);
+
 	# sanity check: verify that none of the newly predicted genes overlap with the same existing feature
 	# if multiple new metaeuk genes overlap with the same existing feature, then the existing feature is likely better quality since it is longer
 	# however, we can't really make that decision here... so let's keep the metaeuk gene IDs in that case
@@ -266,21 +269,17 @@ sub Print_overlapping_names {
 	foreach my $header (keys %{$seqs}) {
 		if (exists $idConversions->{$header}) {
 			my ($genomeID) = split/$SEP/, $header;
-			foreach my $featureID (keys %{$idConversions->{$header}}) {
-				my $firstFeature = (sort { $a <=> $b } keys %{$idConversions->{$header}})[0];
-				my $newHeader = "${genomeID}$SEPprint${firstFeature}";
-				if (not exists $featureID{$newHeader}) {
-					$featureID{$newHeader} = 1;
-				} else {
-					$duplicateFeatureIDs{$newHeader} = 1;
-				}
+			my $firstFeature = (sort { $a <=> $b } keys %{$idConversions->{$header}})[0];
+			my $newHeader = "${genomeID}$SEPprint${firstFeature}";
+			if (not exists $newFeatureIDs{$newHeader}) {
+				$newFeatureIDs{$newHeader} = 1;
+			} else {
+				$duplicateFeatureIDs{$newHeader} = 1;
 			}
 		}
 	}
 	
-	
-	# first change any sequenceIDs in .fas, if applicable, and print
-	my ($seqs) = Fasta_hash_nospace($filteredFas);
+	# change any sequenceIDs in .fas, if applicable, and print	
 	foreach my $header (keys %{$seqs}) {
 		if (exists $idConversions->{$header}) {
 			my ($genomeID) = split/$SEP/, $header;
