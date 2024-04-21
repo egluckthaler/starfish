@@ -505,8 +505,6 @@ sub Opts_check {
 		#	shouldn't be an issue for use because we do a search per genome, never expect more than 300 copies of a given gene per genome
 		$opts->{'metaeukopts'} = '-v 3 -s 7.5 -e 0.0001 --max-intron 2000 --max-seqs 300 --metaeuk-eval 0.001 --exhaustive-search 1 --metaeuk-tcov 0.25 --allow-deletion 1 --protein 1 --disk-space-limit 100G --compressed 1';
 	}
-
-
 	if (not defined $opts->{'hmmsearchopts'}) {
 		# hmmsearch paramters
 		#  --max    : Turn all heuristic filters off (less speed, more power)
