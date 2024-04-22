@@ -84,6 +84,7 @@ main: {
 
 		my @fastadb;
 		my ($fastaFiles) = dim_1_hash($opts{'assembly'}, "\t", "0:1");
+		
 		foreach my $genomeID (keys %{$fastaFiles}) {
 			if (defined $opts{'check'}) {
 				Format_check_fasta($fastaFiles->{$genomeID}, $opts{'separator'});
