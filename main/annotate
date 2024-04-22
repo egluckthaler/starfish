@@ -356,7 +356,7 @@ sub Parse_overlap_gff {
 		#DK180_Scaffold1	MetaEuk	gene	222642	225282	1038	+	.	Target_ID=sodalk2_346302;Name=DK180_TYR01301	DK180_Scaffold1	GLEAN	gene	222642	223415	.	+	.	ID=DK180_V000059;Name=DK180_V000059	774
 		my ($metaContig, $metaMeta, $metaFeat, $metaStart, $metaEnd, $metaNA1, $metaStrand, $metaNA2, $metaInfo, $predContig, $predMeth, $predFeat, $predStart, $predEnd, $predNA1, $predStrand, $predNA2, $predInfo, $overlap) = split/\t/, $line;
 		
-		if (defined $overlap && $overlap > 0) { 
+		if ((defined $overlap) && ($overlap > 0)) { 
 			$metaInfo = "\t$metaInfo"; # for helping with regex parsing
 			$metaInfo =~ m/[;\t]$NAMEFIELD([^\t]+)/;
 			my $metaSeqID = $1;
