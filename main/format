@@ -8,7 +8,7 @@ use Sort::Naturally;
 use FileHandle;
 $|=1;
 # glofish lib
-use Fishtank::Utils qw(Fasta_hash_nospace dim_1_hash Open_FH Format_check_fasta Format_check_gff Gff_gene_hash Format_name);
+use Fishtank::Utils qw(Fasta_hash_nospace dim_1_hash Open_FH Format_check_fasta Format_check_gff Gff_gene_hash Format_name Commandline_check);
 
 sub usage {
 	my $message = shift;
@@ -83,7 +83,7 @@ main: {
 		print "[$datestring] reformatting assembly sequence headers..\n";
 
 		my @fastadb;
-		my ($fastaFiles) = dim_1_hash(opts{'assembly'}, "\t", "0:1");
+		my ($fastaFiles) = dim_1_hash($opts{'assembly'}, "\t", "0:1");
 		foreach my $genomeID (keys %{$fastaFiles}) {
 			if (defined $opts{'check'}) {
 				Format_check_fasta($fastaFiles->{$genomeID}, $opts{'separator'});
