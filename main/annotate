@@ -219,8 +219,15 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 			# sometimes, gff files have 'region' features that mess up the intersect analysis because they represent entire contigs, so make sure you only pull out the target feature of interest from the supplied gffs
 			system("rm $opts{outdir}/$opts{prefix}.intersect.gff") if (-f "$opts{outdir}/$opts{prefix}.intersect.gff"); # remove intersect file if it exists, because we print using '>>'
 			foreach my $gffFile (nsort keys %{$gffFiles}) {
-				my ($bedtoolsFailCheck) = system("bedtools intersect -a $opts{outdir}/$opts{prefix}.filt.gff -b <(grep -w $opts{'targetFeat'} $gffFile) -wao >> $opts{outdir}/$opts{prefix}.intersect.gff");
-				if ($bedtoolsFailCheck != 0) { die "\n\n[$datestring] error: could not execute bedtools intersect on commandline for $opts{outdir}/$opts{prefix}.filt.gff and $gffFile, exiting..\n$!\n";}
+				my ($grepFailCheck) = system("grep -w $opts{'targetFeat'} $gffFile > $opts{outdir}/$opts{prefix}.temp.gff");
+				if ($grepFailCheck != 0) { die "\n\n[$datestring] error: could not execute grep on commandline for $gffFile, exiting..\n$!\n";}
+
+				if (! -z "$opts{outdir}/$opts{prefix}.temp.gff") {
+					my ($bedtoolsFailCheck) = system("bedtools intersect -a $opts{outdir}/$opts{prefix}.filt.gff -b $opts{outdir}/$opts{prefix}.temp.gff -wao >> $opts{outdir}/$opts{prefix}.intersect.gff");
+					if ($bedtoolsFailCheck != 0) { die "\n\n[$datestring] error: could not execute bedtools intersect on commandline for $opts{outdir}/$opts{prefix}.filt.gff and $gffFile, exiting..\n$!\n";}
+					system("rm $opts{outdir}/$opts{prefix}.temp.gff");
+				}
+				
 			}
 			sleep(5); # to avoid issues with bedtools I/O
 			my ($idConversions) = Parse_overlap_gff("$opts{outdir}/$opts{prefix}.intersect.gff", $opts{'separator'}, $opts{'nameField'});
