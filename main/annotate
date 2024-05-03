@@ -222,7 +222,7 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 				my ($grepFailCheck) = system("grep -w $opts{'targetFeat'} $gffFile > $opts{outdir}/$opts{prefix}.temp.gff");
 				if ($grepFailCheck != 0) { die "\n\n[$datestring] error: could not execute grep on commandline for $gffFile, exiting..\n$!\n";}
 
-				if (! -z "$opts{outdir}/$opts{prefix}.temp.gff") {
+				if ((-f "$opts{outdir}/$opts{prefix}.temp.gff") && (! -z "$opts{outdir}/$opts{prefix}.temp.gff")) {
 					my ($bedtoolsFailCheck) = system("bedtools intersect -a $opts{outdir}/$opts{prefix}.filt.gff -b $opts{outdir}/$opts{prefix}.temp.gff -wao >> $opts{outdir}/$opts{prefix}.intersect.gff");
 					if ($bedtoolsFailCheck != 0) { die "\n\n[$datestring] error: could not execute bedtools intersect on commandline for $opts{outdir}/$opts{prefix}.filt.gff and $gffFile, exiting..\n$!\n";}
 					system("rm $opts{outdir}/$opts{prefix}.temp.gff");
