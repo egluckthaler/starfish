@@ -28,7 +28,7 @@ Required, with defaults:
 -n, --nameField   STR    GFF attribute field where features are named.
                          (default: 'Name=')
 --targetFeat      STR    feature to parse from GFF file
-                         (default: mRNA)
+                         (default: mRNA; 'all' for all features)
 
 Optional:
 --check                  check file formatting and skip reformatting
@@ -315,7 +315,7 @@ sub Format_fasta {
 
 sub Format_gff {
 	my ($genomeID, $gffFile, $SEP, $NAMEFIELD, $TARGETFEAT, $TRUNCATE) = @_;
-	my ($gffFileName, $gffOUTDIR, $gffSuffix) = fileparse($gffFile, (".gff", ".gff3"));
+	my ($gffFileName, $gffOUTDIR, $gffSuffix) = fileparse($gffFile, (".gff", ".gff3", ".gtf"));
 	my $newGff = "$gffOUTDIR/$gffFileName.starfish_format$gffSuffix";
 	my ($OUT) = Open_FH($newGff);
 	open (my $IN, '<', $gffFile) or usage("\nError: can't open $gffFile for reading\n");
@@ -336,7 +336,7 @@ sub Format_gff {
 		my $info = join("", @fields);
 		$info =~ s/\t/_/g;
 		if (defined $featureType) {
-			next if ($featureType ne $TARGETFEAT); # only parse target features
+			next if (($featureType ne $TARGETFEAT) && ($TARGETFEAT ne 'all')); # only parse TARGETFEAT features or all features
 			my ($newContigID) = Format_name($contigID, $genomeID, $SEP, $TRUNCATE);
 			if ($info =~ m/$NAMEFIELD([^;]+)/) { # if we can't parse target feature name according to the user-provide NAMEFIELD, then skip the line
 				my $geneName = $1;

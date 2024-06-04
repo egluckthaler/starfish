@@ -48,14 +48,18 @@ sub Gff_sortable_gene_hash {
 	my (%allGenes);
 	open(my $IN, '<', $gffFile) or die("\nError: could not open $gffFile for reading\n");
 	my $datestring = localtime();
-	print "[$datestring] parsing $gffFile for all $TARGETFEAT features and ignoring everything else..\n";
+	if ($TARGETFEAT eq 'all') {
+		print "[$datestring] parsing $gffFile for all features..\n";
+	} else {
+		print "[$datestring] parsing $gffFile for all $TARGETFEAT features and ignoring everything else..\n";
+	}
 	while (my $line = <$IN>) {
 		last if ($line =~ m/^##FASTA/);
 		next if ($line =~ m/^#/);
 		chomp $line;
 		#acquire info
 		my ($contigID, $annotator, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $info) = split("\t", $line);
-		next if ($featureType ne $TARGETFEAT); # only parse $TARGETFEAT features
+		next if (($featureType ne $TARGETFEAT) && ($TARGETFEAT ne 'all')); # only parse TARGETFEAT features or all features
 		$info = "\t$info";
 		$info =~ m/[;\t]$NAMEFIELD([^;]+)/;
 		my $seqID = $1;
@@ -302,14 +306,19 @@ sub Fasta_hash_many_files {
 sub Gff_gene_hash {
 	my ($gffFile, $NAMEFIELD, $TARGETFEAT) = @_;
 	my %genes;
-	die("Error: the GFF3 attribute field where gene features are named is not being passed correctly to sub GFF_hash\n") if (not defined $NAMEFIELD);
+	die("Error: the GFF3 attribute field where features are named is not being passed correctly to sub GFF_hash\n") if (not defined $NAMEFIELD);
 	open (my $IN, '<', $gffFile) or die("Error: can't open $gffFile for reading\n");
 	my $datestring = localtime();
-	print "[$datestring] parsing $gffFile for all $TARGETFEAT features and ignoring everything else..\n";
+	if ($TARGETFEAT eq 'all') {
+		print "[$datestring] parsing $gffFile for all features..\n";
+	} else {
+		print "[$datestring] parsing $gffFile for all $TARGETFEAT features and ignoring everything else..\n";
+	}
+	
 	while (my $line = <$IN>) {
 		chomp $line;
 		my ($contigID, $annotator, $featureType, $begin, $end, $NULL1, $strand, $NULL2, $attributes) = split("\t", $line);
-		next if ($featureType ne $TARGETFEAT); # only parse TARGETFEAT features
+		next if (($featureType ne $TARGETFEAT) && ($TARGETFEAT ne 'all')); # only parse TARGETFEAT features or all features
 		$attributes = "\t$attributes";
 		$attributes =~ m/[;\t]$NAMEFIELD([^;]+)/;
 		my $seqID = $1;
@@ -506,8 +515,8 @@ sub Format_check_gff {
 		my $datestring = localtime();
 		die("[$datestring] error: $gffFile should be tab-separated, but likely is not\n") if (not defined $featureType);
 		
-		# only look at '$TARGETFEAT' features
-		next if ($featureType ne $TARGETFEAT);
+		# only look at '$TARGETFEAT' features or all features
+		next if (($featureType ne $TARGETFEAT) && ($TARGETFEAT ne 'all'));
 		
 		$info = "\t$info"; # for helping with regex parsing
 		$info =~ m/[;\t]$NAMEFIELD([^;]+)/;
@@ -552,11 +561,12 @@ sub Format_name {
 		$newName = "${genomeID}${SEPprint}${name}";
 	}
 	
+	# old code from when ':' was used to indicate merged genes
 	# remove any and all ':', ';' and '|' from name
-	if ($newName =~ /:|;|\|/) {
-		warn("warning: the sequenceID $newName has a :, ; or | in it, will remove it to prevent issues downstream\n");
-		$newName =~ s/:|;|\|//g;
-	}
+# 	if ($newName =~ /:|;|\|/) {
+# 		warn("warning: the sequenceID $newName has a :, ; or | in it, will remove it to prevent issues downstream\n");
+# 		$newName =~ s/:|;|\|//g;
+# 	}
 	
 
 	# truncate name to first 50 chars, if requested
