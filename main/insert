@@ -15,8 +15,8 @@ use Fishtank::Utils qw(Commandline_check Add_genome_to_sequence Sort_bed_hash_by
 my $minDR = 4;
 my $maxDR = 40;
 my $maxEmpty = 2000; 
-my $maxStarshipLengthFlag = 700000;
-my $minStarshipLengthFlag = 2000;
+my $maxStarshipLengthFlag = 800000;
+my $minStarshipLengthFlag = 15000;
 
 sub usage {
 	my $message = shift;
@@ -40,11 +40,11 @@ Required, with defaults:
 -T, --threads       INT    number of threads for parallel BLASTn search.
                            (default: 2)
 --upstream          I-I    bp range to search upstream of candidate captains.
-                           (default: 0-17000)
+                           (default: 0-8000)
 --downstream        I-I    bp range to search downstream of hits to upstreams.
-                           (default: 0-14000)
+                           (default: 0-5000)
 --length            I-I    min-max insertion length.
-                           (default: 2000-700000)
+                           (default: 15000-800000)
 --pid               INT    min perc identity of alignments in blastn and nucmer.
                            (default: 90)
 --hsp               INT    min alignment length for blastn and nucmer.
@@ -1780,13 +1780,13 @@ sub Opts_check {
 		$opts->{'pid'} = '90';
 	}
 	if (not defined $opts->{'upstream'}) {
-		$opts->{'upstream'} = '0-17000';
+		$opts->{'upstream'} = '0-8000';
 	}
 	if (not defined $opts->{'downstream'}) {
-		$opts->{'downstream'} = '0-14000';
+		$opts->{'downstream'} = '0-5000';
 	}
 	if (not defined $opts->{'length'}) {
-		$opts->{'length'} = '2000-700000';
+		$opts->{'length'} = '15000-800000';
 	}
 	# blastn parameters
 	# dc-megablast Discontiguous megablast used to find more distant (e.g., interspecies) sequences, hopefully will help with larger gaps and highly evolving content

@@ -23,16 +23,28 @@ The ```starfish``` workflow is organized into three main modules: Gene Finder, E
   src="/assets/starfishWorkflow.png"
   style="display: center; margin: 0 auto; max-width: 400px">
 
+## Quick install with conda
+
+```
+conda config --add channels bioconda
+conda config --add channels conda-forge
+conda config --set channel_priority strict
+conda create -c egluckthaler -n starfish python=3.8 starfish
+conda activate starfish
+```
+
 ## Documentation
 
-Head to our [GitHub Wiki](https://github.com/egluckthaler/starfish/wiki) for useful resources, including [installation instructions](https://github.com/egluckthaler/starfish/wiki/Installation), a [manual](https://github.com/egluckthaler/starfish/wiki/Manual) with important details and considerations for each command, and a [step-by-step tutorial](https://github.com/egluckthaler/starfish/wiki/Step-by-step-tutorial). If you run into difficulties, please open an issue on [GitHub](https://github.com/egluckthaler/starfish/issues)
+Head to our [GitHub Wiki](https://github.com/egluckthaler/starfish/wiki) for more [installation options](https://github.com/egluckthaler/starfish/wiki/Installation), a [manual](https://github.com/egluckthaler/starfish/wiki/Manual) with important details and considerations for each command, and a [step-by-step tutorial](https://github.com/egluckthaler/starfish/wiki/Step-by-step-tutorial). If you run into difficulties, please open an issue on [GitHub](https://github.com/egluckthaler/starfish/issues)
 
-## Citations and dependencies
+## Citation and license
 
-Many ```starfish``` commands have dependencies that are stand-alone programs in their own right. If you use ```starfish``` in your research, please contact us as it has not yet been published.
+Please cite our work if you use ```starfish``` in your research:
 
-Please cite both the ```starfish``` manuscript in addition to any dependencies you may have used (see Table below for a guide). For example:
-> We used starfish v1.0.0 (Gluck-Thaler and Vogan 2023) in conjunction with metaeuk (Karin et al. 2020), mummer4 (Marcais et al 2018), and blastn (Camacho et al. 2009) to annotate and visualize giant mobile elements.
+[*Gluck-Thaler, E., & Vogan, A. A. (2024). Systematic identification of cargo-carrying genetic elements reveals new dimensions of eukaryotic diversity. Nucleic Acids Research, 2024-06.*](https://academic.oup.com/nar/article/52/10/5496/7660083)
+
+Many ```starfish``` commands have dependencies that are stand-alone programs in their own right. Please cite both the ```starfish``` manuscript in addition to any dependencies you may have used (see Table below for a guide). For example:
+> We used starfish v1.0.0 (Gluck-Thaler and Vogan 2024) in conjunction with metaeuk (Karin et al. 2020), mummer4 (Marcais et al 2018), and blastn (Camacho et al. 2009) to annotate and visualize *Starship* elements.
 
 | Command | Dependency | Citation |
 |:---:|:---:|:---|
@@ -42,11 +54,5 @@ Please cite both the ```starfish``` manuscript in addition to any dependencies y
 |`sim`| `sourmash` | [Pierce et al 2019](https://pubmed.ncbi.nlm.nih.gov/31508216/) |
 |`group`| `mcl` | [Enright et al. 2002](https://pubmed.ncbi.nlm.nih.gov/11917018/) |
 |`*-viz`|`circos`, `gggenomes`, `mummer4`, <br />`mafft`, `minimap2`| [Krzywinski et al. 2009](https://pubmed.ncbi.nlm.nih.gov/19541911/), [Hackl and Ankenbrand 2022](https://thackl.github.io/gggenomes/authors.html), [Marcais et al 2018](https://pubmed.ncbi.nlm.nih.gov/29373581/), <br />[Katoh and Standley](https://pubmed.ncbi.nlm.nih.gov/23329690/), [Li 2018](https://pubmed.ncbi.nlm.nih.gov/29750242/)|
-
-## License and acknowlegements
-
-Please cite our work if you use ```starfish``` in your research:
-
-[*Gluck-Thaler, E., & Vogan, A. A. (2023). Systematic identification of cargo-carrying genetic elements reveals new dimensions of eukaryotic diversity. bioRxiv, 2023-10.*](https://www.biorxiv.org/content/10.1101/2023.10.24.563810v1)
 
 ```starfish``` is an open source tool available under the GNU Affero General Public License version 3.0 or greater. This work was supported by funding from the European Union’s Horizon 2020 research and innovation programme under the Marie Skłodowska-Curie grant agreement (grant number 890630).
