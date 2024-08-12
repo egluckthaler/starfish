@@ -201,8 +201,6 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 		if (! -f "$opts{outdir}/$opts{prefix}.filt_intersect.fas" || ! -f "$opts{outdir}/$opts{prefix}.filt_intersect.gff" || $opts{'force'} == 1) {
 
 			$datestring = localtime();
-			print "[$datestring] lifting over names of overlapping feature from GFFs in $opts{'gff'} to metaeuk annotations..\n";
-			
 			my ($gffFiles) = dim_0_hash($opts{'gff'}, "\t", "1");
 			
 			# check gff formatting
@@ -213,22 +211,23 @@ hmmsearch      $opts{hmmsearchopts}\n\n";
 					Format_check_gff($gffFile, $opts{'separator'}, $opts{'nameField'}, $opts{'targetFeat'});
 				}
 			}
-					
+
 			# find the newly predicted genes that overlap with existing genes, and those that don't, then filter by hmm hits
 			# -wao Write the original A and B entries plus the number of base pairs of overlap between the two features. A features w/o overlap are also reported with a NULL B feature and overlap = 0.
 			# sometimes, gff files have 'region' features that mess up the intersect analysis because they represent entire contigs, so make sure you only pull out the target feature of interest from the supplied gffs
+			print "[$datestring] lifting over names of overlapping feature from GFFs in $opts{'gff'} to metaeuk annotations with bedtools..\n";
 			system("rm $opts{outdir}/$opts{prefix}.intersect.gff") if (-f "$opts{outdir}/$opts{prefix}.intersect.gff"); # remove intersect file if it exists, because we print using '>>'
 			foreach my $gffFile (nsort keys %{$gffFiles}) {
-				my ($grepFailCheck) = system("grep -w $opts{'targetFeat'} $gffFile > $opts{outdir}/$opts{prefix}.temp.gff");
-				if ($grepFailCheck != 0) { die "\n\n[$datestring] error: could not execute grep on commandline for $gffFile, exiting..\n$!\n";}
+				my ($grepFailCheck) = system("grep -w $opts{targetFeat} $gffFile > $opts{outdir}/$opts{prefix}.temp.gff");
+				if ((! -f "$opts{outdir}/$opts{prefix}.temp.gff") || (-z "$opts{outdir}/$opts{prefix}.temp.gff")) { die "\n\n[$datestring] error: could not parse any $opts{targetFeat} features from $gffFile, try specifying another feature type with --targetFeat\n$!\n";}
 
 				if ((-f "$opts{outdir}/$opts{prefix}.temp.gff") && (! -z "$opts{outdir}/$opts{prefix}.temp.gff")) {
 					my ($bedtoolsFailCheck) = system("bedtools intersect -a $opts{outdir}/$opts{prefix}.filt.gff -b $opts{outdir}/$opts{prefix}.temp.gff -wao >> $opts{outdir}/$opts{prefix}.intersect.gff");
 					if ($bedtoolsFailCheck != 0) { die "\n\n[$datestring] error: could not execute bedtools intersect on commandline for $opts{outdir}/$opts{prefix}.filt.gff and $gffFile, exiting..\n$!\n";}
-					system("rm $opts{outdir}/$opts{prefix}.temp.gff");
-				}
-				
+				}				
 			}
+			system("rm $opts{outdir}/$opts{prefix}.temp.gff");
+			
 			sleep(5); # to avoid issues with bedtools I/O
 			my ($idConversions) = Parse_overlap_gff("$opts{outdir}/$opts{prefix}.intersect.gff", $opts{'separator'}, $opts{'nameField'});
 			
