@@ -61,6 +61,13 @@ Required, with defaults:
 --deltafilteropts   STR    options to pass to delta-filter.
                            (default: '-m')
 Optional:  
+--scaffolds         FILE   2 column tsv: ref contigID, query contigID. 
+                           limits alignments between contigs that are known to be 
+                           homologous. useful for decreasing false positive rate 
+                           if contigs have been previously mapped to each other 
+                           e.g. with RagTag. WARNING: only the contigs listed in 
+                           this file will be considered valid comparisons for a 
+                           given ref-query
 -t, --taxonomy      FILE   3 column tsv: genome code, taxID to include in 
                            alignments, taxID to exclude from alignments.
                            (or '.' instead of taxID if not required)
@@ -169,6 +176,9 @@ delta-filt             $opts{deltafilteropts}\n\n";
 		my ($taxa) = dim_1_hash($opts{'taxonomy'}, "\t", "0:1") if (defined $opts{'taxonomy'});
 		my ($taxaExclude) = dim_1_hash($opts{'taxonomy'}, "\t", "0:2") if (defined $opts{'taxonomy'});
 		
+		# parse scaffolding info, if provided
+		my ($scaffolds) = Parse_scaffolding_info($opts{'scaffolds'}, $opts{'separator'}) if (defined $opts{'scaffolds'});
+		
 		# parse database info, if provided
 		my $threads = $opts{'threads'} if (defined $opts{'threads'});
 		my $dbPath = $opts{'database'} if (defined $opts{'database'});
@@ -193,7 +203,7 @@ delta-filt             $opts{deltafilteropts}\n\n";
 		# checkpointing works such that you can add new genomes to an existing file and all captains will be searched against them
 		# and any new captains in the new genomes will be searched against everything else
 		# structured: @{$elementUpstreamHits{$capID}{$starshipID}{$capContigID}{$emptyContigID }}, $sstart, $ssend, $sstrand, $tag, '.';
-		my ($emptyUpstreamHits) = Element_upstream_search($elementUpstreams, $assemblies, $opts{'separator'}, $opts{'pid'}, $opts{'hsp'}, $opts{'blastopts'},  $opts{'outdir'}, $opts{'prefix'}, $taxa, $taxaExclude, $ome2assemblyPath, $dbPath, $threads);
+		my ($emptyUpstreamHits) = Element_upstream_search($elementUpstreams, $assemblies, $opts{'separator'}, $opts{'pid'}, $opts{'hsp'}, $opts{'blastopts'},  $opts{'outdir'}, $opts{'prefix'}, $taxa, $taxaExclude, $scaffolds, $ome2assemblyPath, $dbPath, $threads);
 		
 		$datestring = localtime();
 		if (scalar(keys(%{$emptyUpstreamHits})) == 0) { die "\n\n[$datestring]: found 0 $opts{'idtag'} captains with candidate insertion sites, exiting..\n";}
@@ -1319,7 +1329,7 @@ sub Parse_downstream_region_from_empty {
 }
 
 sub Element_upstream_search {
-	my ($elementUpstreams, $assemblies, $SEP, $minPercID, $minHSPlength, $blastnDefaults, $OUTDIR, $PREFIX, $taxa, $taxaExclude, $ome2assemblyPath, $dbPath, $threads) = @_;
+	my ($elementUpstreams, $assemblies, $SEP, $minPercID, $minHSPlength, $blastnDefaults, $OUTDIR, $PREFIX, $taxa, $taxaExclude, $scaffolds, $ome2assemblyPath, $dbPath, $threads) = @_;
 	
 	# since this step can take a really long time, save each blastn search to file, and 
 	# re-read file if starting over
@@ -1390,6 +1400,7 @@ sub Element_upstream_search {
 				# skip those that have been examined already, restrict by taxonomy file (if provided), store forbidden coordinates, print id alias file
 				my %emptyGenomesToSearch; # stores the final list of empty genomes that will be searched
 				my $partialSearchCheck = 0;
+				my $scaffoldSearchCheck = 0;
 				foreach my $emptyGenome (keys %{$assemblies}) {
 					
 					# store in emptyUpstreamHit so that it gets saved the next time the checkpoint file is written
@@ -1410,7 +1421,7 @@ sub Element_upstream_search {
 						}
 					}
 					
-					# if a taxonomy file was provided, assume that we will not be searching the whole database
+					# if a taxonomy was provided, assume that we will not be searching the whole database
 					# restrict searches by taxonomic ID, if a taxonomy file was provided
 					if (defined $taxa) {
 						$partialSearchCheck = 1;
@@ -1423,7 +1434,7 @@ sub Element_upstream_search {
 							next if ($taxa->{$capGenome} ne $taxa->{$emptyGenome});
 						}
 					}
-										
+					
 					# gather up a list of all empty genomes to search for this captain, given the prior criteria for conducting a search
 					$emptyGenomesToSearch{$emptyGenome} = 1;
 					
@@ -1442,19 +1453,40 @@ sub Element_upstream_search {
 					}
 					my ($elementOUT) = Open_FH($elementFile);
 					print $elementOUT ">$capContigID\n$assemblies->{$capGenome}->{$capContigID}\n";
-			
-					# check if we need to do a partial database search and print out contigIDs to specifically search; otherwise use the complete list of contigIDs that already exists
+					
+					# check if any scaffolding info was provided for this particular cap contig
+					if ((defined $scaffolds) && (exists $scaffolds->{$capContigID})) {
+						$scaffoldSearchCheck = 1;				
+					}
+					
+					# prepare to print out a new contig ID file, in case restrictions trigger
 					my $idFile;
 					my $partialIdFile = "$OUTDIR/partialEmpties.$PREFIX.ids";
 					my ($partialIdOUT) = Open_FH($partialIdFile);
-					if ($partialSearchCheck == 1) {
-						$idFile = $partialIdFile; # determine which ID file should be used; switch to using partial id file if serach check passes
+														
+					# check if we need to do a partial database search and print out contigIDs to specifically search; otherwise use the complete list of contigIDs that already exists
+					# this will be true if we are restricting by taxid, or by scaffold, if a scaffold file was provided					
+					if (($partialSearchCheck == 1) && ($scaffoldSearchCheck == 0)) {
+						$idFile = $partialIdFile; # determine which ID file should be used; switch to using partial id file if search check passes
 						foreach my $emptyGenome (keys %emptyGenomesToSearch) {
 							foreach my $emptyContigID (keys %{$assemblies->{$emptyGenome}}) {
 								print $partialIdOUT "$emptyContigID\n";
 							}
 						}
-					} else {
+					} elsif ($scaffoldSearchCheck == 1) { # should still enable partialSearchCheck to run successfully if true given that the info is printed out from emptyGenomesToSearch
+						$idFile = $partialIdFile; # determine which ID file should be used; switch to using partial id file if search check passes
+						foreach my $emptyGenome (keys %emptyGenomesToSearch) {
+							if (exists $scaffolds->{$capContigID}->{$emptyGenome}) { # if scaffolding info exists for this empty genome, print out only those contigs that should be compared to cap contig
+								foreach my $emptyContigID (keys %{$scaffolds->{$capContigID}->{$emptyGenome}}) {
+									print $partialIdOUT "$emptyContigID\n";
+								}
+							} else { #if no scaffolding information exists for this empty genome, print out all its contigs
+								foreach my $emptyContigID (keys %{$assemblies->{$emptyGenome}}) {
+									print $partialIdOUT "$emptyContigID\n";
+								}
+							}
+						}
+					} else { # use the complete ID file if taxa and scaffold checks fail
 						$idFile = $completeIdFile;
 					}
 				
@@ -1745,6 +1777,23 @@ sub Parse_longest_HSP {
 	return($sseqid, $sstart, $send, $sstrand);
 }
 
+sub Parse_scaffolding_info {
+	my ($scaffoldFile, $SEP) = @_;
+	my %scaffolds;
+	open(my $in, '<', $scaffoldFile) or die("Error: cannot open $scaffoldFile for reading..\n");
+	while (my $line = <$in>) {
+		if ($line =~ m/^#/) {
+			next;
+		} else {
+			chomp $line;
+			my ($refContig, $queContig) = split/\t/, $line;
+			my ($queGenome) = split/$SEP/, $queContig;
+			$scaffolds{$refContig}{$queGenome}{$queContig} = 1;
+		}
+	}
+	return(\%scaffolds);	
+}
+
 sub Opts_check {
 	my ($opts) = @_;
 	usage() if (exists $opts->{'h'});
@@ -1759,6 +1808,9 @@ sub Opts_check {
 	usage("\nError: the directory provided to --outdir does not exist\n") if (! -d $opts->{'outdir'});
 	if (defined $opts->{'taxonomy'}) {
 		usage("\nError: the file provided to --taxonomy does not exist\n") if (! -f $opts->{'taxonomy'});
+	}
+	if (defined $opts->{'scaffolds'}) {
+		usage("\nError: the file provided to --scaffolds does not exist\n") if (! -f $opts->{'scaffolds'});
 	}
 	if (defined $opts->{'database'}) {
 		usage("\nError: the blastn database provided to --database not exist\n") if (! -f "$opts->{'database'}.ndb" && ! -f "$opts->{'database'}.nin" && ! -f "$opts->{'database'}.00.nin");
