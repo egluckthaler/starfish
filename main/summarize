@@ -10,6 +10,13 @@ $|=1;
 # Fishtank lib
 use Fishtank::Utils qw(Annotation_hash Edit_distance_check Gff_sortable_gene_hash Reverse_complement Fasta_hash_many_files Glofish_bed_hash dim_0_hash dim_1_hash Open_FH);
 
+
+# Default values for selecting the 'best' insertion site based on flanking alignment coverage
+# Default length of flanking region searching in starfish insert is currently +/- 100000bp
+my $flankCovHigh = 100000;
+my $flankCovMed = 50000;
+my $flankCovLow = 0;
+
 sub usage {
 	my $message = shift;
 	my $usage = qq/
@@ -28,7 +35,7 @@ Required, with defaults:
                          (default: '_')
 
 Optional:
--S, --stats       FILE   stats.txt file.
+-S, --stats       FILE   insert.stats file.
                          (output by starfish insert)
 -f, --flank       FILE   singleDR.stats file.
                          (output by starfish flank)
@@ -88,17 +95,6 @@ main: {
 		my ($assemblyPaths) = dim_0_hash($opts{'assembly'}, "\t", "1");
 		my ($assemblies) = Fasta_hash_many_files($assemblyPaths);
 		
-		# Print out a new .stats file where we assign a unique ID to empty sites on the fly
-		my ($emptyCoords);
-		if (defined $opts{'stats'}) {
-			my $newStatsFile = "$opts{'outdir'}/$opts{'prefix'}.elements.named.stats";
-			Print_named_stats($opts{'stats'}, $newStatsFile, $opts{'separator'});
-		
-			# Parse the coordinates of all empty sites associated with Starship insertions
-			# structured: emptySites{contigID}{regionID}{emptyContig} = [emptyBegin, emptyEnd, strand, emptySiteID]
-			($emptyCoords) = Parse_empty_sites($newStatsFile);
-		}
-		
 		# Parse empty sites for elements with flank boundaries (located in singleDR.stats file)
 		# structured: {capID} = emptyContigID
 		my ($flankCoords) = Parse_flank_empty($opts{'flank'}) if (defined $opts{'flank'});
@@ -108,6 +104,8 @@ main: {
 		my %allGenes;
 		if (defined $opts{'gff'}) {
 			my ($ome2gff) = dim_1_hash($opts{'gff'}, "\t", "0:1");
+			$datestring = localtime();
+			print "[$datestring] parsing ".scalar(keys %{$ome2gff})." gff files for all $opts{targetFeat} features and ignoring everything else..\n";
 			foreach my $ome (keys %{$ome2gff}) {
 				my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'}, $opts{'targetFeat'});
 				foreach my $contig (keys %{$gffInfo}) {
@@ -146,17 +144,27 @@ main: {
 
 		$datestring = localtime();
 		print "[$datestring] identifying large mobile genetic elements by their boundary features..\n";
-
-		# Now identify Starship elements based on boundary features
+		
+		# first, read in some stats associated with each candidate empty site
+		# structured: emptySites{contigID}{regionID}{emptyContig} = [emptyBegin, emptyEnd, strand, $flankCoverage]
+		my $originalEmptyCoords;
+		if (defined $opts{'stats'}) {
+			($originalEmptyCoords) = Parse_unnamed_empty_sites($opts{'stats'});
+		}
+		
+		# Now identify Starship elements based on boundary features and pick a single REFerence boundary based on a reference empty site
 		# make sure boundary features are consistent, ie., that they flank the captain
 		# Captain will be determined according to the DUF3435 associated with
 		# the boundary feature, where features are prioritized as follows:
 		# 'flank', 'insert', 'extend'. 
+
+		# Select a 'reference' (ref) boundary and its associated empty site based on 3 criteria: boundary type (flank > insert > extend), length of flanking alignment coverage (high > med > low), distance to captain (closest upstream boundary)
 		# If multiple 'insert' boundary features are present, the one with a DR-like empty insertion site will be selected (but with above priority)
 		# If no DR-like insertion sites exist, then just the insert boundary whose upstream is closest to the captain will be selected
 		# structured: {contigID}{regionID}{featBegin}{captain gene/boundary feature} = [start, end, strand, tag, ann]
 		# all starships will consist of a single captain sequence and at most two boundary features
-		my ($starshipsTemp) = Identify_starships_by_boundary_features($bedFeatures);
+		# note that only 'uniq' boundaries will be present in the insert.bed file and we will have to select from among there
+		my ($starshipsTemp) = Identify_starships_by_boundary_features($bedFeatures, $originalEmptyCoords);
 	
 		# demote captains that have the same insert site as a captain further upstream (will happen if separate insert sites cannot be resolves for captains that are too close together)
 		# structured: {contigID}{regionID}{featBegin}{captain gene/boundary feature} = [start, end, strand, tag, ann]
@@ -164,6 +172,18 @@ main: {
 
 		# count boundary feature types
 		my ($insertCount, $flankCount, $extendCount) = Count_boundary_feature_types($starships);
+
+		# Print out a new .stats file where we assign a unique ID to empty sites on the fly
+		my ($emptyCoords);
+		if (defined $opts{'stats'}) {
+			my $newStatsFile = "$opts{'outdir'}/$opts{'prefix'}.elements.named.stats";
+			Print_named_stats($opts{'stats'}, $starships, $newStatsFile, $opts{'separator'});
+		
+			# Only store the coordinates associated with the 'reference' empty site
+			# structured: emptySites{contigID}{regionID}{emptyContig} = [emptyBegin, emptyEnd, strand, emptySiteID]
+			($emptyCoords) = Parse_empty_sites($newStatsFile);
+		}
+		
 
 	#######################################
 	#### IDENTIFY OVERLAPPING ELEMENTS ####
@@ -183,7 +203,16 @@ main: {
 
 		$datestring = localtime();
 		my $totalCount = $flankCount + $insertCount + $extendCount;
-		print "[$datestring] we have $flankCount elements with flank boundaries, $insertCount with insert boundaries, and $extendCount with extend boundaries, for a total of $totalCount elements\n";
+		print "[$datestring] we have ";
+		if ($flankCount > 0) {
+			print "$flankCount elements with flank boundaries, ";
+		} if ($insertCount > 0) {
+			print "$insertCount elements with insert boundaries, ";
+		} if ($extendCount > 0) {
+			print "$extendCount element with extend boundaries, ";
+		}
+		print "for a total of $totalCount elements\n";
+
 		print "[$datestring] found ".scalar(keys(%{$nestedRegions}))." elements nested/overlapping with ".scalar(keys(%{$targetRegions}))." other elements\n";
 		print "[$datestring] printing data..\n";
 
@@ -192,7 +221,7 @@ main: {
 		my $sequenceOutfile = "$opts{'outdir'}/$opts{'prefix'}.elements.fna";
 		Print_region_sequence($starships, $assemblies, $sequenceOutfile);
 	
-		# Print out Starship features of interest for record keeping (captainID, DR, TIR, length, levenshtein edit distance of DRs, TIRs, nested inside, contains nested)
+		# Print out Starship features of interest for record keeping (reference empty site details, captainID, DR, TIR, length, levenshtein edit distance of DRs, TIRs, nested inside, contains nested)
 		my $featureOutfile = "$opts{'outdir'}/$opts{'prefix'}.elements.feat";
 		Print_element_features($starships, $targetRegions, $nestedRegions, $assemblies, $emptyCoords, $flankCoords, $featureOutfile);
 	
@@ -610,11 +639,11 @@ sub Parse_nested_regions {
 }
 
 sub Identify_starships_by_boundary_features {
-	my ($bedFeatures) = @_;
-	# input structured: {contigID}{regionID}{featureID} = [begin, end, strand, tag, annotation]
+	my ($bedFeatures, $emptyCoords) = @_;
+	# input structured: bedFeatures{contigID}{regionID}{featureID} = [begin, end, strand, tag, annotation]
+	#					emptySites{contigID}{regionID}{emptyContig} = [emptyBegin, emptyEnd, strand, $flankCoverage]
 
 	my (%bonafideStarships, %captains);
-	my ($insertCount, $flankCount, $extendCount) = (0,0,0);
 	
 	# filter bound features in decreasing order of reliability to make sure only the most
 	# reliable class of boundary features are retained
@@ -633,9 +662,16 @@ sub Identify_starships_by_boundary_features {
 			# note that while flank and insert boundaries should flank the captain, extend boundaries may not
 			foreach my $featureID (keys %{$bedFeatures->{$contigID}->{$regionID}}) {
 				my ($featBegin, $featEnd, $featStrand, $featTag, $featAnn) = @{$bedFeatures->{$contigID}->{$regionID}->{$featureID}};
+				my ($seqAnn, $alignAnn);
+				if ($featAnn ne '.') {
+					($seqAnn, $alignAnn) = split(";", $featAnn);
+					$seqAnn =~ s/SEQ=//;
+					$alignAnn =~ s/ALIGNED=//;
+				}
+				
 				if ($featTag eq 'flank') {
 					push @{$flank{$featureID}}, $featBegin, $featEnd, $featStrand, $featTag, $featAnn;
-				} elsif (($featTag eq 'insert') && ($featAnn ne '.') && ($featAnn ne '')) {
+				} elsif (($featTag eq 'insert') && ($seqAnn ne '.') && ($seqAnn ne '')) {
 					push @{$insertDR{$featureID}}, $featBegin, $featEnd, $featStrand, $featTag, $featAnn;
 				} elsif ($featTag eq 'insert') {
 					push @{$insert{$featureID}}, $featBegin, $featEnd, $featStrand, $featTag, $featAnn;
@@ -646,37 +682,58 @@ sub Identify_starships_by_boundary_features {
 				}
 			}
 			
-			# pick boundary that is closest to captain, from boundaries with decreasing priority
+			
+			# bin the insert boundaries according to the number of aligned bases in the empty contig, prioritizing boundaries associated with empty contigs with greater flank alignment coverage
+			my (%insertDRhigh, %insertDRmed, %insertDRlow, %insertHigh, %insertMed, %insertLow); 
+			if (scalar keys %insertDR > 0) {
+				foreach my $featureID (keys %insertDR) {
+					my ($featBegin, $featEnd, $featStrand, $featTag, $featAnn) = @{$insertDR{$featureID}};
+					my ($seqAnn, $alignAnn) = split(";", $featAnn);
+					$alignAnn =~ s/ALIGNED=//;
+					if ($alignAnn >= $flankCovHigh) {
+						push @{$insertDRhigh{$featureID}}, $featBegin, $featEnd, $featStrand, $featTag, $featAnn;
+					} elsif ($alignAnn >= $flankCovMed) {
+						push @{$insertDRmed{$featureID}}, $featBegin, $featEnd, $featStrand, $featTag, $featAnn;
+					} elsif ($alignAnn >= $flankCovLow) {
+						push @{$insertDRlow{$featureID}}, $featBegin, $featEnd, $featStrand, $featTag, $featAnn;
+					}
+				}
+			} elsif (scalar keys %insert > 0) {
+				foreach my $featureID (keys %insert) {
+					my ($featBegin, $featEnd, $featStrand, $featTag, $featAnn) = @{$insert{$featureID}};
+					my ($seqAnn, $alignAnn) = split(";", $featAnn);
+					$alignAnn =~ s/ALIGNED=//;
+					if ($alignAnn >= $flankCovHigh) {
+						push @{$insertHigh{$featureID}}, $featBegin, $featEnd, $featStrand, $featTag, $featAnn;
+					} elsif ($alignAnn >= $flankCovMed) {
+						push @{$insertMed{$featureID}}, $featBegin, $featEnd, $featStrand, $featTag, $featAnn;
+					} elsif ($alignAnn >= $flankCovLow) {
+						push @{$insertLow{$featureID}}, $featBegin, $featEnd, $featStrand, $featTag, $featAnn;
+					}
+				}
+			}
+			
+			# pick boundary that is closest to captain, from boundaries with decreasing priority according to boundary type and aligned flank coverage
 			# insert boundaries with DR-like insertion sites will be prioritized over insert boundaries without DR-like insertion sites
 			# Sanity check: make sure that the boundaries flank the captain sequence (useful for potentially filtering out spurious extend boundaries)
 			my ($upstreamFeature, $downstreamFeature, @upInfo, @downInfo);
-			if (scalar keys %flank > 0) {
-				($upstreamFeature, $downstreamFeature) = Parse_closest_boundaries(\%flank, \%captains);
-				next if ($upstreamFeature eq 'NA');
-				@upInfo = @{$flank{$upstreamFeature}};
-				@downInfo = @{$flank{$downstreamFeature}};
-				$flankCount++;
-			} elsif (scalar keys %insertDR > 0) {
-				($upstreamFeature, $downstreamFeature) = Parse_closest_boundaries(\%insertDR, \%captains);
-				next if ($upstreamFeature eq 'NA');
-				@upInfo = @{$insertDR{$upstreamFeature}};
-				@downInfo = @{$insertDR{$downstreamFeature}};
-				$insertCount++;
-			} elsif (scalar keys %insert > 0) {
-				($upstreamFeature, $downstreamFeature) = Parse_closest_boundaries(\%insert, \%captains);
-				next if ($upstreamFeature eq 'NA');
-				@upInfo = @{$insert{$upstreamFeature}};
-				@downInfo = @{$insert{$downstreamFeature}};
-				$insertCount++;
-			} elsif (scalar keys %extend > 0) {
-				($upstreamFeature, $downstreamFeature) = Parse_closest_boundaries(\%extend, \%captains);
-				next if ($upstreamFeature eq 'NA');
-				@upInfo = @{$extend{$upstreamFeature}};
-				@downInfo = @{$extend{$downstreamFeature}};
-				$extendCount++;
-			} else { # skip this region if no boundaries
-				next;
-			}
+			my (@rankedBoundaryHashes) = (\%flank, \%insertDRhigh, \%insertDRmed, \%insertDRlow, \%insertHigh, \%insertMed, \%insertLow, \%extend); # order here reflects priority
+			
+			foreach my $boundaryHash (@rankedBoundaryHashes) {
+				next if (not defined $boundaryHash);
+				if (scalar keys %{$boundaryHash} > 0) {
+					($upstreamFeature, $downstreamFeature) = Parse_closest_boundaries($boundaryHash, \%captains);
+					next if ($upstreamFeature eq 'NA');
+					@upInfo = @{$boundaryHash->{$upstreamFeature}};
+					@downInfo = @{$boundaryHash->{$downstreamFeature}};
+					last;
+				} else {
+					next;
+				}
+			} 
+			
+			# will happen if no boundaries are ever found
+			next if (not defined $upstreamFeature);
 			
 			# identify the captain sequence associated with this closest boundary of highest priority
 			# load up the closest boundary features and their associated captain onto starship hash
@@ -704,7 +761,7 @@ sub Identify_starships_by_boundary_features {
 	
 		}
 	}
-	return(\%bonafideStarships, $insertCount, $flankCount, $extendCount);
+	return(\%bonafideStarships);
 }
 
 sub Parse_closest_boundaries {
@@ -794,8 +851,22 @@ sub Parse_empty_sites {
 		next if ($line =~ m/^#/);
 		chomp $line;
 		#acquire info
-		my ($elementID, $elementCaptainID, $elementContigID, $elementBegin, $elementEnd, $elementLength, $elementStrand, $emptySiteID, $emptyContigID, $emptyBegin, $emptyEnd, $emptyLength, $emptyStrand, $emptySiteSeq, $quality, $warnings) = split("\t", $line);
+		my ($elementID, $elementCaptainID, $elementContigID, $elementBegin, $elementEnd, $elementLength, $elementStrand, $emptySiteID, $emptyContigID, $emptyBegin, $emptyEnd, $emptyLength, $emptyStrand, $emptySiteSeq, $flankCoverage, $quality, $warnings) = split("\t", $line);
 		push @{$emptySites{$elementContigID}{$elementID}{$emptyContigID}}, $emptyBegin, $emptyEnd, $emptyStrand, $emptySiteID if ($quality eq 'ref'); # only load up empty info to display in .feat for the ref empty site
+	}
+	return(\%emptySites);
+}
+
+sub Parse_unnamed_empty_sites {
+	my ($statsfile) = @_;
+	my %emptySites;
+	open(my $IN, '<', $statsfile) or usage("\nError: could not open $statsfile for reading in sub Parse_unnamed_empty_sites\n");
+	while (my $line = <$IN>) {
+		next if ($line =~ m/^#/);
+		chomp $line;
+		#acquire info
+		my ($elementID, $elementCaptainID, $elementContigID, $elementBegin, $elementEnd, $elementLength, $elementStrand, $emptyContigID, $emptyBegin, $emptyEnd, $emptyLength, $emptyStrand, $emptySiteSeq, $flankCoverage, $quality, $warnings) = split("\t", $line);
+		push @{$emptySites{$elementContigID}{$elementID}{$emptyContigID}}, $emptyBegin, $emptyEnd, $emptyStrand, $flankCoverage if ($quality eq 'uniq'); # only load up empty info for the unique sites
 	}
 	return(\%emptySites);
 }
@@ -816,22 +887,24 @@ sub Parse_flank_empty {
 }
 
 sub Print_named_stats {
-	my ($statsFile, $newStatsFile, $SEP) = @_;
+	my ($statsFile, $starships, $newStatsFile, $SEP) = @_;
+	# structured: {contigID}{regionID}{featBegin}{captain gene/boundary feature} = [start, end, strand, tag, ann]
+
 	my ($OUT) = Open_FH($newStatsFile);
 	my $SEPprint = $SEP;
 	$SEPprint =~ s/\\//g;
 	open(my $IN, '<', $statsFile) or usage("\nError: could not open $statsFile for reading in sub Print_named_stats\n");
 	
 	my $header = <$IN>;
-	my ($headerelementID, $headerelementCaptainID, $headerelementContigID, $headerelementBegin, $headerelementEnd, $headerelementLength, $headerelementStrand, $headeremptyContigID, $headeremptyBegin, $headeremptyEnd, $headeremptyLength, $headeremptyStrand, $headeremptySiteSeq, $headerquality, $headerwarnings) = split("\t", $header);
-	print $OUT "$headerelementID\t$headerelementCaptainID\t$headerelementContigID\t$headerelementBegin\t$headerelementEnd\t$headerelementLength\t$headerelementStrand\temptySiteID\t$headeremptyContigID\t$headeremptyBegin\t$headeremptyEnd\t$headeremptyLength\t$headeremptyStrand\t$headeremptySiteSeq\t$headerquality\t$headerwarnings";
+	my ($headerelementID, $headerelementCaptainID, $headerelementContigID, $headerelementBegin, $headerelementEnd, $headerelementLength, $headerelementStrand, $headeremptyContigID, $headeremptyBegin, $headeremptyEnd, $headeremptyLength, $headeremptyStrand, $headeremptySiteSeq, $headerFlankCoverage, $headerquality, $headerwarnings) = split("\t", $header);
+	print $OUT "$headerelementID\t$headerelementCaptainID\t$headerelementContigID\t$headerelementBegin\t$headerelementEnd\t$headerelementLength\t$headerelementStrand\temptySiteID\t$headeremptyContigID\t$headeremptyBegin\t$headeremptyEnd\t$headeremptyLength\t$headeremptyStrand\t$headeremptySiteSeq\t$headerFlankCoverage\t$headerquality\t$headerwarnings";
 	
 	# first sort by emptyContigID and position
 	my %emptyContigs;
 	while (my $line = <$IN>) {
 		chomp $line;		
 		# acquire info
-		my ($elementID, $elementCaptainID, $elementContigID, $elementBegin, $elementEnd, $elementLength, $elementStrand, $emptyContigID, $emptyBegin, $emptyEnd, $emptyLength, $emptyStrand, $emptySiteSeq, $quality, $warnings) = split("\t", $line);
+		my ($elementID, $elementCaptainID, $elementContigID, $elementBegin, $elementEnd, $elementLength, $elementStrand, $emptyContigID, $emptyBegin, $emptyEnd, $emptyLength, $emptyStrand, $emptySiteSeq, $flankCov, $quality, $warnings) = split("\t", $line);
 		push @{$emptyContigs{$emptyContigID}{$emptyBegin}{$emptyEnd}}, $line;
 	}
 	
@@ -843,12 +916,31 @@ sub Print_named_stats {
 				my ($emptyGenome) = split/$SEP/, $emptyContigSort;
 				$siteCounter{$emptyGenome}++;
 				foreach my $line (@{$emptyContigs{$emptyContigSort}{$emptyBeginSort}{$emptyEndSort}}) {
-					my ($elementID, $elementCaptainID, $elementContigID, $elementBegin, $elementEnd, $elementLength, $elementStrand, $emptyContigID, $emptyBegin, $emptyEnd, $emptyLength, $emptyStrand, $emptySiteSeq, $quality, $warnings) = split("\t", $line);
-		
+					my ($elementID, $elementCaptainID, $elementContigID, $elementBegin, $elementEnd, $elementLength, $elementStrand, $emptyContigID, $emptyBegin, $emptyEnd, $emptyLength, $emptyStrand, $emptySiteSeq, $flankCov, $quality, $warnings) = split("\t", $line);
+					
+					# update quality if this is the reference empty site
+					if (exists $starships->{$elementContigID}->{$elementID}) {
+						foreach my $beginCoord (keys %{$starships->{$elementContigID}->{$elementID}}) {
+							foreach my $featureID (keys %{$starships->{$elementContigID}->{$elementID}->{$beginCoord}}) {
+								my ($featBegin, $featEnd, $featStrand, $featTag, $featAnn) = @{$starships->{$elementContigID}->{$elementID}->{$beginCoord}->{$featureID}};
+								next if ($featTag eq 'cap');
+								my ($null, $emptyContigTest, $direction) = split/\|/, $featureID;
+								
+								# first make sure that the ref empty contig associated with the element in the bed file matches this particular line in the stats file
+								if ($emptyContigID eq $emptyContigTest) {
+									my ($seqAnn, $alignAnn) = split(";", $featAnn);
+									$seqAnn =~ s/SEQ=//;
+									$alignAnn =~ s/ALIGNED=//;
+									$quality = 'ref' if (($emptySiteSeq eq $seqAnn )&& ($flankCov == $alignAnn)); # double check match by ensuring that the empty site sequnce and coverage match exactly
+								}
+							}
+						}
+					}
+
 					# print newly named info
 					my $siteNumber = sprintf("%03d", $siteCounter{$emptyGenome});
 					my $siteID = "${emptyGenome}${SEPprint}site${siteNumber}";
-					print $OUT "$elementID\t$elementCaptainID\t$elementContigID\t$elementBegin\t$elementEnd\t$elementLength\t$elementStrand\t$siteID\t$emptyContigID\t$emptyBegin\t$emptyEnd\t$emptyLength\t$emptyStrand\t$emptySiteSeq\t$quality\t$warnings\n";
+					print $OUT "$elementID\t$elementCaptainID\t$elementContigID\t$elementBegin\t$elementEnd\t$elementLength\t$elementStrand\t$siteID\t$emptyContigID\t$emptyBegin\t$emptyEnd\t$emptyLength\t$emptyStrand\t$emptySiteSeq\t$flankCov\t$quality\t$warnings\n";
 				}
 			}
 		}

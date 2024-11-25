@@ -48,11 +48,11 @@ sub Gff_sortable_gene_hash {
 	my (%allGenes);
 	open(my $IN, '<', $gffFile) or die("\nError: could not open $gffFile for reading\n");
 	my $datestring = localtime();
-	if ($TARGETFEAT eq 'all') {
-		print "[$datestring] parsing $gffFile for all features..\n";
-	} else {
-		print "[$datestring] parsing $gffFile for all $TARGETFEAT features and ignoring everything else..\n";
-	}
+# 	if ($TARGETFEAT eq 'all') {
+# 		print "[$datestring] parsing $gffFile for all features..\n";
+# 	} else {
+# 		print "[$datestring] parsing $gffFile for all $TARGETFEAT features and ignoring everything else..\n";
+# 	}
 	while (my $line = <$IN>) {
 		last if ($line =~ m/^##FASTA/);
 		next if ($line =~ m/^#/);
@@ -309,11 +309,11 @@ sub Gff_gene_hash {
 	die("Error: the GFF3 attribute field where features are named is not being passed correctly to sub GFF_hash\n") if (not defined $NAMEFIELD);
 	open (my $IN, '<', $gffFile) or die("Error: can't open $gffFile for reading\n");
 	my $datestring = localtime();
-	if ($TARGETFEAT eq 'all') {
-		print "[$datestring] parsing $gffFile for all features..\n";
-	} else {
-		print "[$datestring] parsing $gffFile for all $TARGETFEAT features and ignoring everything else..\n";
-	}
+# 	if ($TARGETFEAT eq 'all') {
+# 		print "[$datestring] parsing $gffFile for all features..\n";
+# 	} else {
+# 		print "[$datestring] parsing $gffFile for all $TARGETFEAT features and ignoring everything else..\n";
+# 	}
 	
 	while (my $line = <$IN>) {
 		chomp $line;

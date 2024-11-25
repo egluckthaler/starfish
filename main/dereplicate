@@ -129,7 +129,7 @@ main: {
 		
 		# read in relevant info for site metadata
 		# structured: $site2feat{$siteID}}, $start-stop, $contigID
-		# structured: $element2site{$elementID}{$siteID} = ref/alt
+		# structured: $element2site{$elementID}{$siteID} = ref/uniq/dup
 		my ($site2feat, $element2site) = Parse_site_features($opts{'stats'});
 
 		# read in element families
@@ -201,6 +201,9 @@ main: {
 		
 		# parse all genes in gff and ignore any gene that overlaps with a restricted coordinate, or that doesn't have an OG with signal
 		my (%contig2gene, %gene2pos);
+		$datestring = localtime();
+		print "[$datestring] parsing ".scalar(keys %{$ome2gff})." gff files for all $opts{targetFeat} features and ignoring everything else..\n";
+		
 		foreach my $ome (keys %{$ome2gff}) {
 			my ($gffInfo) = Gff_sortable_gene_hash($ome2gff->{$ome}, $opts{'nameField'}, $opts{'targetFeat'});
 			foreach my $contig (keys %{$gffInfo}) {
@@ -954,7 +957,7 @@ sub Dereplicate_elements_in_regions {
 						foreach my $emptySite (nsort keys %{$element2site->{$elementID}}) {
 							if (exists $region2ValidatedSites->{$regionID}->{$emptySite}) {
 								$refElementID = $elementID;
-								$altSiteID = $emptySite if ($element2site->{$elementID}->{$emptySite} eq 'alt');
+								$altSiteID = $emptySite if ($element2site->{$elementID}->{$emptySite} eq 'uniq');
 								$refSiteID = $emptySite if ($element2site->{$elementID}->{$emptySite} eq 'ref');
 								$flankElementLength = $elementLength;
 								$flankElementBoundary = 'flank';
@@ -966,7 +969,7 @@ sub Dereplicate_elements_in_regions {
 						foreach my $emptySite (nsort keys %{$element2site->{$elementID}}) {
 							if (exists $region2ValidatedSites->{$regionID}->{$emptySite}) {
 								$refElementID = $elementID;
-								$altSiteID = $emptySite if ($element2site->{$elementID}->{$emptySite} eq 'alt');
+								$altSiteID = $emptySite if ($element2site->{$elementID}->{$emptySite} eq 'uniq');
 								$refSiteID = $emptySite if ($element2site->{$elementID}->{$emptySite} eq 'ref');
 								$insertElementLength = $elementLength;
 								$insertElementBoundary = 'insert';
@@ -2121,7 +2124,7 @@ sub Parse_site_features {
 	while (my $line = <$IN>) {
 		chomp $line;
 		next if ($line =~ m/^#/);
-		my ($elementID, $elementCaptainID, $elementContigID, $elementBegin, $elementEnd, $elementLength, $elementStrand, $emptySiteID, $emptyContigID, $emptyBegin, $emptyEnd, $emptyLength, $emptyStrand, $emptySiteSeq, $quality, $warnings) = split/\t/, $line;
+		my ($elementID, $elementCaptainID, $elementContigID, $elementBegin, $elementEnd, $elementLength, $elementStrand, $emptySiteID, $emptyContigID, $emptyBegin, $emptyEnd, $emptyLength, $emptyStrand, $emptySiteSeq, $flankCoverage, $quality, $warnings) = split/\t/, $line;
 		push @{$site2feat{$emptySiteID}}, "${emptyBegin}-${emptyEnd}", $emptyContigID;
 		$element2site{$elementID}{$emptySiteID} = $quality;
 	}

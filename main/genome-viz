@@ -504,7 +504,7 @@ sub Parse_empty_sites {
 		next if ($line =~ m/^#/);
 		chomp $line;
 		#acquire info
-		my ($elementID, $elementCaptainID, $elementContigID, $elementBegin, $elementEnd, $elementLength, $elementStrand, $emptySiteID, $emptyContigID, $emptyBegin, $emptyEnd, $emptyLength, $emptyStrand, $emptySiteSeq, $quality, $warnings) = split("\t", $line);
+		my ($elementID, $elementCaptainID, $elementContigID, $elementBegin, $elementEnd, $elementLength, $elementStrand, $emptySiteID, $emptyContigID, $emptyBegin, $emptyEnd, $emptyLength, $emptyStrand, $emptySiteSeq, $quality, $flankCoverage, $warnings) = split("\t", $line);
 		my ($genomeID) = split/$SEP/, $emptyContigID;
 
 		# for targeted analyses

@@ -17,6 +17,7 @@ my $maxDR = 40;
 my $maxEmpty = 2000; 
 my $maxStarshipLengthFlag = 800000;
 my $minStarshipLengthFlag = 15000;
+my $maxFlankLength = 100000;
 
 sub usage {
 	my $message = shift;
@@ -51,7 +52,7 @@ Required, with defaults:
                            (in bp; default: 1000)
 --insertcov         FLT    max perc coverage of an insert in an empty contig.
                            (default: 0.25)
---flankcov          FLT    max perc coverage of an up- to a downstream region.
+--updowncov         FLT   max perc coverage of an up- to a downstream region.
                            (default: 0.25)
 --blastopts         STR    options to pass to blastn.
                            (default: '-task dc-megablast -evalue 0.0001
@@ -99,7 +100,7 @@ main: {
 		'pid=i',
 		'hsp=i',
 		'insertcov=s',
-		'flankcov=s',
+		'updowncov=s',
 		'separator|s=s',
 		'taxonomy|t=s',
 		'database|d=s',
@@ -126,7 +127,7 @@ maxEmptySiteLength     $maxEmpty
 maxElementLengthFlag   $maxStarshipLengthFlag
 minElementLengthFlag   $minStarshipLengthFlag
 maxInsertCoverage      $opts{insertcov}
-maxFlankCoverage       $opts{flankcov}
+maxUpDownCoverage      $opts{updowncov}
 blastn                 $opts{blastopts}
 nucmer                 $opts{nucmeropts}
 delta-filt             $opts{deltafilteropts}\n\n";
@@ -239,7 +240,7 @@ delta-filt             $opts{deltafilteropts}\n\n";
 		if (scalar(keys(%{$candidateBoundaries})) == 0) { die "\n\n[$datestring]: found 0 $opts{'idtag'} captains with candidate insertion site boundaries, exiting..\n";}
 		print "[$datestring] filtering out similar upstream and downstream flanks of insertion sites associated with ".scalar(keys(%{$candidateBoundaries}))." candidate $opts{'idtag'} captains..\n";
 
-		my ($emptyBoundaries) = Filter_empty_boundaries($emptyUpstreamHits, $emptyDownstreams, $opts{'separator'}, $opts{'length'}, $opts{'pid'}, $opts{'flankcov'},  $opts{'blastopts'}, $assemblies, $opts{'outdir'}, $opts{'prefix'});
+		my ($emptyBoundaries) = Filter_empty_boundaries($emptyUpstreamHits, $emptyDownstreams, $opts{'separator'}, $opts{'length'}, $opts{'pid'}, $opts{'updowncov'},  $opts{'blastopts'}, $assemblies, $opts{'outdir'}, $opts{'prefix'});
 
 		# Refine alignment coordinates for all candidates by aligning the contiguous empty
 		# sequence site (from upstreamBegin to DownstreamEnd) to the entire contiguous
@@ -273,10 +274,12 @@ delta-filt             $opts{deltafilteropts}\n\n";
 		# here, we do a quick mummer alignment of candidate elements back to the empty site contig
 		# we use mummer so that we can use the --mum option of best 1:1 alignments
 		# if >MAXCOV of the element is present on the contig, then remove it
+		# to decrease chance of filtering out true insertions that differ in position on the same homologous contig,
+		# restrict the coverage comparison to +/- $maxFlankLength bp
 		# only run if elementLength > min elementLengthFlag, because small elements may be filtered out if other DUF3435s exist on the contig
-		# @{$finalBoundaries{$capID}{$emptyContigID}}, $elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand;
+		# @{$finalBoundaries{$capID}{$emptyContigID}}, $elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand, $flankCoverage;
 		my ($finalBoundaries) = Insert_alignment_check($refinedBoundaries, $candidateCaptains, $assemblies, $opts{'separator'}, $opts{'pid'}, $opts{'insertcov'}, $opts{'nucmeropts'}, $opts{'deltafilteropts'}, $opts{'outdir'}, $opts{'prefix'}, $threads);
-
+		
 	##########################################
 	#### FILTER INSERT BOUNDARIES & PRINT ####
 	##########################################
@@ -284,8 +287,8 @@ delta-filt             $opts{deltafilteropts}\n\n";
 	if (scalar keys %{$finalBoundaries} > 0) { # were any new boundaries found?
 
 		# Identify possible element boundaries based on insertion sites
-		# if multiple DRs of the same length are associated with the exact same boundaries, pick the first observed one as the 'ref' to help cut down on redundancy in the .BED file
-		# structured:  $capBoundaries{$refGeneID}{associatedEmptyContig}, $elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand;
+		# if multiple DRs of the same length are associated with the exact same boundaries, pick the one with the best flank coverage as the 'ref' to help cut down on redundancy in the .BED file
+		# structured:  $capBoundaries{$refGeneID}{associatedEmptyContig}, $elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand, $flankCoverage;
 		my ($capBoundaries, $falsePositiveFlags) =  Remove_redundant_boundaries($bedFeatures, $finalBoundaries);
 
 		$datestring = localtime();		
@@ -293,7 +296,7 @@ delta-filt             $opts{deltafilteropts}\n\n";
 
 		# Identify and print the end coordinate of longest downstream region as the downstream boundary
 		# Print some summary statistics based on this script's specific findings
-		# Integrate candidate starship boundaries into the provided bed file
+		# Integrate all non-redundant candidate starship boundaries into the provided bed file
 		my $bedOutfile = "$opts{'outdir'}/$opts{'prefix'}.insert.bed";
 		my $statsOutfile = "$opts{'outdir'}/$opts{'prefix'}.insert.stats";
 		Print_bed($bedFeatures, $capBoundaries, $assemblies, $opts{'separator'}, $bedOutfile);
@@ -310,7 +313,7 @@ delta-filt             $opts{deltafilteropts}\n\n";
 
 sub Print_stats {
 	my ($captains,  $capBoundaries, $boundaries, $assemblies, $SEP, $outfile) = @_;
-	my ($OUT) = Open_FH($outfile, "#elementID\telementCaptainID\telementContigID\telementBegin\telementEnd\telementLength\telementStrand\temptyContigID\temptyBegin\temptyEnd\temptyLength\temptyStrand\temptySiteSeq\tquality\twarnings\n");
+	my ($OUT) = Open_FH($outfile, "#elementID\telementCaptainID\telementContigID\telementBegin\telementEnd\telementLength\telementStrand\temptyContigID\temptyBegin\temptyEnd\temptyLength\temptyStrand\temptySiteSeq\ttotalFlankAlignment\tquality\twarnings\n");
 	
 	foreach my $featureID (nsort keys %{$captains}) {
 		foreach my $refStarshipID (nsort keys %{$captains->{$featureID}}) { # all captains will be associated with at most 1 starship region
@@ -318,7 +321,7 @@ sub Print_stats {
 				foreach my $refContigID (nsort keys %{$captains->{$featureID}->{$refStarshipID}}) { # all starships will be associated with at most 1 contig
 					foreach my $emptyContigID (nsort keys %{$boundaries->{$featureID}}) {
 						my ($emptyGenome) = split/$SEP/, $emptyContigID;
-						my ($elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand) = @{$boundaries->{$featureID}->{$emptyContigID}};
+						my ($elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand, $flankCoverage) = @{$boundaries->{$featureID}->{$emptyContigID}};
 						my $elementLength = $elementEnd - $elementBegin + 1;
 						
 						my $emptyLength = $emptyEnd - $emptyBegin + 1;
@@ -330,8 +333,8 @@ sub Print_stats {
 						$warning .= " *empty site < $minDR bp" if ($emptyLength < $minDR);
 						$warning = '.' if (not defined $warning);
 						
-						my $quality = 'alt';
-						$quality = 'ref' if (exists $capBoundaries->{$featureID}->{$emptyContigID}); # was this chosen as a 'filtered' insertion site, according to its DR length, and printed to the .bed file?
+						my $quality = 'dup';
+						$quality = 'uniq' if (exists $capBoundaries->{$featureID}->{$emptyContigID}); # was this flagged as a non-redundant 'uniq' boundary and printed to the .bed file? or is it duplicated?
 						
 						# print out insertion site
 						#substr is 0 indexed, genomic coords are not
@@ -347,7 +350,7 @@ sub Print_stats {
 						($siteSeq) = Reverse_complement($siteSeq, $emptyContigID) if ($elementStrand ne $emptyStrand); # orient the insertion site sequence according to the element if the orientations of the element and empty site dont match
 						$siteSeq = lc($siteSeq);
 						$siteSeq = '.' if ((length($siteSeq) > $maxDR) || length($siteSeq) < $minDR);# Site sequences longer or shorter than this are not actually DRs, but probably just messy insertion sites
-						print $OUT "$refStarshipID\t$featureID\t$refContigID\t$elementBegin\t$elementEnd\t$elementLength\t$elementStrand\t$emptyContigID\t$emptyBegin\t$emptyEnd\t$emptyLength\t$emptyStrand\t$siteSeq\t$quality\t$warning\n";
+						print $OUT "$refStarshipID\t$featureID\t$refContigID\t$elementBegin\t$elementEnd\t$elementLength\t$elementStrand\t$emptyContigID\t$emptyBegin\t$emptyEnd\t$emptyLength\t$emptyStrand\t$siteSeq\t$flankCoverage\t$quality\t$warning\n";
 					}
 				} 
 			} else {
@@ -374,7 +377,7 @@ sub Print_bed {
 						foreach my $emptyContigID (keys %{$boundaries->{$featureID}}) {
 							my $beginFeatureID = "${featureID}|${emptyContigID}|up";
 							my $endFeatureID = "${featureID}|${emptyContigID}|down";
-							my ($elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand) = @{$boundaries->{$featureID}->{$emptyContigID}};
+							my ($elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand, $flankCoverage) = @{$boundaries->{$featureID}->{$emptyContigID}};
 							my $insertTag = 'insert';
 
 							#substr is 0 indexed, genomic coords are not
@@ -392,13 +395,15 @@ sub Print_bed {
 							($siteSeq) = Reverse_complement($siteSeq, $emptyContigID) if ($elementStrand ne $emptyStrand); # orient the insertion site sequence according to the element if the orientations of the element and empty site dont match
 							$siteSeq = lc($siteSeq);
 							$siteSeq = '.' if ((length($siteSeq) > $maxDR) || (length($siteSeq) < $minDR)); # Site sequences longer or shorter than this are not actually DRs, but probably just messy insertion sites
+
+							my $annotationFields = "SEQ=${siteSeq};ALIGNED=${flankCoverage};";
 							
 							if ($elementStrand eq '+') {
-								push @{$regions->{$contigID}->{$regionID}->{$elementEnd}->{$endFeatureID}}, $elementEnd, $elementEnd, $elementStrand, $insertTag, $siteSeq;
-								push @{$regions->{$contigID}->{$regionID}->{$elementBegin}->{$beginFeatureID}}, $elementBegin, $elementBegin, $elementStrand, $insertTag, $siteSeq;
+								push @{$regions->{$contigID}->{$regionID}->{$elementEnd}->{$endFeatureID}}, $elementEnd, $elementEnd, $elementStrand, $insertTag, $annotationFields;
+								push @{$regions->{$contigID}->{$regionID}->{$elementBegin}->{$beginFeatureID}}, $elementBegin, $elementBegin, $elementStrand, $insertTag, $annotationFields;
 							} elsif ($elementStrand eq '-') {
-								push @{$regions->{$contigID}->{$regionID}->{$elementBegin}->{$endFeatureID}}, $elementBegin, $elementBegin, $elementStrand, $insertTag, $siteSeq;
-								push @{$regions->{$contigID}->{$regionID}->{$elementEnd}->{$beginFeatureID}}, $elementEnd, $elementEnd, $elementStrand, $insertTag, $siteSeq;
+								push @{$regions->{$contigID}->{$regionID}->{$elementBegin}->{$endFeatureID}}, $elementBegin, $elementBegin, $elementStrand, $insertTag, $annotationFields;
+								push @{$regions->{$contigID}->{$regionID}->{$elementEnd}->{$beginFeatureID}}, $elementEnd, $elementEnd, $elementStrand, $insertTag, $annotationFields;
 							}
 						}
 					}
@@ -423,7 +428,7 @@ sub Print_bed {
 
 sub Insert_alignment_check {
 	my ($refinedBoundaries, $captains, $assemblies, $SEP, $minLinkID, $maxInsertCoverage, $nucmerDefaults, $deltafilterDefaults, $OUTDIR, $PREFIX, $THREADS) = @_;
-	# @{$finalBoundaries{$capID}{$emptyContigID}}, $elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand;
+	# @{$finalBoundaries{$capID}{$emptyContigID}}, $elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand, flankCoverage;
 
 	$THREADS = 1 if (not defined $THREADS);
 
@@ -448,6 +453,7 @@ sub Insert_alignment_check {
 		print "[$datestring] $alignment_check_search_checkpointFile exists, reading in ".scalar(keys(%{$pass}))." previous searches against ".scalar(keys(%emptyGenomes))." target genomes and continuing from checkpoint..\n";
 	}
 	
+	# structured: @{$refinedBoundaries->{$capID}->{$emptyContigID}}, $closestElementBegin, $closestElementEnd, $elementStrand, $closestEmptyBegin, $closestEmptyEnd, $emptyStrand;
 	foreach my $capID (keys %{$refinedBoundaries}) {
 		my ($capGenome) = split/$SEP/, $capID;
 		
@@ -464,35 +470,45 @@ sub Insert_alignment_check {
 			my ($emptyGenome) = split/$SEP/, $emptyContigID;
 			next if ($capGenome eq $emptyGenome); # shouldn't happen at this point, but sanity check
 					
-			my ($elementBegin, $elementEnd, $elementStrand) = @{$refinedBoundaries->{$capID}->{$emptyContigID}};
-			
-			my $elementLength = $elementEnd - $elementBegin + 1;
-			# print "$capID\t$starshipID\t$elementLength\n";
+			my ($elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand) = @{$refinedBoundaries->{$capID}->{$emptyContigID}};
 			
 			# give an automatic pass if elementLength is < minStarshipLengthFlag, because these small elements could easily be duplicated on the empty contig somewhere else
+			my $elementLength = $elementEnd - $elementBegin + 1;
 			if ($elementLength < $minStarshipLengthFlag) {
 				push @{$pass->{$capID}->{$emptyContigID}}, @{$refinedBoundaries->{$capID}->{$emptyContigID}};
 				next;
 			}
-			
+
 			# skip search if this empty contig has already been looked at and is stored in checkpoint
 			next if (exists $checkpointComparisons{$capID}{$emptyContigID});
 
-			my ($elementSeq) = substr($assemblies->{$capGenome}->{$capContigID}, $elementBegin - 1, $elementLength);
+			# some arithmetic to figure out the coordinates we should be comparing, making sure we dont exceed the boundaries of the contig
+
+			my $elementContigLength = length($assemblies->{$capGenome}->{$capContigID});
+			my $elementFlankBegin = $elementBegin - $maxFlankLength + 1;
+			$elementFlankBegin = 1 if ($elementFlankBegin < 1);
+			my $elementFlankEnd = $elementEnd + $maxFlankLength + 1;
+			$elementFlankEnd = $elementContigLength if ($elementFlankEnd > $elementContigLength);
+			my $elementFlankSeq = substr($assemblies->{$capGenome}->{$capContigID}, $elementFlankBegin, $elementFlankEnd - $elementFlankBegin);
+			
 			my $emptyContigLength = length($assemblies->{$emptyGenome}->{$emptyContigID});
-			my ($emptySeq) = substr($assemblies->{$emptyGenome}->{$emptyContigID}, 0, $emptyContigLength);
+			my $emptyFlankBegin = $emptyBegin - $maxFlankLength + 1;
+			$emptyFlankBegin = 1 if ($emptyFlankBegin < 1);
+			my $emptyFlankEnd = $emptyEnd + $maxFlankLength + 1;
+			$emptyFlankEnd = $emptyContigLength if ($emptyFlankEnd > $emptyContigLength);
+			my $emptyFlankSeq = substr($assemblies->{$emptyGenome}->{$emptyContigID}, $emptyFlankBegin, $emptyFlankEnd - $emptyFlankBegin);
 			
 			# name files
 			my $refFile = "$OUTDIR/mummerRef.$PREFIX.fa";
 			my $queFile = "$OUTDIR/mummerQue.$PREFIX.fa";
 
-			# print sequence of predicted element
+			# print sequence of predicted element plus flanks
 			my ($queOUT) = Open_FH($queFile);
-			print $queOUT ">$capID\n$elementSeq\n";
+			print $queOUT ">$capID\n$elementFlankSeq\n";
 
-			# print entire contig sequence of empty site
+			# print sequence of empty site plus flanks
 			my ($refOUT) = Open_FH($refFile);
-			print $refOUT ">$emptyContigID\n$emptySeq\n";
+			print $refOUT ">$emptyContigID\n$emptyFlankSeq\n";
 
 			# execute nucmer
 			# notice that empty contig is the 'ref', in nucmer parlance
@@ -516,14 +532,19 @@ sub Insert_alignment_check {
 			system("rm $refFile $queFile $outprefix.delta $outprefix.filt.delta");
 			
 			# return the percentage of the element found in the empty site contig
-			my ($elementCoverage) = Parse_nucmer_coverage_by_query($nucmerString, $elementLength);
+			
+			# need to adjust element coordinates based on the substr that we extracted
+			my $elementBeginMod = $elementBegin - $elementFlankBegin + 1;
+			my $elementEndMod = $elementEnd - $elementFlankBegin + 1;
+			
+			my ($elementCoverage, $flankCoverage) = Parse_nucmer_coverage_by_query($nucmerString, $elementBeginMod, $elementEndMod);
 			
 			# filter out this candidate insert if > maxInsertCoverage is found on the empty contig
 			# mark search as complete for checkpointing purposes
 			if ($elementCoverage > $maxInsertCoverage) {
-				push @{$pass->{$capID}->{$emptyContigID}}, 'NA','NA','NA','NA','NA','NA';
+				push @{$pass->{$capID}->{$emptyContigID}}, 'NA','NA','NA','NA','NA','NA','NA';
 			} else {
-				push @{$pass->{$capID}->{$emptyContigID}}, @{$refinedBoundaries->{$capID}->{$emptyContigID}};
+				push @{$pass->{$capID}->{$emptyContigID}}, @{$refinedBoundaries->{$capID}->{$emptyContigID}}, $flankCoverage;
 			}
 		}
 		# update checkpoint file after every captain search
@@ -541,21 +562,44 @@ sub Insert_alignment_check {
 			push @{$pass{$capID}{$emptyContigID}}, @{$pass->{$capID}->{$emptyContigID}} if ($check ne 'NA');
 		}
 	}
-	
+
 	return(\%pass);	
 }
 
 sub Parse_nucmer_coverage_by_query {
-	my ($nucmerString, $elementLength) = @_;
-	my $coverage = 0;
+	my ($nucmerString, $elementBegin, $elementEnd) = @_;
+	my $elementLength = $elementEnd - $elementBegin + 1;
+	
+	my ($elementCoverage, $flankCoverage) = (0, 0);
 	my @nucmerLines = split/\n/, $nucmerString;
 	foreach my $line (@nucmerLines) {
 		chomp $line;
 		my ($elementID, $elementHSPbegin, $elementHSPend, $emptyID, $emptyHSPbegin, $emptyHSPend) = split/\t/, $line;
-		$coverage += $elementHSPend - $elementHSPbegin + 1;
+		if ($elementHSPbegin > $elementHSPend) {
+			($elementHSPbegin, $elementHSPend) = ($elementHSPend, $elementHSPbegin); # ensure begin is always less than end
+		}
+		if ($emptyHSPbegin > $emptyHSPend) {
+			($emptyHSPbegin, $emptyHSPend) = ($emptyHSPend, $emptyHSPbegin); # ensure begin is always less than end
+		}
+		
+		if (($elementHSPbegin < $elementBegin) && ($elementHSPend >= $elementBegin)) {
+			$flankCoverage += $elementBegin - $elementHSPbegin + 1;
+			$elementCoverage += $elementHSPend - $elementBegin + 1;
+		} elsif (($elementHSPbegin < $elementBegin) && ($elementHSPend <= $elementBegin)) {
+			$flankCoverage += $elementHSPend - $elementHSPbegin + 1;
+		} elsif (($elementHSPbegin < $elementEnd) && ($elementHSPend >= $elementEnd)) {
+			$flankCoverage += $elementHSPend - $elementEnd + 1;
+			$elementCoverage += $elementEnd - $elementHSPbegin + 1;
+		} elsif (($elementHSPbegin >= $elementEnd) && ($elementHSPend > $elementEnd)) {
+			$flankCoverage += $elementHSPend - $elementHSPbegin + 1;
+		} elsif  (($elementHSPbegin >= $elementBegin) && ($elementHSPend <= $elementEnd)) {
+			$elementCoverage += $elementHSPend - $elementHSPbegin + 1;
+		}	
+		
 	}
-	my $percCoverage = sprintf("%.2f", $coverage / $elementLength);
-	return($percCoverage);
+	my $percElementCoverage = sprintf("%.2f", $elementCoverage / $elementLength);
+	
+	return($percElementCoverage, $flankCoverage);
 }
 
 sub  Remove_redundant_boundaries {
@@ -563,20 +607,26 @@ sub  Remove_redundant_boundaries {
 	my (%filtered, %observed);
 	foreach my $contigID (keys %{$starships}) {
 		foreach my $regionID (keys %{$starships->{$contigID}}) {
-			my %candidateDRsites;
 			foreach my $featureID (keys %{$starships->{$contigID}->{$regionID}}) {
 				if (exists $boundaries->{$featureID}) { # if this is a candidate captain sequence
 					foreach my $emptyContigID (keys %{$boundaries->{$featureID}}) {
-						my ($elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand) = @{$boundaries->{$featureID}->{$emptyContigID}};
+						my ($elementBegin, $elementEnd, $elementStrand, $emptyBegin, $emptyEnd, $emptyStrand, $flankCoverage) = @{$boundaries->{$featureID}->{$emptyContigID}};
 
  						# remove redundant insertion sites using observed hash
  						if (exists $observed{$featureID}{"$elementBegin\t$elementEnd"}) {
- 							# skip  boundaries that have already been observed
- 							next;
+ 							
+ 							# check if flank coverage is greater; if so, update it
+ 							if ($flankCoverage > $observed{$featureID}{"$elementBegin\t$elementEnd"}) {
+ 								delete $filtered{$featureID}; # we only want the best boundaries for this given feature
+ 								@{$filtered{$featureID}{$emptyContigID}} = @{$boundaries->{$featureID}->{$emptyContigID}};
+ 								$observed{$featureID}{"$elementBegin\t$elementEnd"} = $flankCoverage;
+ 							} else { 							
+ 								next;
+ 							}
  						} else {
  							next if ($featureID =~ m/^\s*$/); #ignore empty variables, sometimes this happens
- 							push @{$filtered{$featureID}{$emptyContigID}}, @{$boundaries->{$featureID}->{$emptyContigID}};
- 							$observed{$featureID}{"$elementBegin\t$elementEnd"} = 1;
+ 							@{$filtered{$featureID}{$emptyContigID}} = @{$boundaries->{$featureID}->{$emptyContigID}};
+ 							$observed{$featureID}{"$elementBegin\t$elementEnd"} = $flankCoverage;
  						} 
 						if ($elementEnd < $elementBegin) { # this should not happen because all coords should be in absolute 5'-3'
 							print "Warning: elementEnd=$elementEnd is larger than elementBegin=$elementBegin for $featureID in $regionID, this shouldn't be happening\n";
@@ -669,10 +719,9 @@ sub Refine_element_boundaries {
 					next if ($emptyBegin eq 'NA');
 
 					# skip search if this empty contig has already been looked at and is stored in checkpoint OR if region not actually located on contigs
-					if ((exists $checkpointComparisons{$capID}{$emptyContigID}) || ($elementBegin eq 'NA')) {
-						
-						# mark this search as complete anyways, for checkpointing purposes
-						# notice here we are pushing in NAs, so if this search already has an array of information, these NA will be tacked onto the end of the array and will thus be ignored when retrieving information from the array later on in this subroutine
+					if (exists $checkpointComparisons{$capID}{$emptyContigID}) {
+						next;
+					} elsif ($elementBegin eq 'NA') {
 						push @{$refinedBoundaries->{$capID}->{$emptyContigID}}, 'NA', 'NA', 'NA', 'NA', 'NA', 'NA';
 						next;
 					}	
@@ -715,14 +764,14 @@ sub Refine_element_boundaries {
 					my ($closestElementBegin, $closestElementEnd, $elementStrand, $closestEmptyBegin, $closestEmptyEnd, $emptyStrand) = @{$closestCoordinates->{$emptyContigID}};
 
 					if ($closestElementBegin eq 'NA') { # indicates an empty blast or a false positive insertion
-						push @{$refinedBoundaries->{$capID}->{$emptyContigID}}, 'NA', 'NA', 'NA', 'NA', 'NA', 'NA';
+						push @{$refinedBoundaries->{$capID}->{$emptyContigID}}, 'NA', 'NA', 'NA', 'NA', 'NA', 'NA' if (not exists $refinedBoundaries->{$capID}->{$emptyContigID});
 						next;
 					}
 					
 					my $elementLength = $closestElementEnd - $closestElementBegin + 1;
 					my $emptyLength = $closestEmptyEnd - $closestEmptyBegin + 1;
 					if (($elementLength < $MINDIST) || ($elementLength > $MAXDIST)) { # remove hits that are false positives, shouldn't exist at this point due to previous filtering but just a sanity check
-						push @{$refinedBoundaries->{$capID}->{$emptyContigID}}, 'NA', 'NA', 'NA', 'NA', 'NA', 'NA';
+						push @{$refinedBoundaries->{$capID}->{$emptyContigID}}, 'NA', 'NA', 'NA', 'NA', 'NA', 'NA' if (not exists $refinedBoundaries->{$capID}->{$emptyContigID});
 						next;
 					}
 
@@ -735,7 +784,7 @@ sub Refine_element_boundaries {
 						push @{$refinedBoundaries->{$capID}->{$emptyContigID}}, $closestElementBegin, $closestElementEnd, $elementStrand, $closestEmptyBegin, $closestEmptyEnd, $emptyStrand;
 					} else {
 						# mark this search as complete anyways, for checkpointing purposes
-						push @{$refinedBoundaries->{$capID}->{$emptyContigID}}, 'NA', 'NA', 'NA', 'NA', 'NA', 'NA';
+						push @{$refinedBoundaries->{$capID}->{$emptyContigID}}, 'NA', 'NA', 'NA', 'NA', 'NA', 'NA' if (not exists $refinedBoundaries->{$capID}->{$emptyContigID});
 					}
 				}
 
@@ -919,7 +968,7 @@ sub Parse_blast_coverage_by_query {
 
 sub Filter_empty_boundaries {
 	# only slightly different from sub Identify_element_boundaries to accomodate different hash structures
-	my ($emptyUpstreamHits, $emptyDownstreams, $SEP, $lengthRange, $minPercID, $maxFlankCoverage, $blastnDefaults, $assemblies, $OUTDIR, $PREFIX) = @_;
+	my ($emptyUpstreamHits, $emptyDownstreams, $SEP, $lengthRange, $minPercID, $maxUpDownCoverage, $blastnDefaults, $assemblies, $OUTDIR, $PREFIX) = @_;
 	my ($MINDIST, $MAXDIST) = split/-/, $lengthRange;
 	
 	# keep track of insertion sites that have already been searched
@@ -1014,7 +1063,7 @@ sub Filter_empty_boundaries {
 							# clean up
 							system("rm $upFile $downFile") if (-f $upFile);
 						
-							# filter out this candidate insert if flanking regions have > maxFlankCoverage
+							# filter out this candidate insert if flanking regions have > maxUpDownCoverage
 							my $upstreamLength = $upstreamemptyEnd - $upstreamemptyBegin + 1;
 							($coverageCheck) = Parse_blast_coverage_by_query($blastString, $upstreamLength);
 
@@ -1025,7 +1074,7 @@ sub Filter_empty_boundaries {
 						}
 												
 						# check coverage; remember, sites that have already been examined had coverageCheck transferred over from previous search
-						if ($coverageCheck > $maxFlankCoverage) {
+						if ($coverageCheck > $maxUpDownCoverage) {
 							# store search anyways, to prevent having to redo the search
 							push @{$candidates->{$capID}->{$starshipID}->{$capContigID}->{$emptyContigID}}, 'NA', 'NA', 'NA', 'NA', 'NA';
 						
@@ -1191,13 +1240,12 @@ sub Empty_downstream_search {
 					my ($downstreamBegin, $downstreamEnd, $downstreamStrand, $downstreamTag) = @{$emptyDownstreams->{$capID}->{$starshipID}->{$capContigID}->{$emptyContigID}};
 					
 					# skip search if this empty contig has already been looked at and is stored in checkpoint OR if region not actually located on contigs
-					if ((exists $checkpointComparisons{$capID}{$emptyContigID}) || ($downstreamBegin eq 'NA')) {
-						
-						# mark this search as complete anyways, for checkpointing purposes
-						# notice here we are pushing in NAs, so if this search already has an array of information, these NA will be tacked onto the end of the array and will thus be ignored when retrieving information from the array later on in this subroutine
+					if (exists $checkpointComparisons{$capID}{$emptyContigID}) {
+						next;
+					} elsif ($downstreamBegin eq 'NA') {
 						push @{$elementDownstreamHits->{$capID}->{$starshipID}->{$capContigID}->{$emptyContigID}}, 'NA', 'NA', 'NA', 'NA', 'NA';
 						next;
-					}	
+					}
 					
 					my $downstreamLength = $downstreamEnd - $downstreamBegin + 1;
 					$downstreamStrands{$emptyContigID} = $downstreamStrand;
@@ -1864,8 +1912,8 @@ sub Opts_check {
 	if (not defined $opts->{'insertcov'}) {
 		$opts->{'insertcov'} = '0.25';
 	}
-	if (not defined $opts->{'flankcov'}) {
-		$opts->{'flankcov'} = '0.25';
+	if (not defined $opts->{'updowncov'}) {
+		$opts->{'updowncov'} = '0.25';
 	}
 }
 

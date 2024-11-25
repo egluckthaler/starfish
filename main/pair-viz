@@ -38,8 +38,6 @@ Required, with defaults:
                            (default: 100000)
 
 Required, if --mode all\/pairwise and --type empty:
--f, --flank         FILE   singleDR.stats file.
-                           (output by starfish flank)
 -S, --stats         FILE   named.stats file.
                            (output by starfish summarize)
 
@@ -68,6 +66,10 @@ Required if --aligner nucmer, with defaults:
                            (without leading '#'; default: b3b1b2)
 --color4            HEX    hexcode of elements.
                            (without leading '#'; default: ff264e)
+
+Required, if --mode all\/pairwise, --type empty and flank boundaries present:
+-f, --flank         FILE   singleDR.stats file.
+                           (output by starfish flank)
 
 Optional:
 --tags                     print gene tags in the BED file as gene labels.
@@ -150,7 +152,8 @@ mafft                  $opts{'mafftopts'}\n\n";}
 
 		# Parse empty sites for elements with flank boundaries (located in singleDR.stats file)
 		# structured: {capID} = emptyContigID
-		my ($flankCoords) = Parse_flank_empty($opts{'flank'}) if (defined $opts{'flank'});
+		my ($flankCoords);
+		($flankCoords) = Parse_flank_empty($opts{'flank'}) if (defined $opts{'flank'});
 		
 		# Filter coords to retain only 'insert' and 'flank' element
 		# (insert elements consist of elements with either flank or insert boundaries)
@@ -160,7 +163,7 @@ mafft                  $opts{'mafftopts'}\n\n";}
 		my ($insertStarshipCoords, $extendStarshipCoords) = Parse_element_comparisons($starshipFeatures, $starshipCoordsTemp, $flankCoords);
 
 		# Parse the coordinates of all empty sites associated with Starship insertions
-		# structured: emptySites{contigID}{regionID}{emptyContig} = [emptyBegin, emptyEnd, strand, emptySiteID]
+		# structured: emptySites{contigID}{regionID}{emptyContig} = [emptyBegin, emptyEnd, strand, emptySiteID, quality]
 		my ($emptyCoords) = Parse_insertion_sites($opts{'stats'}) if (defined $opts{'stats'});
 
 		# Load up only the assembly sequences into a single hash
@@ -182,6 +185,8 @@ mafft                  $opts{'mafftopts'}\n\n";}
 		my $refID = $opts{'sub'} if (defined $opts{'sub'});
 		my $queID = $opts{'que'} if (defined $opts{'que'});
 		if (($opts{'mode'} eq 'all') || ($opts{'mode'} eq 'pairwise')) {
+			
+			# in mode all and empty, the reference empty site coordinates based on the reference boundaries will be prioritized for visualization
 			($comparisons) = Parse_pairwise_comparisons($insertStarshipCoords, $extendStarshipCoords, $emptyCoords, $opts{'upstream'}, $opts{'downstream'}, $id2sequence, $opts{'mode'}, $opts{'type'}, $refID, $queID);
 			usage("\n[$datestring] could not find the requested subject $refID and query $queID.. are you sure they are in the provided --stats and --bed files?\n") if (scalar keys %{$comparisons} == 0);
 		} elsif ($opts{'mode'} eq 'regions') {
@@ -771,7 +776,9 @@ sub Parse_pairwise_comparisons {
 							print "[$datestring] warning: cannot retrieve empty site coordinates on $refContigID for $queStarshipID, skipping\n";
 							next;
 						}
-						my ($refBegin, $refEnd, $refStrand) = @{$emptyCoords->{$queContigID}->{$queStarshipID}->{$refContigID}};
+						my ($refBegin, $refEnd, $refStrand, $emptySiteID, $quality) = @{$emptyCoords->{$queContigID}->{$queStarshipID}->{$refContigID}};
+						next if ($quality ne 'ref'); # ensure that only the empty site associated with the reference boundaries is selected for visualization purposes with the all and empty options
+						
 						$refBegin = $refBegin - $upstreamMOD;
 						$refBegin = 1 if ($refBegin < 1);
 						$refEnd = $refEnd + $downstreamMOD;
@@ -856,8 +863,8 @@ sub Parse_insertion_sites {
 		next if ($line =~ m/^#/);
 		chomp $line;
 		#acquire info
-		my ($elementID, $elementCaptainID, $elementContigID, $elementBegin, $elementEnd, $elementLength, $elementStrand, $emptySiteID, $emptyContigID, $emptyBegin, $emptyEnd, $emptyLength, $emptyStrand, $emptySiteSeq, $quality, $warnings) = split("\t", $line);
-		push @{$emptySites{$elementContigID}{$elementID}{$emptyContigID}}, $emptyBegin, $emptyEnd, $emptyStrand, $emptySiteID;
+		my ($elementID, $elementCaptainID, $elementContigID, $elementBegin, $elementEnd, $elementLength, $elementStrand, $emptySiteID, $emptyContigID, $emptyBegin, $emptyEnd, $emptyLength, $emptyStrand, $emptySiteSeq, $flankCoverage, $quality, $warnings) = split("\t", $line);
+		push @{$emptySites{$elementContigID}{$elementID}{$emptyContigID}}, $emptyBegin, $emptyEnd, $emptyStrand, $emptySiteID, $quality;
 	}
 	return(\%emptySites);
 }
@@ -878,10 +885,17 @@ sub Parse_element_comparisons {
 					$element2cap{$starshipID} = $capID;
 				} elsif ($tag =~ m/^flank$/) {
 					my ($capID) = split/\|/, $targetFeatureID;
-					my $emptyContigID = $flankCoords->{$capID};
-					$cap2empty{$capID} = $emptyContigID;
-					$element2contig{$starshipID} = $contigID;
-					$element2cap{$starshipID} = $capID;
+					
+					if (exists $flankCoords->{$capID}) {
+						my $emptyContigID = $flankCoords->{$capID};
+						$cap2empty{$capID} = $emptyContigID;
+						$element2contig{$starshipID} = $contigID;
+						$element2cap{$starshipID} = $capID;
+					} else {
+						my $datestring = localtime();
+						print "[$datestring] warning: cannot find coordinates of element with flank boundaries and captain $capID, you need to provide a singleDR.stats file\n";
+						die;
+					}
 				} elsif ($tag =~ m/^extend$/) {
 					my ($capID, $extendRefElement) = split/\|/, $targetFeatureID;
 					$cap2extend{$capID} = $extendRefElement;
@@ -941,13 +955,6 @@ sub Opts_check {
 	} elsif ($opts->{'type'} !~ m/^element$|^empty$/) {
 		usage("\nError: unrecognized option for --type, must be either 'element' or 'empty'\n");
 	} 
-	if (($opts->{'type'} eq 'empty') && ($opts->{'mode'} eq 'all')) {
-		if (not defined $opts->{'flank'}) {
-			usage("\nError: please provide a file to --flank\n");
-		} elsif (! -f $opts->{'flank'}) {
-			usage("\nError: the file provided to --flank does not exist\n");
-		}
-	}
 	if (($opts->{'type'} eq 'element') && ($opts->{'mode'} eq 'pairwise')) {
 		if ((not defined $opts->{'sub'}) || (not defined $opts->{'que'} )) {
 			usage("\nError: --type element with --mode pairwise requires both --sub and --que to be specified\n");
@@ -981,8 +988,6 @@ sub Opts_check {
 			if ($opts->{'flank'} !~ m/\.singleDR\.stats$/) {
 				usage("\nError: the file provided to --flank does not end in .singleDR.stats.. it should if it was output by starfish flank\n")
 			}
-		} else {
-			usage("\nError: please provide a file to --flank\n");
 		}
 	}
 	if (not defined $opts->{'aligner'}) {
