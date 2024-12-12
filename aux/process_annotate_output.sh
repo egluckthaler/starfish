@@ -89,16 +89,16 @@ while IFS=$'\t' read -r genome_code rest_of_line || [ -n "$genome_code" ]; do
     dir_name="${ANALYSIS_PREFIX}/$genome_code"
 
     # Check for 'filt_intersect' file first
-    if [ -f "${dir_name}/${genome_code}.${ANALYSIS_PREFIX}.filt_intersect.ids" ]; then
-        cat "${dir_name}/${genome_code}.${ANALYSIS_PREFIX}.filt_intersect.ids" >> "$output_ids"
-        cat "${dir_name}/${genome_code}.${ANALYSIS_PREFIX}.filt_intersect.fas" >> "$output_fas"
-        cat "${dir_name}/${genome_code}.${ANALYSIS_PREFIX}.filt_intersect.gff" >> "$output_gff"
+	if ls "${dir_name}/${genome_code}"*".filt_intersect.ids" &> /dev/null; then
+        cat "${dir_name}/${genome_code}"*"filt_intersect.ids" >> "$output_ids"
+        cat "${dir_name}/${genome_code}"*"filt_intersect.fas" >> "$output_fas"
+        cat "${dir_name}/${genome_code}"*"filt_intersect.gff" >> "$output_gff"
         ((count_filt_intersect++))
-    elif [ -f "${dir_name}/${genome_code}.${ANALYSIS_PREFIX}.filt.ids" ]; then
+    elif ls "${dir_name}/${genome_code}"*".filt.ids" &> /dev/null; then
         # If 'filt_intersect' doesn't exist, use 'filt' file
-        cat "${dir_name}/${genome_code}.${ANALYSIS_PREFIX}.filt.ids" >> "$output_ids"
-        cat "${dir_name}/${genome_code}.${ANALYSIS_PREFIX}.filt.fas" >> "$output_fas"
-        cat "${dir_name}/${genome_code}.${ANALYSIS_PREFIX}.filt.gff" >> "$output_gff"
+        cat "${dir_name}/${genome_code}"*"filt.ids" >> "$output_ids"
+        cat "${dir_name}/${genome_code}"*"filt.fas" >> "$output_fas"
+        cat "${dir_name}/${genome_code}"*"filt.gff" >> "$output_gff"
         ((count_filt++))
     else
         echo "No 'filt_intersect' or 'filt' file found for genome code: $genome_code"
